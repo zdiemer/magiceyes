@@ -71,7 +71,7 @@ static void pipe_put(const uint8_t *p, uint32_t n) {
    (next). Threads run until they block (futex/sigsuspend) or yield; a blocking
    syscall pre-sets its own wake-time R0, then switches away. intr_cb skips its
    R0 write when a switch happened (the new thread's R0 is already correct). */
-enum { TH_FREE = 0, TH_RUN, TH_BLOCKED, TH_DEAD };
+enum { TH_FREE = 0, TH_RUN, TH_BLOCKED, TH_SLEEPING, TH_DEAD };
 enum { BLK_NONE = 0, BLK_FUTEX, BLK_SIG };
 #define MAXTH 32
 struct thread {
@@ -85,6 +85,7 @@ struct thread {
     int susp_active;
     int has_sigsave;        /* a signal handler is running; sigsave holds the resume regs */
     uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
+    double wake_deadline;   /* TH_SLEEPING: host time at which to wake (nanosleep) */
 };
 static struct thread g_th[MAXTH];
 static int g_nth = 0, g_cur = 0, g_next_tid = 100;  /* main != pid 1 (LinuxThreads orphan check) */
@@ -194,14 +195,36 @@ static void gwrite(uint32_t reg, uint32_t v) { uc_reg_write(g_uc, reg, &v); }
 
 static void deliver_signals(void);  /* defined below; runs a pending handler */
 
-/* pick the next runnable thread (round-robin from g_cur), or -1 if none. */
+static double host_now(void);   /* defined below; wall-clock seconds */
+/* wake any TH_SLEEPING thread whose nanosleep deadline has passed. */
+static void wake_sleepers(void) {
+    double now = host_now();
+    for (int i = 0; i < g_nth; i++)
+        if (g_th[i].state == TH_SLEEPING && now >= g_th[i].wake_deadline)
+            g_th[i].state = TH_RUN;
+}
+/* pick the next runnable thread (round-robin from g_cur), or -1 if none. When only
+   sleeping threads remain, really sleep until the earliest deadline + wake it — this
+   paces the game to real time (frame cap). */
 static int sched_pick(void) {
     if (g_forked) return g_th[g_cur].state == TH_RUN ? g_cur : -1;  /* child is alone */
+    wake_sleepers();
     for (int i = 1; i <= g_nth; i++) {
         int j = (g_cur + i) % g_nth;
         if (g_th[j].state == TH_RUN) return j;
     }
-    return (g_th[g_cur].state == TH_RUN) ? g_cur : -1;
+    if (g_th[g_cur].state == TH_RUN) return g_cur;
+    int best = -1; double bestt = 0;
+    for (int i = 0; i < g_nth; i++)
+        if (g_th[i].state == TH_SLEEPING && (best < 0 || g_th[i].wake_deadline < bestt))
+            { best = i; bestt = g_th[i].wake_deadline; }
+    if (best >= 0) {
+        double dt = bestt - host_now();
+        if (dt > 0) { if (dt > 0.1) dt = 0.1; usleep((useconds_t)(dt * 1e6)); }
+        g_th[best].state = TH_RUN;
+        return best;
+    }
+    return -1;
 }
 /* switch the live CPU to thread j (saving the current one). Sets g_switched. */
 static void sched_switch_to(int j) {
@@ -731,9 +754,17 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (rev) ready++;
         }
         if (ready) return ready;
-        /* nothing ready: yield so other threads run, then report timeout (0) */
+        int tmo = (int)a2;
+        if (tmo == 0) return 0;            /* non-blocking poll */
+        /* nothing ready: sleep on the timeout (capped) so a polling idle thread (e.g.
+           the LinuxThreads manager's 2s poll) doesn't spin and starve everyone. */
+        double dur = (tmo < 0) ? 0.1 : (double)tmo / 1000.0;
+        if (dur > 0.1) dur = 0.1;
+        gwrite(UC_ARM_REG_R0, 0);
+        g_th[g_cur].wake_deadline = host_now() + dur;
+        g_th[g_cur].state = TH_SLEEPING;
         int j = sched_pick();
-        if (j != g_cur && j >= 0) { gwrite(UC_ARM_REG_R0, 0); sched_switch_to(j); }
+        if (j >= 0 && j != g_cur) sched_switch_to(j);
         return 0;
     }
     case 240: { /* futex(uaddr, op, val, ...) */
@@ -801,12 +832,13 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (g_fb_guest) present_guest(g_fb_guest);  /* frame boundary: refresh screen */
         if (a1) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a1, z, 8); }
         gwrite(UC_ARM_REG_R0, 0);
-        int j = sched_pick();
-        if (j != g_cur && j >= 0) { sched_switch_to(j); return 0; }
         uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
-        unsigned us = ts[0] * 1000000u + ts[1] / 1000u;
-        if (us > 5000) us = 5000;          /* cap to stay responsive */
-        if (us) usleep(us);
+        double dur = (double)ts[0] + (double)ts[1] * 1e-9;
+        if (dur > 0.1) dur = 0.1;          /* cap a single sleep */
+        g_th[g_cur].wake_deadline = host_now() + dur;
+        g_th[g_cur].state = TH_SLEEPING;   /* sched_pick runs others / real-sleeps to deadline */
+        int j = sched_pick();
+        if (j >= 0 && j != g_cur) sched_switch_to(j);
         return 0;
     }
     case 78: {  /* gettimeofday(tv, tz) */
