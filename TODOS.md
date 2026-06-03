@@ -6,26 +6,44 @@ its own repo.
 
 ## In progress
 
-### GP2X F100/F200 needs syscall-level emulation (Unicorn backend or qemu patch)
-FINDING (confirmed): GP2X `.gpe` are **GPEComp** self-extractors (rlyeh, UCL) — the
-tiny stub links libc, decompresses the real game to `/mnt/tmp/<name>_tmp`, and execs
-it. The **real decompressed binary is FULLY STATICALLY LINKED** (Payback: static 10MB
-EABI; Knight Lore same). A static binary makes **raw `svc` syscalls** with no dynamic
-linker — so **`LD_PRELOAD` interception is impossible** (can't hook libSDL *or* libc).
-magiceyes' entire current approach (replace the dynamic `libSDL`) therefore CANNOT
-run GP2X games. (The Wiz worked only because its commercial titles dynamically linked
-`libSDL`.)
+### GP2X via the Unicorn backend — scheduler DONE, chasing a post-fork crash
+The Unicorn engine (`host/unicorn/me_unicorn.c`) is the chosen path (we own every
+syscall, so we fake GP2X hardware for static binaries, and it's the same work that
+delivers the native cross-platform binary). Status on **Payback** (static GP2X game):
 
-Two ways to intercept a static binary's `/dev/fb0` + `/dev/mem` (MMSP2) + `/dev/gpio`
-+ `/dev/dsp` at the **syscall** layer:
-- **Unicorn backend (recommended):** the roadmap host/ engine (Unicorn ARM CPU + our
-  own ELF loader + Linux-syscall shim). We own every syscall, so we fake GP2X hardware
-  for ANY binary, static or dynamic — and it's the same work that delivers the native
-  cross-platform binary. **GP2X support and cross-platform converge here.** Also lets
-  us un-GPEComp in-process (no `/mnt/tmp`+exec dance).
-- **Patch qemu-user:** ~a few hundred lines in qemu's `do_openat`/`do_mmap`/`do_ioctl`
-  to special-case the GP2X device paths/addresses → our shm framebuffer. Faster but
-  Linux-only and ships a forked qemu.
+WORKING:
+- ELF load + run; OABI/EABI svc; brk/mmap (file-backed; power-of-two allocs aligned to
+  their size so 2MB thread stacks are 2MB-aligned); /dev/{fb,mem,gpio,dsp,mixer} fds;
+  MMSP2 0xC0000000 reg-write hook → shm framebuffer.
+- **Synchronous fork** (snapshot mem+ctx, run child in-line to exit, restore parent).
+- **Cooperative thread scheduler**: clone(CLONE_VM) via uc_context switch, futex
+  WAIT/WAKE, sched_yield, thread exit (CLONE_CHILD_CLEARTID), per-thread TLS, per-thread
+  pid/ppid, per-block preemption (so CPU-bound threads don't starve).
+- **Signals**: rt_sigaction record, rt_sigprocmask mask, kill/tkill/tgkill, delivery
+  (handler frame on live regs + kuser-page rt_sigreturn trampoline), sigsuspend temp
+  mask. → The **full glibc LinuxThreads handshake runs end-to-end**: main clones the
+  manager, manager clones the worker, worker restarts main via SIGRTMIN(32) and main's
+  handler runs. Payback then proceeds through its loader fork+exec into the game.
+
+NEXT (the current blocker):
+- After the post-fork popen-style helper (child `execve`s an external tool, fails),
+  the parent crashes: a fake pipe fd value (PIPEFD_R=2000=0x7d0) is **dereferenced as a
+  pointer**, then `UC_ERR_WRITE_PROT` at pc=0x1ff000 (control flow off the rails).
+  Suspect popen/fdopen on our fake pipe fds, or a fork-restore gap. Debug by
+  disassembling around the open(`0x2a91a8`)/time site + the caller of pc 0x1ff000.
+- `execve`(11) unimplemented (the helper the child runs); make it a clean failure or
+  implement it (it ELF-loads + resets the process — interacts with fork/threads).
+- Multiple pipes: the in-engine pipe is a single pair (PIPEFD_R/W). LinuxThreads' manager
+  pipe + a popen pipe coexisting will collide → needs a small pipe table.
+- Then: input (GPIO regs ← shm), audio (/dev/dsp → shm ring), proper double-buffer flip.
+
+Decompress note: run the GPEComp stub under qemu (binfmt + QEMU_LD_PREFIX) and recover
+`/mnt/tmp/<name>_tmp` via an inode pin (`tools/scratch/gp2x/decomp_payback.sh` in romnas)
+— the stub `unlink`s the temp after its exec fails; an fd opened first survives it.
+TODO: fold this into an offline un-GPEComp (UCL) tool so there's no qemu/`/mnt/tmp` dance.
+
+Alternative considered: patch qemu-user's do_openat/do_mmap/do_ioctl for the GP2X
+devices. Faster but Linux-only + ships a forked qemu — rejected in favor of the engine.
 
 Other GP2X notes (still relevant once syscalls are owned):
 - GPEComp: offline **un-GPEComp tool** in tools/ (UCL decompress) so we get the raw
