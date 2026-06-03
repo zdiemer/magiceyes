@@ -34,19 +34,35 @@ munmap (uc_mem_unmap) so the mmap/munmap churn doesn't overflow Unicorn's region
 table; nanosleep yields to other threads. **Payback now runs its full game loop
 across both threads and renders the loading screen.**
 
-NEXT (the current blocker — audio init / music scan):
-- Payback sits at "Accessing data..." in its audio+music loop: it opens /dev/dsp every
-  frame, fires ~14k OSS ioctls, and re-mmaps Data/Music/*.ama. Our ioctl returns 0 for
-  everything incl SNDCTL_DSP_GETOSPACE → the game sees "no audio buffer space" and never
-  finishes. Implement real **/dev/dsp OSS**: SNDCTL_DSP_{SPEED,SETFMT,STEREO,GETOSPACE,
-  GETBLKSIZE,RESET,SYNC} (return sane buffer space) + route writes to the shm audio ring
-  (reuse the Wiz viewer audio path). Verify the .ama mmap returns correct header bytes.
+DONE since: /dev/dsp OSS audio (SNDCTL_DSP_* + GETOSPACE real free space + writes ->
+shm aring with a real-time drain). This unblocked audio-init; Payback then loaded real
+game data (Config/Payback.ini, Backgrounds/night.raw, Maps/2.lmr) and reached its
+rendering code.
+
+NEXT (the current blocker — MMSP2 video emulation, "the hard part"):
+Payback freezes (frame_seq plateaus ~1018) in its video/blit path because MMSP2
+register READS return 0, so the game's video pointers are garbage:
+- 0x24a34: a software pixel-convert loop (RGB565, 76800px = 320x240) reads a source
+  buffer whose pointer (r5 = *(*0x25388)) is ~0x1000 — junk.
+- 0xad3b8: writes an MLC register via base `*(*0xad428)` which is 0, so it stores to
+  absolute offset 0x2900/0x2912 (MLC_STL_* region) instead of base+offset.
+Root cause: our /dev/mem MMSP2 region (0xC0000000) returns 0 on reads. The game reads
+MMSP2 regs (e.g. MLC_STL_OADRL/H = the framebuffer phys addr, MLC control/status) to
+discover its framebuffer + video buffers; reading 0 -> bad pointers -> stall.
+Fix = emulate the MMSP2 register FILE on reads (not just hook OADR writes): back the
+0xC0000000 region with sane register values — fb base regs return a valid framebuffer
+phys that maps (via the /dev/mem or /dev/fb mmap) to a real RAM buffer the game then
+software-blits into; MLC mode/enable/status regs return plausible values. Map from the
+paeryn SDL register set + the staged firmware/kernel source. Likely also the **2D
+blitter** (MES/MLC blit regs) for hardware blits. This is the big remaining phase.
+Tactic: log every MMSP2 read offset Payback makes (add a UC_HOOK_MEM_READ on the region)
+to learn exactly which registers it queries + the expected semantics.
+
+LATER:
 - `execve`(11) unimplemented — Payback's `system("/bin/sh ... exit 0")` helper; harmless
-  failure for now (child exits 127, parent reaps it), but make it a clean -ENOSYS/clean
-  child exit rather than relying on the fork path.
-- Single in-engine pipe pair (PIPEFD_R/W) — fine so far (only LinuxThreads' manager pipe
-  seen); add a small pipe table if a popen pipe ever coexists.
-- Then: input (GPIO regs ← shm buttons), proper double-buffer flip for OADR titles.
+  (child exits 127, parent reaps it), but make it a clean -ENOSYS path.
+- Single in-engine pipe pair (PIPEFD_R/W) — add a pipe table if a popen pipe coexists.
+- Input (GPIO regs <- shm buttons); proper double-buffer flip for OADR titles.
 
 Decompress note: run the GPEComp stub under qemu (binfmt + QEMU_LD_PREFIX) and recover
 `/mnt/tmp/<name>_tmp` via an inode pin (`tools/scratch/gp2x/decomp_payback.sh` in romnas)

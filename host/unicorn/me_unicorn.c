@@ -425,6 +425,23 @@ static void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         fprintf(stderr, "  MMSP2 flip -> phys=%08x\n", phys); }
     present_fb(phys);
 }
+/* Serve MMSP2 register reads. The free-running microsecond timer (TCOUNT @ 0x0a00)
+   must advance or the game's timing/frame loops spin forever. */
+static void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
+                          int size, int64_t value, void *user) {
+    (void)type; (void)size; (void)value; (void)user;
+    if (!g_mmsp2_guest) return;
+    uint32_t off = (uint32_t)addr - g_mmsp2_guest;
+    if (off == 0x0a00) {           /* TCOUNT: 1us free-running counter */
+        static double t0 = 0; struct timeval tv; gettimeofday(&tv, NULL);
+        double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        if (t0 == 0) t0 = now;
+        uint32_t us = (uint32_t)((now - t0) * 1e6);
+        uc_mem_write(uc, g_mmsp2_guest + 0x0a00, &us, 4);
+        return;
+    }
+    if (g_trace) { static int n = 0; if (n++ < 200) fprintf(stderr, "  MMSP2 RD %04x\n", off); }
+}
 
 #define GMAP_FIXED 0x10u
 #define GMAP_ANON  0x20u
@@ -462,8 +479,10 @@ static long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint
         record_memmap(phys, at, len);
         if (phys == 0xC0000000u) {
             g_mmsp2_guest = at;
-            static uc_hook hh;
+            static uc_hook hh, hr;
             uc_hook_add(g_uc, &hh, UC_HOOK_MEM_WRITE, mmsp2_write_cb, NULL,
+                        at, at + len - 1);
+            uc_hook_add(g_uc, &hr, UC_HOOK_MEM_READ, mmsp2_read_cb, NULL,
                         at, at + len - 1);
         }
     }
