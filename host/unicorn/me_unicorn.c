@@ -338,6 +338,7 @@ struct memmap { uint32_t phys, guest, len; };
 static struct memmap g_mem[64]; static int g_nmem = 0;
 static uint32_t g_mmsp2_guest = 0;   /* guest addr of the 0xC0000000 reg block */
 static uint32_t g_fb_guest = 0;      /* guest addr of the /dev/fb0 framebuffer */
+static uint32_t g_fb_guest2 = 0;     /* /dev/fb1 (double-buffering: present the active one) */
 static void record_memmap(uint32_t phys, uint32_t guest, uint32_t len) {
     if (g_nmem < 64) { g_mem[g_nmem] = (struct memmap){phys, guest, len}; g_nmem++; }
 }
@@ -360,6 +361,20 @@ static void present_guest(uint32_t g) {
 }
 static void present_fb(uint32_t phys) {
     uint32_t g; if (phys_to_guest(phys, &g)) present_guest(g);
+}
+/* the game double-buffers across fb0/fb1; present whichever currently has content. */
+static int buf_score(uint32_t g) {
+    if (!g) return -1;
+    uint8_t row[320 * 2]; int nz = 0;
+    for (int y = 8; y < 240; y += 24) {
+        if (uc_mem_read(g_uc, g + (uint32_t)y * 640, row, sizeof row)) break;
+        for (unsigned i = 0; i < sizeof row; i++) if (row[i]) { nz++; break; }
+    }
+    return nz;
+}
+static void present_active(void) {
+    int sa = buf_score(g_fb_guest), sb = buf_score(g_fb_guest2);
+    present_guest(sb > sa ? g_fb_guest2 : g_fb_guest);
 }
 
 /* ---- /dev/dsp (OSS) audio -> shm audio ring (consumed by the viewer) ---- */
@@ -513,7 +528,10 @@ static long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint
     uint32_t at = do_mmap(addr, len, flags | GMAP_ANON, -1, 0);
     fprintf(stderr, "  DEV mmap type=%d phys=%08x -> guest=%08x len=%08x\n",
             type, phys, at, len);
-    if (type == DEV_FB && !g_fb_guest) g_fb_guest = at;   /* /dev/fb0 framebuffer */
+    if (type == DEV_FB) {                                 /* track up to 2 fb buffers */
+        if (!g_fb_guest) g_fb_guest = at;
+        else if (!g_fb_guest2 && at != g_fb_guest) g_fb_guest2 = at;
+    }
     if (type == DEV_MEM) {
         record_memmap(phys, at, len);
         if (phys == 0xC0000000u) {
@@ -548,7 +566,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     if (g_trace)
         fprintf(stderr, "  sc %u (%08x,%08x,%08x,%08x)\n", nr, a0, a1, a2, a3);
     /* single-buffered titles never "flip"; refresh the live fb0 periodically */
-    { static unsigned c = 0; if (g_fb_guest && (++c & 63) == 0) present_guest(g_fb_guest); }
+    { static unsigned c = 0; if (g_fb_guest && (++c & 63) == 0) present_active(); }
     switch (nr) {
     case 1:    /* exit */
     case 248:  /* exit_group */
@@ -829,7 +847,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 162: { /* nanosleep(req, rem) — yield to other threads (else a sleeping
                   main starves a loader worker); only really sleep if alone */
-        if (g_fb_guest) present_guest(g_fb_guest);  /* frame boundary: refresh screen */
+        if (g_fb_guest) present_active();  /* frame boundary: refresh screen */
         if (a1) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a1, z, 8); }
         gwrite(UC_ARM_REG_R0, 0);
         uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
@@ -931,7 +949,7 @@ static void block_hook(uc_engine *uc, uint64_t addr, uint32_t size, void *user) 
     /* present the framebuffer periodically even when the game does pure mmap'd I/O
        (menu/game loops poll GPIO + draw without syscalls, so the syscall-gated
        present in sys_dispatch would otherwise freeze the screen). */
-    { static unsigned pc = 0; if (g_fb_guest && (++pc & 0x3ffff) == 0) present_guest(g_fb_guest); }
+    { static unsigned pc = 0; if (g_fb_guest && (++pc & 0x3ffff) == 0) present_active(); }
     if (g_forked || g_nth < 2 || g_preempt) return;  /* fork child is single-threaded */
     if (getenv("ME_NOPREEMPT")) return;
     static unsigned c = 0;
