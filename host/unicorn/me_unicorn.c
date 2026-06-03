@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <time.h>
 #include <elf.h>
 #include "gp2xshm.h"
@@ -333,6 +334,76 @@ static void present_fb(uint32_t phys) {
     uint32_t g; if (phys_to_guest(phys, &g)) present_guest(g);
 }
 
+/* ---- /dev/dsp (OSS) audio -> shm audio ring (consumed by the viewer) ---- */
+static uint32_t g_aud_freq = 44100, g_aud_ch = 2, g_aud_bits = 16;
+static double g_aud_t0 = 0; static int g_aud_on = 0;
+static double host_now(void) {
+    struct timeval tv; gettimeofday(&tv, NULL); return tv.tv_sec + tv.tv_usec * 1e-6;
+}
+/* advance the read cursor as if played in real time, so the ring drains and the
+   game keeps producing at the right rate even with no viewer attached. */
+static void aud_drain(void) {
+    if (!g_shm) return;
+    if (!g_aud_on) { g_aud_t0 = host_now(); g_aud_on = 1; }
+    uint32_t bps = g_aud_freq * g_aud_ch * (g_aud_bits / 8);
+    if (!bps) return;
+    uint64_t consumed = (uint64_t)((host_now() - g_aud_t0) * bps);
+    if (consumed > g_shm->a_write) consumed = g_shm->a_write;
+    if (consumed > g_shm->a_read) g_shm->a_read = (uint32_t)consumed;  /* viewer may be ahead */
+}
+static uint32_t aud_free(void) {
+    aud_drain();
+    if (!g_shm) return 0;
+    uint32_t used = g_shm->a_write - g_shm->a_read;
+    return used < GP2XSHM_ARING ? GP2XSHM_ARING - used : 0;
+}
+static long dsp_write(uint32_t gbuf, uint32_t n) {
+    if (!g_shm) return n;
+    uint32_t fr = aud_free();
+    if (n > fr) n = fr;
+    if (n) {
+        uint8_t *tmp = malloc(n); uc_mem_read(g_uc, gbuf, tmp, n);
+        uint32_t w = g_shm->a_write % GP2XSHM_ARING, first = GP2XSHM_ARING - w;
+        if (first > n) first = n;
+        memcpy(g_shm->aring + w, tmp, first);
+        if (n > first) memcpy(g_shm->aring, tmp + first, n - first);
+        g_shm->a_write += n; free(tmp);
+    }
+    return n;
+}
+/* OSS dsp ioctl (type 'P' == 0x50); arg usually points to an int (in/out). */
+static long dsp_ioctl(uint32_t cmd, uint32_t arg) {
+    uint32_t v = 0; if (arg) uc_mem_read(g_uc, arg, &v, 4);
+    switch (cmd & 0xff) {
+    case 0x02: /* SPEED   */ if (v) g_aud_freq = v; break;
+    case 0x03: /* STEREO  */ g_aud_ch = v ? 2 : 1; break;
+    case 0x06: /* CHANNELS*/ if (v) g_aud_ch = v; break;
+    case 0x05: /* SETFMT  */ g_aud_bits = (v == 8 /*AFMT_U8*/) ? 8 : 16; break;
+    case 0x04: /* GETBLKSIZE */ v = 4096; break;
+    case 0x0a: /* SETFRAGMENT: accept the request as-is */ break;
+    case 0x0b: /* GETFMTS  */ v = 0x18; /* AFMT_S16_LE|AFMT_U8 */ break;
+    case 0x0f: /* GETCAPS  */ v = 0; break;
+    case 0x17: /* GETODELAY*/ aud_drain(); v = g_shm ? (g_shm->a_write - g_shm->a_read) : 0; break;
+    case 0x0c: /* GETOSPACE -> audio_buf_info{fragments,fragstotal,fragsize,bytes} */ {
+        uint32_t freeb = aud_free(), fsz = 4096;
+        uint32_t info[4] = { freeb / fsz, GP2XSHM_ARING / fsz, fsz, freeb };
+        if (arg) uc_mem_write(g_uc, arg, info, 16);
+        return 0;
+    }
+    case 0x00: /* RESET */ case 0x01: /* SYNC */ case 0x08: /* POST */ return 0;
+    default: return 0;
+    }
+    /* publish the negotiated format so a viewer can open the right audio device */
+    if (g_shm) {
+        g_shm->audio_freq = g_aud_freq;
+        g_shm->audio_format = (g_aud_bits == 8) ? 0x0008u : 0x8010u; /* U8 / S16LSB */
+        g_shm->audio_channels = g_aud_ch;
+        g_shm->audio_active = 1;
+    }
+    if (arg) uc_mem_write(g_uc, arg, &v, 4);   /* write-back the (possibly clamped) value */
+    return 0;
+}
+
 /* MMSP2 framebuffer-address registers (byte offsets in the 0xC0000000 block) */
 #define MMSP2_OADRL 0x290e
 #define MMSP2_OADRH 0x2910
@@ -453,7 +524,8 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         uc_mem_read(g_uc, a1, tmp, a2);
         if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
-        if (dev_type((int)a0)) { free(tmp); return a2; }  /* /dev/dsp etc: accept + discard */
+        if (dev_type((int)a0) == DEV_DSP) { free(tmp); return dsp_write(a1, a2); }
+        if (dev_type((int)a0)) { free(tmp); return a2; }  /* other devices: accept + discard */
         long r = write((int)a0, tmp, a2); free(tmp);
         return r < 0 ? -errno : r;
     }
@@ -546,8 +618,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 54:   /* ioctl */ {
         int t = dev_type((int)a0);
-        if (t) fprintf(stderr, "  DEV ioctl fd=%d type=%d cmd=%08x arg=%08x\n",
-                       (int)a0, t, a1, a2);
+        if (t == DEV_DSP) return dsp_ioctl(a1, a2);
         return 0;
     }
     case 0xf0005: { /* __ARM_NR_set_tls -> kuser TLS slot */
