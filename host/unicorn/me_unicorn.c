@@ -87,6 +87,7 @@ struct thread {
 static struct thread g_th[MAXTH];
 static int g_nth = 0, g_cur = 0, g_next_tid = 100;  /* main != pid 1 (LinuxThreads orphan check) */
 static int g_switched = 0;   /* a syscall changed the running thread this trap */
+static int g_preempt = 0;    /* block hook asked the main loop to time-slice */
 
 /* CLONE_* flags we care about */
 #define ME_CLONE_VM            0x00000100
@@ -485,7 +486,12 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
         return do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
     }
-    case 91:   /* munmap */ return 0;
+    case 91: { /* munmap(addr, len) — actually free it so Unicorn's region table
+                  doesn't overflow (mmap/munmap churn would otherwise leak regions) */
+        uint32_t a = ALIGN_DN(a0), l = ALIGN_UP(a1);
+        if (l) uc_mem_unmap(g_uc, a, l);   /* ignore errors: may be unaligned/partial */
+        return 0;
+    }
     case 2: { /* fork: snapshot, run the child in-line, restore parent on its exit */
         if (uc_context_alloc(g_uc, &g_fork_ctx) != UC_ERR_OK) return -ENOMEM;
         uc_context_save(g_uc, g_fork_ctx);
@@ -549,6 +555,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 0xf0002: return 0; /* __ARM_NR_cacheflush */
     case 5: {  /* open(path, flags, mode) */
         char p[1024]; uc_mem_read(g_uc, a0, p, sizeof p); p[sizeof p - 1] = 0;
+        if (g_trace) fprintf(stderr, "  open(\"%s\", %x) tid=%d\n", p, a1, g_th[g_cur].tid);
         int d = dev_open(p); if (d >= 0) return d;
         long r = open(p, (int)a1, a2); return r < 0 ? -errno : r;
     }
@@ -755,8 +762,18 @@ static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     (void)value; (void)user;
     static int n = 0;
     uint32_t a = (uint32_t)addr;
-    if (n++ < 40)
-        fprintf(stderr, "  mem-fault type=%d @ %08x size=%d\n", type, a, size);
+    if (n++ < 60)
+        fprintf(stderr, "  mem-fault type=%d @ %08x size=%d pc=%08x lr=%08x sp=%08x tid=%d\n",
+                type, a, size, gread(UC_ARM_REG_PC), gread(UC_ARM_REG_LR),
+                gread(UC_ARM_REG_SP), g_th[g_cur].tid);
+    if (a < 0x10000 && n < 62) {   /* likely a bad pointer: dump regs to find its source */
+        static const int rr[13] = {UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3,
+            UC_ARM_REG_R4,UC_ARM_REG_R5,UC_ARM_REG_R6,UC_ARM_REG_R7,UC_ARM_REG_R8,
+            UC_ARM_REG_R9,UC_ARM_REG_R10,UC_ARM_REG_R11,UC_ARM_REG_R12};
+        fprintf(stderr, "   regs:");
+        for (int i = 0; i < 13; i++) fprintf(stderr, " r%d=%08x", i, gread(rr[i]));
+        fprintf(stderr, "\n");
+    }
     uc_mem_map(uc, ALIGN_DN(a), PAGE, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
     return true;  /* retry the faulting access */
 }
@@ -764,13 +781,18 @@ static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
 /* Preemption: yield between basic blocks so a CPU-bound thread (spinlock/busy
    wait that never makes a syscall) can't starve the others. */
 static void block_hook(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
-    (void)uc; (void)addr; (void)size; (void)user;
-    if (g_forked || g_nth < 2) return;   /* the fork child is single-threaded */
+    (void)addr; (void)size; (void)user;
+    if (g_forked || g_nth < 2 || g_preempt) return;  /* fork child is single-threaded */
+    if (getenv("ME_NOPREEMPT")) return;
     static unsigned c = 0;
     if (++c < 40000) return;
     c = 0;
-    int j = sched_pick();
-    if (j >= 0 && j != g_cur) { sched_switch_to(j); g_switched = 0; }
+    /* Switching the CPU context inside a block hook corrupts state (Unicorn still
+       runs the current block with the swapped-in registers). Instead stop here and
+       let the main loop time-slice at a clean boundary — but only if another thread
+       is actually runnable. */
+    for (int i = 0; i < g_nth; i++)
+        if (i != g_cur && g_th[i].state == TH_RUN) { g_preempt = 1; uc_emu_stop(uc); return; }
 }
 
 int main(int argc, char **argv) {
@@ -814,10 +836,30 @@ int main(int argc, char **argv) {
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
 
     if (g_trace) fprintf(stderr, "entry=%08x sp=%08x brk=%08x\n", entry, sp, g_brk);
-    e = uc_emu_start(g_uc, entry, 0, 0, 0);
-    if (e && !g_exit)
-        fprintf(stderr, "me_unicorn: emu stopped: %s (pc=%08x)\n",
-                uc_strerror(e), gread(UC_ARM_REG_PC));
+    uint32_t pc = entry;
+    while (!g_exit) {
+        e = uc_emu_start(g_uc, pc, 0, 0, 0);
+        if (g_exit) break;
+        if (g_preempt) {        /* time-slice to another runnable thread (clean boundary) */
+            g_preempt = 0;
+            uc_context_save(g_uc, g_th[g_cur].ctx);
+            uc_mem_read(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
+            int j = sched_pick();
+            if (j >= 0 && j != g_cur) {
+                g_cur = j;
+                uc_mem_write(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
+                uc_context_restore(g_uc, g_th[g_cur].ctx);
+                deliver_signals();
+            }
+            uint32_t cpsr = gread(UC_ARM_REG_CPSR);
+            pc = gread(UC_ARM_REG_PC) | ((cpsr & 0x20) ? 1u : 0u);  /* keep Thumb bit */
+            continue;
+        }
+        if (e && !g_exit)
+            fprintf(stderr, "me_unicorn: emu stopped: %s (pc=%08x)\n",
+                    uc_strerror(e), gread(UC_ARM_REG_PC));
+        break;
+    }
     uc_close(g_uc);
     return g_exit_code;
 }
