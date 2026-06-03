@@ -372,9 +372,25 @@ static int buf_score(uint32_t g) {
     }
     return nz;
 }
+static uint32_t buf_hash(uint32_t g) {
+    if (!g) return 0;
+    uint8_t row[320 * 2]; uint32_t h = 2166136261u;
+    for (int y = 0; y < 240; y += 12) {
+        if (uc_mem_read(g_uc, g + (uint32_t)y * 640, row, sizeof row)) break;
+        for (unsigned i = 0; i < sizeof row; i += 5) h = (h ^ row[i]) * 16777619u;
+    }
+    return h;
+}
+/* present whichever fb the game just rendered to (its content changed since last
+   frame); fall back to the non-blank one for a fully static screen. */
 static void present_active(void) {
-    int sa = buf_score(g_fb_guest), sb = buf_score(g_fb_guest2);
-    present_guest(sb > sa ? g_fb_guest2 : g_fb_guest);
+    static uint32_t h0 = 0, h1 = 0;
+    uint32_t n0 = buf_hash(g_fb_guest), n1 = buf_hash(g_fb_guest2);
+    int c0 = (n0 != h0), c1 = (n1 != h1);
+    h0 = n0; h1 = n1;
+    if (c1 && g_fb_guest2) present_guest(g_fb_guest2);
+    else if (c0) present_guest(g_fb_guest);
+    else present_guest(buf_score(g_fb_guest2) > buf_score(g_fb_guest) ? g_fb_guest2 : g_fb_guest);
 }
 
 /* ---- /dev/dsp (OSS) audio -> shm audio ring (consumed by the viewer) ---- */
@@ -486,6 +502,8 @@ static void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     /* GPIO button registers (active low; canonical GP2X layout, matches our shm enum):
        0x1198 lo = 8-way stick, 0x1184 hi = START/SELECT/L/R/A/B/X/Y, 0x1186 lo = VOL. */
     if (off == 0x1198 || off == 0x1184 || off == 0x1186) {
+        if (g_trace) { static int n = 0; if (n++ < 12)
+            fprintf(stderr, "  GPIO RD %04x pc=%08x\n", off, gread(UC_ARM_REG_PC)); }
         uint32_t b = g_shm ? g_shm->buttons : 0;
         uint16_t v;
         if (off == 0x1198)      v = 0xFF00 | (~b & 0x00FF);            /* stick (bits 0..7) */
