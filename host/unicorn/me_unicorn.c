@@ -74,14 +74,18 @@ enum { BLK_NONE = 0, BLK_FUTEX, BLK_SIG };
 #define MAXTH 32
 struct thread {
     uc_context *ctx;        /* saved CPU state when not the running thread */
-    int state, block, tid;
+    int state, block, tid, ppid;
     uint32_t tls;           /* per-thread TLS, mirrored at 0xffff0ff0 on switch */
     uint32_t futex_addr;    /* BLK_FUTEX: address waited on */
     uint32_t ctid;          /* CLONE_CHILD_CLEARTID: clear+futex-wake on exit */
-    uint32_t sig_pending, sig_blocked;
+    uint64_t sig_pending, sig_blocked;  /* signals 1..64 (bit s-1) */
+    uint64_t susp_oldmask;  /* sig_blocked to restore when a sigsuspend returns */
+    int susp_active;
+    int has_sigsave;        /* a signal handler is running; sigsave holds the resume regs */
+    uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
 };
 static struct thread g_th[MAXTH];
-static int g_nth = 0, g_cur = 0, g_next_tid = 1;
+static int g_nth = 0, g_cur = 0, g_next_tid = 100;  /* main != pid 1 (LinuxThreads orphan check) */
 static int g_switched = 0;   /* a syscall changed the running thread this trap */
 
 /* CLONE_* flags we care about */
@@ -185,6 +189,8 @@ static uint32_t setup_stack(int argc, char **argv) {
 static uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }
 static void gwrite(uint32_t reg, uint32_t v) { uc_reg_write(g_uc, reg, &v); }
 
+static void deliver_signals(void);  /* defined below; runs a pending handler */
+
 /* pick the next runnable thread (round-robin from g_cur), or -1 if none. */
 static int sched_pick(void) {
     for (int i = 1; i <= g_nth; i++) {
@@ -202,6 +208,7 @@ static void sched_switch_to(int j) {
     uc_mem_write(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
     uc_context_restore(g_uc, g_th[g_cur].ctx);
     g_switched = 1;
+    deliver_signals();   /* if the now-current thread has a pending signal, enter its handler */
 }
 /* block the current thread (caller already set its wake-time R0) and run next. */
 static void block_current(int reason) {
@@ -212,6 +219,51 @@ static void block_current(int reason) {
         g_exit = 1; uc_emu_stop(g_uc); return;
     }
     sched_switch_to(j);
+}
+
+/* ---- signals (enough for the glibc LinuxThreads restart/cancel handshake) ---- */
+#define SIG_TRAMP 0xffff0f00u   /* restorer trampoline in the kuser page */
+struct sigact { uint32_t handler, flags, restorer; uint64_t mask; };
+static struct sigact g_sigact[65];
+/* r0..r12, sp, lr, pc, cpsr — the set saved/restored across a handler */
+static const int g_sregs[17] = {
+    UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+    UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,
+    UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11,
+    UC_ARM_REG_R12, UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_CPSR };
+
+/* If the current thread has a pending, unblocked signal with a handler, enter it.
+   The pre-handler register state is saved so (rt_)sigreturn can resume it. */
+static void deliver_signals(void) {
+    struct thread *t = &g_th[g_cur];
+    if (t->has_sigsave) return;                 /* one level deep is enough here */
+    uint64_t deliv = t->sig_pending & ~t->sig_blocked;
+    if (!deliv) return;
+    int sig = 0;
+    for (int s = 1; s <= 64; s++) if (deliv & (1ULL << (s - 1))) { sig = s; break; }
+    t->sig_pending &= ~(1ULL << (sig - 1));
+    uint32_t h = g_sigact[sig].handler;
+    if (h == 0 || h == 1) return;               /* SIG_DFL / SIG_IGN: drop */
+    for (int i = 0; i < 17; i++) t->sigsave[i] = gread(g_sregs[i]);
+    t->has_sigsave = 1;
+    gwrite(UC_ARM_REG_R0, (uint32_t)sig);
+    gwrite(UC_ARM_REG_LR, SIG_TRAMP);
+    gwrite(UC_ARM_REG_PC, h);
+    if (g_trace) fprintf(stderr, "  [signal %d -> handler %08x in tid %d]\n", sig, h, t->tid);
+}
+
+/* deliver signal `sig` to the thread whose tid == pid (LinuxThreads = 1 pid/thread). */
+static long send_sig(int pid, int sig) {
+    if (sig <= 0 || sig > 64) return 0;
+    for (int i = 0; i < g_nth; i++) {
+        if (g_th[i].tid != pid || g_th[i].state == TH_DEAD) continue;
+        g_th[i].sig_pending |= (1ULL << (sig - 1));
+        if (g_th[i].state == TH_BLOCKED && g_th[i].block == BLK_SIG
+            && !(g_th[i].sig_blocked & (1ULL << (sig - 1))))
+            g_th[i].state = TH_RUN;
+        return 0;
+    }
+    return 0;   /* unknown pid: drop */
 }
 
 /* ---- emulated GP2X/Wiz devices (fake fds, not passed to the host) ---- */
@@ -308,7 +360,15 @@ static long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_
     uint32_t l = ALIGN_UP(len ? len : 1);
     uint32_t at;
     if ((flags & GMAP_FIXED) && addr) at = ALIGN_DN(addr);
-    else { at = g_mmap_next; g_mmap_next += l; }
+    else {
+        /* align to the allocation size when it's a power of two (capped at 2MB):
+           LinuxThreads needs its STACK_SIZE-sized thread stacks STACK_SIZE-aligned
+           so sp&~(size-1) locates the thread descriptor, else it retries forever. */
+        uint32_t align = PAGE;
+        if (l > PAGE && (l & (l - 1)) == 0) align = l > 0x200000u ? 0x200000u : l;
+        g_mmap_next = (g_mmap_next + align - 1) & ~(align - 1);
+        at = g_mmap_next; g_mmap_next += l;
+    }
     map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
     if (!(flags & GMAP_ANON) && fd >= 0 && len) {
         uint8_t *tmp = malloc(len);
@@ -502,12 +562,63 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return close((int)a0) < 0 ? -errno : 0;
     case 19: { long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? -errno : r; } /* lseek */
     case 125:  return 0;  /* mprotect (we map RWX) */
-    case 20:   return 1;  /* getpid */
-    case 224:  return 1;  /* gettid */
+    case 20:   return g_th[g_cur].tid;  /* getpid (LinuxThreads: 1 pid per thread) */
+    case 224:  return g_th[g_cur].tid;  /* gettid */
+    case 64:   return g_th[g_cur].ppid;  /* getppid (LinuxThreads orphan check) */
     case 256:  return 1;  /* set_tid_address */
     case 338:  return 0;  /* set_robust_list */
-    case 174:  return 0;  /* rt_sigaction */
-    case 175:  return 0;  /* rt_sigprocmask */
+    case 174: { /* rt_sigaction(signum, act, oldact, sigsetsize) */
+        int sig = (int)a0;
+        if (sig > 0 && sig <= 64) {
+            if (a2) { uint32_t o[3] = {g_sigact[sig].handler, g_sigact[sig].flags,
+                                       g_sigact[sig].restorer};
+                      uc_mem_write(g_uc, a2, o, 12);
+                      uc_mem_write(g_uc, a2 + 12, &g_sigact[sig].mask, 8); }
+            if (a1) { uint32_t h[3]; uc_mem_read(g_uc, a1, h, 12);
+                      uint64_t m = 0; uc_mem_read(g_uc, a1 + 12, &m, 8);
+                      g_sigact[sig].handler = h[0]; g_sigact[sig].flags = h[1];
+                      g_sigact[sig].restorer = h[2]; g_sigact[sig].mask = m; }
+        }
+        return 0;
+    }
+    case 175: { /* rt_sigprocmask(how, set, oldset, size) */
+        struct thread *t = &g_th[g_cur];
+        if (a2) uc_mem_write(g_uc, a2, &t->sig_blocked, 8);
+        if (a1) { uint64_t set = 0; uc_mem_read(g_uc, a1, &set, 8);
+                  if (a0 == 0) t->sig_blocked |= set;
+                  else if (a0 == 1) t->sig_blocked &= ~set;
+                  else if (a0 == 2) t->sig_blocked = set; }
+        return 0;
+    }
+    case 37:   return send_sig((int)a0, (int)a1);  /* kill(pid, sig) */
+    case 238:  return send_sig((int)a0, (int)a1);  /* tkill(tid, sig) */
+    case 268:  return send_sig((int)a1, (int)a2);  /* tgkill(tgid, tid, sig) */
+    case 119:  /* sigreturn */
+    case 173: { /* rt_sigreturn: restore the pre-handler register state */
+        struct thread *t = &g_th[g_cur];
+        if (t->has_sigsave) { for (int i = 0; i < 17; i++) gwrite(g_sregs[i], t->sigsave[i]);
+                              t->has_sigsave = 0; }
+        if (t->susp_active) { t->sig_blocked = t->susp_oldmask; t->susp_active = 0; }
+        g_switched = 1;   /* PC/regs restored; don't let intr_cb clobber R0 */
+        return 0;
+    }
+    case 168: { /* poll(fds, nfds, timeout) */
+        int ready = 0;
+        for (uint32_t i = 0; i < a1; i++) {
+            uint32_t fd = 0; uint16_t ev = 0, rev = 0;
+            uc_mem_read(g_uc, a0 + i * 8, &fd, 4);
+            uc_mem_read(g_uc, a0 + i * 8 + 4, &ev, 2);
+            if ((int)fd == PIPEFD_R) { if (g_pipe_w > g_pipe_r) rev |= 1; }  /* POLLIN */
+            else if (ev & 4) rev |= 4;                                       /* POLLOUT */
+            uc_mem_write(g_uc, a0 + i * 8 + 6, &rev, 2);
+            if (rev) ready++;
+        }
+        if (ready) return ready;
+        /* nothing ready: yield so other threads run, then report timeout (0) */
+        int j = sched_pick();
+        if (j != g_cur && j >= 0) { gwrite(UC_ARM_REG_R0, 0); sched_switch_to(j); }
+        return 0;
+    }
     case 240: { /* futex(uaddr, op, val, ...) */
         int op = (int)(a1 & 0x7f);
         if (op == 0) {            /* FUTEX_WAIT: block iff *uaddr == val */
@@ -533,7 +644,8 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (g_nth >= MAXTH) return -11 /*EAGAIN*/;
         int slot = g_nth++;
         if (!g_th[slot].ctx) uc_context_alloc(g_uc, &g_th[slot].ctx);
-        g_th[slot].tid = ++g_next_tid;
+        g_th[slot].tid = g_next_tid++;
+        g_th[slot].ppid = g_th[g_cur].tid;
         g_th[slot].state = TH_RUN; g_th[slot].block = BLK_NONE;
         g_th[slot].tls = (a0 & ME_CLONE_SETTLS) ? a3 : g_th[g_cur].tls;
         g_th[slot].ctid = (a0 & ME_CLONE_CHILD_CLEARTID) ? a4 : 0;
@@ -555,9 +667,15 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return 0;
     }
     case 29:    /* pause */
-    case 72:    /* sigsuspend */
-    case 179: { /* rt_sigsuspend — block until a signal is delivered (-> EINTR) */
+    case 72:    /* sigsuspend (old) */
+    case 179: { /* rt_sigsuspend(mask, size) — block until a signal arrives (-> EINTR) */
+        struct thread *t = &g_th[g_cur];
+        t->susp_oldmask = t->sig_blocked; t->susp_active = 1;
+        if (nr == 179 && a0) { uint64_t m = 0; uc_mem_read(g_uc, a0, &m, 8); t->sig_blocked = m; }
+        else if (nr == 72) t->sig_blocked = a0;   /* old ABI: mask passed by value */
+        /* if a deliverable signal is already pending, take it without blocking */
         gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
+        if (t->sig_pending & ~t->sig_blocked) { deliver_signals(); g_switched = 1; return 0; }
         block_current(BLK_SIG);
         return 0;
     }
@@ -642,6 +760,18 @@ static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     return true;  /* retry the faulting access */
 }
 
+/* Preemption: yield between basic blocks so a CPU-bound thread (spinlock/busy
+   wait that never makes a syscall) can't starve the others. */
+static void block_hook(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)uc; (void)addr; (void)size; (void)user;
+    if (g_nth < 2) return;
+    static unsigned c = 0;
+    if (++c < 40000) return;
+    c = 0;
+    int j = sched_pick();
+    if (j >= 0 && j != g_cur) { sched_switch_to(j); g_switched = 0; }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
     if (getenv("ME_TRACE")) g_trace = 1;
@@ -658,7 +788,10 @@ int main(int argc, char **argv) {
       uc_mem_write(g_uc, 0xffff0fc0u, cx, sizeof cx);  /* __kuser_cmpxchg */
       uint32_t gt[] = {0xe59f0008u, 0xe1a0f00eu};      /* __kuser_get_tls: ldr r0,[pc,#8]; mov pc,lr */
       uc_mem_write(g_uc, 0xffff0fe0u, gt, sizeof gt);
-      uint32_t ver = 2; uc_mem_write(g_uc, 0xffff0ffcu, &ver, 4); }
+      uint32_t ver = 2; uc_mem_write(g_uc, 0xffff0ffcu, &ver, 4);
+      /* signal restorer trampoline at SIG_TRAMP: mov r7,#173; svc 0 (rt_sigreturn) */
+      uint32_t tramp[] = {0xe3a070adu, 0xef000000u};
+      uc_mem_write(g_uc, 0xffff0f00u, tramp, sizeof tramp); }
 
     shm_setup();   /* framebuffer bridge to the viewer */
 
@@ -670,10 +803,12 @@ int main(int argc, char **argv) {
     g_nth = 1; g_cur = 0;
     uc_context_alloc(g_uc, &g_th[0].ctx);
     g_th[0].tid = g_next_tid++;
+    g_th[0].ppid = 1;
     g_th[0].state = TH_RUN;
 
-    uc_hook h, hm;
+    uc_hook h, hm, hb;
     uc_hook_add(g_uc, &h, UC_HOOK_INTR, intr_cb, NULL, 1, 0);
+    uc_hook_add(g_uc, &hb, UC_HOOK_BLOCK, block_hook, NULL, 1, 0);
     uc_hook_add(g_uc, &hm, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
 
