@@ -52,8 +52,9 @@ static uint32_t g_child_pid = 0x1234;
 
 /* in-engine pipe (parent <-> forked child); one pair is enough for the loaders
    seen so far. Backed by a growable host buffer that survives the fork restore. */
-#define PIPEFD_R 2000
-#define PIPEFD_W 2001
+/* far above any real host fd so they never alias a file descriptor */
+#define PIPEFD_R 0x10000100
+#define PIPEFD_W 0x10000101
 static uint8_t *g_pipebuf = NULL;
 static uint32_t g_pipe_cap = 0, g_pipe_w = 0, g_pipe_r = 0;
 static void pipe_put(const uint8_t *p, uint32_t n) {
@@ -271,7 +272,7 @@ static long send_sig(int pid, int sig) {
 
 /* ---- emulated GP2X/Wiz devices (fake fds, not passed to the host) ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_OTHER };
-#define DEVFD_BASE 1000
+#define DEVFD_BASE 0x10000000   /* far above real host fds (avoid aliasing) */
 static int g_devtype[64], g_devn = 0;
 static int dev_open(const char *path) {
     int t;
@@ -438,6 +439,17 @@ static void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         if (t0 == 0) t0 = now;
         uint32_t us = (uint32_t)((now - t0) * 1e6);
         uc_mem_write(uc, g_mmsp2_guest + 0x0a00, &us, 4);
+        return;
+    }
+    /* GPIO button registers (active low; canonical GP2X layout, matches our shm enum):
+       0x1198 lo = 8-way stick, 0x1184 hi = START/SELECT/L/R/A/B/X/Y, 0x1186 lo = VOL. */
+    if (off == 0x1198 || off == 0x1184 || off == 0x1186) {
+        uint32_t b = g_shm ? g_shm->buttons : 0;
+        uint16_t v;
+        if (off == 0x1198)      v = 0xFF00 | (~b & 0x00FF);            /* stick (bits 0..7) */
+        else if (off == 0x1184) v = 0x00FF | ((~(b >> 8) & 0xFF) << 8); /* buttons -> hi byte */
+        else                    v = 0xFF00 | (~(b >> 16) & 0xFF);      /* VOL -> lo byte */
+        uc_mem_write(uc, g_mmsp2_guest + off, &v, 2);
         return;
     }
     if (g_trace) { static int n = 0; if (n++ < 200) fprintf(stderr, "  MMSP2 RD %04x\n", off); }
@@ -646,9 +658,11 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 0xf0002: return 0; /* __ARM_NR_cacheflush */
     case 5: {  /* open(path, flags, mode) */
         char p[1024]; uc_mem_read(g_uc, a0, p, sizeof p); p[sizeof p - 1] = 0;
-        if (g_trace) fprintf(stderr, "  open(\"%s\", %x) tid=%d\n", p, a1, g_th[g_cur].tid);
         int d = dev_open(p); if (d >= 0) return d;
-        long r = open(p, (int)a1, a2); return r < 0 ? -errno : r;
+        long r = open(p, (int)a1, a2); int e2 = errno;
+        if (g_trace) fprintf(stderr, "  open(\"%s\")=%ld%s tid=%d\n", p, r < 0 ? (long)-e2 : r,
+                             r < 0 ? (e2 == 24 ? " EMFILE" : " ERR") : "", g_th[g_cur].tid);
+        return r < 0 ? -e2 : r;
     }
     case 322: { /* openat(dirfd, path, flags, mode) */
         char p[1024]; uc_mem_read(g_uc, a1, p, sizeof p); p[sizeof p - 1] = 0;
@@ -780,6 +794,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 162: { /* nanosleep(req, rem) — yield to other threads (else a sleeping
                   main starves a loader worker); only really sleep if alone */
+        if (g_fb_guest) present_guest(g_fb_guest);  /* frame boundary: refresh screen */
         if (a1) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a1, z, 8); }
         gwrite(UC_ARM_REG_R0, 0);
         int j = sched_pick();
@@ -877,6 +892,10 @@ static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
    wait that never makes a syscall) can't starve the others. */
 static void block_hook(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     (void)addr; (void)size; (void)user;
+    /* present the framebuffer periodically even when the game does pure mmap'd I/O
+       (menu/game loops poll GPIO + draw without syscalls, so the syscall-gated
+       present in sys_dispatch would otherwise freeze the screen). */
+    { static unsigned pc = 0; if (g_fb_guest && (++pc & 0x3ffff) == 0) present_guest(g_fb_guest); }
     if (g_forked || g_nth < 2 || g_preempt) return;  /* fork child is single-threaded */
     if (getenv("ME_NOPREEMPT")) return;
     static unsigned c = 0;
