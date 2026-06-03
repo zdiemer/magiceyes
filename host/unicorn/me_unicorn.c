@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <elf.h>
 #include "gp2xshm.h"
 
@@ -36,6 +37,31 @@ static uint32_t g_brk, g_brk_start;
 static uint32_t g_mmap_next = MMAP_BASE;
 static int g_exit = 0, g_exit_code = 0;
 static int g_trace = 0;
+
+/* Synchronous fork: snapshot the process, let the child run in-line until it
+   exits (its pipe writes are captured along the way), then restore the parent
+   and resume it with fork()==child_pid. Handles the common "fork a loader, pipe
+   results back to the parent" pattern (e.g. Payback) without nested emulation:
+   the child's exit_group restores the saved CPU context (PC -> parent's post-fork
+   site) and execution simply continues as the parent. */
+static uc_context *g_fork_ctx = NULL;
+static struct snap { uint64_t begin; uint32_t len; uint8_t *data; } g_snap[2048];
+static int g_nsnap = 0, g_forked = 0;
+static uint32_t g_child_pid = 0x1234;
+
+/* in-engine pipe (parent <-> forked child); one pair is enough for the loaders
+   seen so far. Backed by a growable host buffer that survives the fork restore. */
+#define PIPEFD_R 2000
+#define PIPEFD_W 2001
+static uint8_t *g_pipebuf = NULL;
+static uint32_t g_pipe_cap = 0, g_pipe_w = 0, g_pipe_r = 0;
+static void pipe_put(const uint8_t *p, uint32_t n) {
+    if (g_pipe_w + n > g_pipe_cap) {
+        g_pipe_cap = (g_pipe_w + n) * 2 + 4096;
+        g_pipebuf = realloc(g_pipebuf, g_pipe_cap);
+    }
+    memcpy(g_pipebuf + g_pipe_w, p, n); g_pipe_w += n;
+}
 
 static void die(const char *m, uc_err e) {
     fprintf(stderr, "me_unicorn: %s: %s\n", m, e ? uc_strerror(e) : "");
@@ -278,14 +304,32 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     switch (nr) {
     case 1:    /* exit */
     case 248:  /* exit_group */
+        if (g_forked) {  /* the synchronous child is done -> restore the parent */
+            for (int i = 0; i < g_nsnap; i++) {
+                uc_mem_write(g_uc, g_snap[i].begin, g_snap[i].data, g_snap[i].len);
+                free(g_snap[i].data);
+            }
+            g_nsnap = 0;
+            uc_context_restore(g_uc, g_fork_ctx);
+            uc_context_free(g_fork_ctx); g_fork_ctx = NULL;
+            g_forked = 0;
+            if (g_trace) fprintf(stderr, "  [fork] child exited(%u) -> resume parent\n", a0);
+            return g_child_pid;  /* parent's fork() now returns the child pid */
+        }
         g_exit = 1; g_exit_code = a0; uc_emu_stop(g_uc); return 0;
     case 4: {  /* write(fd, buf, count) */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         uc_mem_read(g_uc, a1, tmp, a2);
+        if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
         long r = write((int)a0, tmp, a2); free(tmp);
         return r < 0 ? -errno : r;
     }
     case 3: {  /* read(fd, buf, count) */
+        if ((int)a0 == PIPEFD_R) {  /* drain the forked child's pipe output */
+            uint32_t avail = g_pipe_w - g_pipe_r, n = a2 < avail ? a2 : avail;
+            if (n) uc_mem_write(g_uc, a1, g_pipebuf + g_pipe_r, n);
+            g_pipe_r += n; return n;   /* 0 == EOF (child finished) */
+        }
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         long r = read((int)a0, tmp, a2);
         if (r > 0) uc_mem_write(g_uc, a1, tmp, r);
@@ -311,6 +355,46 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
     }
     case 91:   /* munmap */ return 0;
+    case 2: { /* fork: snapshot, run the child in-line, restore parent on its exit */
+        if (uc_context_alloc(g_uc, &g_fork_ctx) != UC_ERR_OK) return -ENOMEM;
+        uc_context_save(g_uc, g_fork_ctx);
+        uc_mem_region *regs = NULL; uint32_t cnt = 0; g_nsnap = 0;
+        if (uc_mem_regions(g_uc, &regs, &cnt) == UC_ERR_OK) {
+            for (uint32_t i = 0; i < cnt && g_nsnap < 2048; i++) {
+                uint64_t b = regs[i].begin;
+                uint32_t l = (uint32_t)(regs[i].end - regs[i].begin + 1);
+                uint8_t *d = malloc(l);
+                if (!d || uc_mem_read(g_uc, b, d, l) != UC_ERR_OK) { free(d); continue; }
+                g_snap[g_nsnap].begin = b; g_snap[g_nsnap].len = l;
+                g_snap[g_nsnap].data = d; g_nsnap++;
+            }
+            uc_free(regs);
+        }
+        g_forked = 1;
+        if (g_trace) fprintf(stderr, "  [fork] snapshot %d regions; child runs first\n", g_nsnap);
+        return 0;  /* child sees fork()==0 */
+    }
+    case 42: { /* pipe(fds[2]) -> our in-engine pipe */
+        g_pipe_r = g_pipe_w = 0;
+        uint32_t fds[2] = { PIPEFD_R, PIPEFD_W };
+        uc_mem_write(g_uc, a0, fds, 8); return 0;
+    }
+    case 7: case 114: /* waitpid/wait4: the synchronous child already exited */
+        if (a1) { uint32_t z = 0; uc_mem_write(g_uc, a1, &z, 4); }
+        return g_child_pid;
+    case 13: { /* time(t) */
+        uint32_t t = (uint32_t)time(NULL);
+        if (a0) uc_mem_write(g_uc, a0, &t, 4); return t;
+    }
+    case 99: case 100: { /* statfs/fstatfs: report a roomy filesystem */
+        uint8_t b[64]; memset(b, 0, sizeof b);
+        *(uint32_t *)(b + 4)  = 4096;        /* f_bsize   */
+        *(uint32_t *)(b + 8)  = 0x00100000;  /* f_blocks  */
+        *(uint32_t *)(b + 12) = 0x00080000;  /* f_bfree   */
+        *(uint32_t *)(b + 16) = 0x00080000;  /* f_bavail  */
+        *(uint32_t *)(b + 36) = 255;         /* f_namelen */
+        if (a1) uc_mem_write(g_uc, a1, b, sizeof b); return 0;
+    }
     case 24: case 47: case 49: case 50:       /* getuid/getgid/geteuid/getegid */
     case 199: case 200: case 201: case 202:   /* ...32 variants */
         return 0;
@@ -343,6 +427,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         long r = open(p, (int)a2, a3); return r < 0 ? -errno : r;
     }
     case 6:    /* close */
+        if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W) return 0;
         if (dev_type((int)a0)) return 0;
         return close((int)a0) < 0 ? -errno : 0;
     case 19: { long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? -errno : r; } /* lseek */
@@ -354,7 +439,14 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 174:  return 0;  /* rt_sigaction */
     case 175:  return 0;  /* rt_sigprocmask */
     case 240:  return 0;  /* futex (single-thread: pretend ok) */
-    case 162:  return 0;  /* nanosleep */
+    case 162: { /* nanosleep(req, rem) — sleep a little so we don't busy-spin */
+        uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
+        unsigned us = ts[0] * 1000000u + ts[1] / 1000u;
+        if (us > 10000) us = 10000;        /* cap to stay responsive */
+        if (us) usleep(us);
+        if (a1) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a1, z, 8); }
+        return 0;
+    }
     case 78: {  /* gettimeofday(tv, tz) */
         if (a0) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a0, z, 8); } return 0;
     }
