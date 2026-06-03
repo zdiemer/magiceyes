@@ -193,6 +193,7 @@ static void deliver_signals(void);  /* defined below; runs a pending handler */
 
 /* pick the next runnable thread (round-robin from g_cur), or -1 if none. */
 static int sched_pick(void) {
+    if (g_forked) return g_th[g_cur].state == TH_RUN ? g_cur : -1;  /* child is alone */
     for (int i = 1; i <= g_nth; i++) {
         int j = (g_cur + i) % g_nth;
         if (g_th[j].state == TH_RUN) return j;
@@ -764,7 +765,7 @@ static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
    wait that never makes a syscall) can't starve the others. */
 static void block_hook(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     (void)uc; (void)addr; (void)size; (void)user;
-    if (g_nth < 2) return;
+    if (g_forked || g_nth < 2) return;   /* the fork child is single-threaded */
     static unsigned c = 0;
     if (++c < 40000) return;
     c = 0;
