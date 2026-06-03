@@ -63,6 +63,34 @@ static void pipe_put(const uint8_t *p, uint32_t n) {
     memcpy(g_pipebuf + g_pipe_w, p, n); g_pipe_w += n;
 }
 
+/* ---- cooperative thread scheduler ----
+   clone(CLONE_VM) threads share this single Unicorn address space; only CPU
+   state differs, so a context switch = uc_context_save(cur)+uc_context_restore
+   (next). Threads run until they block (futex/sigsuspend) or yield; a blocking
+   syscall pre-sets its own wake-time R0, then switches away. intr_cb skips its
+   R0 write when a switch happened (the new thread's R0 is already correct). */
+enum { TH_FREE = 0, TH_RUN, TH_BLOCKED, TH_DEAD };
+enum { BLK_NONE = 0, BLK_FUTEX, BLK_SIG };
+#define MAXTH 32
+struct thread {
+    uc_context *ctx;        /* saved CPU state when not the running thread */
+    int state, block, tid;
+    uint32_t tls;           /* per-thread TLS, mirrored at 0xffff0ff0 on switch */
+    uint32_t futex_addr;    /* BLK_FUTEX: address waited on */
+    uint32_t ctid;          /* CLONE_CHILD_CLEARTID: clear+futex-wake on exit */
+    uint32_t sig_pending, sig_blocked;
+};
+static struct thread g_th[MAXTH];
+static int g_nth = 0, g_cur = 0, g_next_tid = 1;
+static int g_switched = 0;   /* a syscall changed the running thread this trap */
+
+/* CLONE_* flags we care about */
+#define ME_CLONE_VM            0x00000100
+#define ME_CLONE_PARENT_SETTID 0x00100000
+#define ME_CLONE_CHILD_CLEARTID 0x00200000
+#define ME_CLONE_CHILD_SETTID  0x01000000
+#define ME_CLONE_SETTLS        0x00080000
+
 static void die(const char *m, uc_err e) {
     fprintf(stderr, "me_unicorn: %s: %s\n", m, e ? uc_strerror(e) : "");
     exit(1);
@@ -156,6 +184,35 @@ static uint32_t setup_stack(int argc, char **argv) {
 /* ---- syscalls (ARM EABI numbers) ---- */
 static uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }
 static void gwrite(uint32_t reg, uint32_t v) { uc_reg_write(g_uc, reg, &v); }
+
+/* pick the next runnable thread (round-robin from g_cur), or -1 if none. */
+static int sched_pick(void) {
+    for (int i = 1; i <= g_nth; i++) {
+        int j = (g_cur + i) % g_nth;
+        if (g_th[j].state == TH_RUN) return j;
+    }
+    return (g_th[g_cur].state == TH_RUN) ? g_cur : -1;
+}
+/* switch the live CPU to thread j (saving the current one). Sets g_switched. */
+static void sched_switch_to(int j) {
+    if (j == g_cur) return;
+    uc_context_save(g_uc, g_th[g_cur].ctx);
+    uc_mem_read(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
+    g_cur = j;
+    uc_mem_write(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
+    uc_context_restore(g_uc, g_th[g_cur].ctx);
+    g_switched = 1;
+}
+/* block the current thread (caller already set its wake-time R0) and run next. */
+static void block_current(int reason) {
+    g_th[g_cur].state = TH_BLOCKED; g_th[g_cur].block = reason;
+    int j = sched_pick();
+    if (j < 0) {
+        fprintf(stderr, "me_unicorn: all %d threads blocked (deadlock)\n", g_nth);
+        g_exit = 1; uc_emu_stop(g_uc); return;
+    }
+    sched_switch_to(j);
+}
 
 /* ---- emulated GP2X/Wiz devices (fake fds, not passed to the host) ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_OTHER };
@@ -304,7 +361,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     switch (nr) {
     case 1:    /* exit */
     case 248:  /* exit_group */
-        if (g_forked) {  /* the synchronous child is done -> restore the parent */
+        if (g_forked) {  /* the synchronous fork child is done -> restore parent */
             for (int i = 0; i < g_nsnap; i++) {
                 uc_mem_write(g_uc, g_snap[i].begin, g_snap[i].data, g_snap[i].len);
                 free(g_snap[i].data);
@@ -315,6 +372,19 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             g_forked = 0;
             if (g_trace) fprintf(stderr, "  [fork] child exited(%u) -> resume parent\n", a0);
             return g_child_pid;  /* parent's fork() now returns the child pid */
+        }
+        if (nr == 1) {   /* exit(): this thread only — keep the process alive */
+            if (g_th[g_cur].ctid) {     /* CLONE_CHILD_CLEARTID: clear + futex-wake */
+                uint32_t z = 0; uc_mem_write(g_uc, g_th[g_cur].ctid, &z, 4);
+                for (int i = 0; i < g_nth; i++)
+                    if (g_th[i].state == TH_BLOCKED && g_th[i].block == BLK_FUTEX
+                        && g_th[i].futex_addr == g_th[g_cur].ctid)
+                        g_th[i].state = TH_RUN;
+            }
+            g_th[g_cur].state = TH_DEAD;
+            int j = sched_pick();
+            if (g_trace) fprintf(stderr, "  [thread %d exit] -> next slot %d\n", g_th[g_cur].tid, j);
+            if (j >= 0) { sched_switch_to(j); return 0; }
         }
         g_exit = 1; g_exit_code = a0; uc_emu_stop(g_uc); return 0;
     case 4: {  /* write(fd, buf, count) */
@@ -438,7 +508,59 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 338:  return 0;  /* set_robust_list */
     case 174:  return 0;  /* rt_sigaction */
     case 175:  return 0;  /* rt_sigprocmask */
-    case 240:  return 0;  /* futex (single-thread: pretend ok) */
+    case 240: { /* futex(uaddr, op, val, ...) */
+        int op = (int)(a1 & 0x7f);
+        if (op == 0) {            /* FUTEX_WAIT: block iff *uaddr == val */
+            uint32_t cur; uc_mem_read(g_uc, a0, &cur, 4);
+            if (cur != a2) return -11 /*EAGAIN*/;
+            gwrite(UC_ARM_REG_R0, 0);          /* wake returns 0 */
+            g_th[g_cur].futex_addr = a0;
+            block_current(BLK_FUTEX);
+            return 0;                          /* ignored (g_switched) */
+        }
+        if (op == 1) {            /* FUTEX_WAKE: wake up to `val` waiters */
+            int woke = 0;
+            for (int i = 0; i < g_nth; i++)
+                if (g_th[i].state == TH_BLOCKED && g_th[i].block == BLK_FUTEX
+                    && g_th[i].futex_addr == a0 && woke < (int)a2) {
+                    g_th[i].state = TH_RUN; woke++;
+                }
+            return woke;
+        }
+        return 0;
+    }
+    case 120: { /* clone(flags, child_stack, ptid, tls, ctid) — CLONE_VM thread */
+        if (g_nth >= MAXTH) return -11 /*EAGAIN*/;
+        int slot = g_nth++;
+        if (!g_th[slot].ctx) uc_context_alloc(g_uc, &g_th[slot].ctx);
+        g_th[slot].tid = ++g_next_tid;
+        g_th[slot].state = TH_RUN; g_th[slot].block = BLK_NONE;
+        g_th[slot].tls = (a0 & ME_CLONE_SETTLS) ? a3 : g_th[g_cur].tls;
+        g_th[slot].ctid = (a0 & ME_CLONE_CHILD_CLEARTID) ? a4 : 0;
+        g_th[slot].sig_blocked = g_th[g_cur].sig_blocked; g_th[slot].sig_pending = 0;
+        /* child ctx = parent's regs, but sp=child_stack, r0=0, same PC (post-svc) */
+        uint32_t s_sp = gread(UC_ARM_REG_SP), s_r0 = gread(UC_ARM_REG_R0);
+        gwrite(UC_ARM_REG_SP, a1); gwrite(UC_ARM_REG_R0, 0);
+        uc_context_save(g_uc, g_th[slot].ctx);
+        gwrite(UC_ARM_REG_SP, s_sp); gwrite(UC_ARM_REG_R0, s_r0);
+        if ((a0 & ME_CLONE_PARENT_SETTID) && a2) { uint32_t t = g_th[slot].tid; uc_mem_write(g_uc, a2, &t, 4); }
+        if ((a0 & ME_CLONE_CHILD_SETTID) && a4) { uint32_t t = g_th[slot].tid; uc_mem_write(g_uc, a4, &t, 4); }
+        if (g_trace) fprintf(stderr, "  [clone] tid=%d stack=%08x flags=%08x (nth=%d)\n",
+                             g_th[slot].tid, a1, a0, g_nth);
+        return g_th[slot].tid;     /* parent gets the new tid */
+    }
+    case 158: { /* sched_yield */
+        int j = sched_pick();
+        if (j != g_cur && j >= 0) { gwrite(UC_ARM_REG_R0, 0); sched_switch_to(j); }
+        return 0;
+    }
+    case 29:    /* pause */
+    case 72:    /* sigsuspend */
+    case 179: { /* rt_sigsuspend — block until a signal is delivered (-> EINTR) */
+        gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
+        block_current(BLK_SIG);
+        return 0;
+    }
     case 162: { /* nanosleep(req, rem) — sleep a little so we don't busy-spin */
         uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
         unsigned us = ts[0] * 1000000u + ts[1] / 1000u;
@@ -502,6 +624,7 @@ static void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     long r = sys_dispatch(nr, gread(UC_ARM_REG_R0), gread(UC_ARM_REG_R1),
                           gread(UC_ARM_REG_R2), gread(UC_ARM_REG_R3),
                           gread(UC_ARM_REG_R4), gread(UC_ARM_REG_R5));
+    if (g_switched) { g_switched = 0; return; } /* now in another thread; its R0 is set */
     if (!g_exit) gwrite(UC_ARM_REG_R0, (uint32_t)r);
 }
 
@@ -542,6 +665,12 @@ int main(int argc, char **argv) {
     uint32_t entry = load_elf(argv[1]);
     uint32_t sp = setup_stack(argc - 1, argv + 1);   /* guest argv = elf + its args */
     gwrite(UC_ARM_REG_SP, sp);
+
+    /* register the main thread (slot 0, tid 1) */
+    g_nth = 1; g_cur = 0;
+    uc_context_alloc(g_uc, &g_th[0].ctx);
+    g_th[0].tid = g_next_tid++;
+    g_th[0].state = TH_RUN;
 
     uc_hook h, hm;
     uc_hook_add(g_uc, &h, UC_HOOK_INTR, intr_cb, NULL, 1, 0);
