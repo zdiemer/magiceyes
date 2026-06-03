@@ -39,30 +39,34 @@ shm aring with a real-time drain). This unblocked audio-init; Payback then loade
 game data (Config/Payback.ini, Backgrounds/night.raw, Maps/2.lmr) and reached its
 rendering code.
 
-NEXT (the current blocker — MMSP2 video emulation, "the hard part"):
-Payback freezes (frame_seq plateaus ~1018) in its video/blit path because MMSP2
-register READS return 0, so the game's video pointers are garbage:
-- 0x24a34: a software pixel-convert loop (RGB565, 76800px = 320x240) reads a source
-  buffer whose pointer (r5 = *(*0x25388)) is ~0x1000 — junk.
-- 0xad3b8: writes an MLC register via base `*(*0xad428)` which is 0, so it stores to
-  absolute offset 0x2900/0x2912 (MLC_STL_* region) instead of base+offset.
-Root cause: our /dev/mem MMSP2 region (0xC0000000) returns 0 on reads. The game reads
-MMSP2 regs (e.g. MLC_STL_OADRL/H = the framebuffer phys addr, MLC control/status) to
-discover its framebuffer + video buffers; reading 0 -> bad pointers -> stall.
-Fix = emulate the MMSP2 register FILE on reads (not just hook OADR writes): back the
-0xC0000000 region with sane register values — fb base regs return a valid framebuffer
-phys that maps (via the /dev/mem or /dev/fb mmap) to a real RAM buffer the game then
-software-blits into; MLC mode/enable/status regs return plausible values. Map from the
-paeryn SDL register set + the staged firmware/kernel source. Likely also the **2D
-blitter** (MES/MLC blit regs) for hardware blits. This is the big remaining phase.
-Tactic: log every MMSP2 read offset Payback makes (add a UC_HOOK_MEM_READ on the region)
-to learn exactly which registers it queries + the expected semantics.
+DONE since (the loading freeze): the freeze was the MMSP2 free-running **microsecond
+timer** (TCOUNT @ 0x0a00) returning 0 — mmsp2_read_cb now serves it as a real advancing
+counter. **Payback then boots ALL the way to its first-boot menus** (create-profile,
+set-language) — rendered + live. Also added: GPIO button injection on read (0x1198
+stick / 0x1184 buttons / 0x1186 vol, active-low from shm->buttons); framebuffer present
+decoupled from syscalls (on nanosleep + periodically from the block hook) so menu/game
+loops that draw via pure mmap I/O still update; fake fd ranges moved far above real host
+fds (were aliasing past ~1000 opens → close no-op → fd leak); device fd slots reused on
+close (re-opening /dev/dsp was exhausting the 64-slot table → game exited).
 
-LATER:
-- `execve`(11) unimplemented — Payback's `system("/bin/sh ... exit 0")` helper; harmless
-  (child exits 127, parent reaps it), but make it a clean -ENOSYS path.
-- Single in-engine pipe pair (PIPEFD_R/W) — add a pipe table if a popen pipe coexists.
-- Input (GPIO regs <- shm buttons); proper double-buffer flip for OADR titles.
+NEXT (toward fully playable):
+- **Input not yet confirmed** — the menus don't react to our GPIO injection. Verify the
+  exact GP2X bit layout against Payback's input read (it reads 0x1184/0x1186/0x1198 from
+  the /dev/mem MMSP2 mmap). Either the bit positions are off, or the menu reads input via
+  a path we haven't mapped. Tactic: log the values Payback computes from those regs while
+  a button is held; try bit permutations until DONE/Select fires.
+- **Non-determinism / stalls** — runs vary (sometimes advances far, sometimes freezes).
+  The music worker error-loops on the missing Data/Music/*.ama (ENOENT) and, never
+  blocking, races/starves the menu thread. Needs either the real music data or making the
+  failing-music worker block/back off so it can't hog the scheduler.
+- **No frame cap** — runs ~uncapped (thousands of fps) because nanosleep yields instantly.
+  Make nanosleep also honour real elapsed time (pace) without re-starving the worker.
+- **Music data**: Data/Music/ in this freeware copy has only _Playlist.txt; the 20 .ama
+  tracks are absent. AMA_Open validates header+size, so substitutes (e.g. Speech .ama)
+  fail. Need the real tracks for music; the game otherwise error-loops.
+- `execve`(11) unimplemented — Payback's `system("/bin/sh ... exit 0")`; make it a clean
+  -ENOSYS path rather than relying on the fork child.
+- Then: actual gameplay (MMSP2 MLC video/blit completeness), double-buffer flip, Caanoo.
 
 Decompress note: run the GPEComp stub under qemu (binfmt + QEMU_LD_PREFIX) and recover
 `/mnt/tmp/<name>_tmp` via an inode pin (`tools/scratch/gp2x/decomp_payback.sh` in romnas)
