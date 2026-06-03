@@ -216,6 +216,8 @@ static void sched_switch_to(int j) {
 }
 /* block the current thread (caller already set its wake-time R0) and run next. */
 static void block_current(int reason) {
+    if (g_trace) { static int n = 0; if (n++ < 400)
+        fprintf(stderr, "  [block tid=%d reason=%d]\n", g_th[g_cur].tid, reason); }
     g_th[g_cur].state = TH_BLOCKED; g_th[g_cur].block = reason;
     int j = sched_pick();
     if (j < 0) {
@@ -283,11 +285,13 @@ static int dev_open(const char *path) {
     else if (!strncmp(path, "/dev/mixer", 10))t = DEV_MIXER;
     else if (!strncmp(path, "/dev/tty", 8))   t = DEV_TTY;
     else return -1;
-    if (g_devn >= 64) return -1;
-    int fd = DEVFD_BASE + g_devn; g_devtype[g_devn++] = t;
-    fprintf(stderr, "  DEV open %s -> fd=%d type=%d\n", path, fd, t);
-    return fd;
+    int i; for (i = 0; i < 64; i++) if (g_devtype[i] == 0) break;  /* reuse freed slots */
+    if (i == 64) return -1;
+    g_devtype[i] = t; if (i + 1 > g_devn) g_devn = i + 1;
+    if (g_trace) fprintf(stderr, "  DEV open %s -> fd=%d type=%d\n", path, DEVFD_BASE + i, t);
+    return DEVFD_BASE + i;
 }
+static void dev_close(int fd) { int i = fd - DEVFD_BASE; if (i >= 0 && i < 64) g_devtype[i] = 0; }
 static int dev_type(int fd) {
     int i = fd - DEVFD_BASE;
     return (i >= 0 && i < g_devn) ? g_devtype[i] : 0;
@@ -671,7 +675,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 6:    /* close */
         if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W) return 0;
-        if (dev_type((int)a0)) return 0;
+        if (dev_type((int)a0)) { dev_close((int)a0); return 0; }  /* free the device slot */
         return close((int)a0) < 0 ? -errno : 0;
     case 19: { long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? -errno : r; } /* lseek */
     case 125:  return 0;  /* mprotect (we map RWX) */
