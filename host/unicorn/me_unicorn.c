@@ -453,6 +453,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         uc_mem_read(g_uc, a1, tmp, a2);
         if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
+        if (dev_type((int)a0)) { free(tmp); return a2; }  /* /dev/dsp etc: accept + discard */
         long r = write((int)a0, tmp, a2); free(tmp);
         return r < 0 ? -errno : r;
     }
@@ -687,12 +688,16 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         block_current(BLK_SIG);
         return 0;
     }
-    case 162: { /* nanosleep(req, rem) — sleep a little so we don't busy-spin */
+    case 162: { /* nanosleep(req, rem) — yield to other threads (else a sleeping
+                  main starves a loader worker); only really sleep if alone */
+        if (a1) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a1, z, 8); }
+        gwrite(UC_ARM_REG_R0, 0);
+        int j = sched_pick();
+        if (j != g_cur && j >= 0) { sched_switch_to(j); return 0; }
         uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
         unsigned us = ts[0] * 1000000u + ts[1] / 1000u;
-        if (us > 10000) us = 10000;        /* cap to stay responsive */
+        if (us > 5000) us = 5000;          /* cap to stay responsive */
         if (us) usleep(us);
-        if (a1) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a1, z, 8); }
         return 0;
     }
     case 78: {  /* gettimeofday(tv, tz) */
