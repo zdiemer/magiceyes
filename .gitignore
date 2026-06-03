@@ -1,0 +1,4 @@
+bin/
+rootfs/
+*.o
+*.so*

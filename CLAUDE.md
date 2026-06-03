@@ -1,0 +1,175 @@
+# magiceyes — context for Claude
+
+Run Game Park Holdings handheld games — **GP2X (F100/F200)**, **GP2X Wiz**,
+**GP2X Caanoo** — on a PC, including DRM-locked commercial titles. Named for the
+MagicEyes SoCs (MMSP2 in GP2X, Pollux in Wiz/Caanoo).
+
+This file is the working brain for the project: architecture, current status, every
+hard-won gotcha, the dev environment, where the (large, un-committed) assets live,
+and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too.
+
+## TL;DR status (what works *right now*)
+
+- **Wiz, fully working** (verified end-to-end): **Deicide 3** (commercial, Inka DRM)
+  and **Cave Story / NXEngine** both render with correct **video, audio, input, and
+  timing**. Backend = qemu-user + our **fake-SDL shim** (`guest/`) + native SDL2
+  **viewer** (`host/viewer.c`).
+- **GP2X, rendering** (WIP): **Payback** (commercial, static) shows its loading
+  screen via the **Unicorn backend** (`host/unicorn/`) — a from-scratch portable
+  ARM-Linux engine. It boots through full OS init and presents its framebuffer.
+  Not yet past LOADING; no input/audio yet.
+
+## Two backends (this is the core design)
+
+The two device families need fundamentally different approaches:
+
+### 1. qemu-user + fake-SDL shim  →  for **Wiz** (and any dynamic-libSDL title)
+Wiz commercial `.gpe` are EABI/glibc-2.3.6 ELF that **dynamically link `libSDL-1.2.so.0`**.
+So we run them under `qemu-arm-static -L <wiz-rootfs>` and **replace `libSDL` with our
+own** (`guest/src/fakesdl.c`) that renders into a `/dev/shm` framebuffer; a native SDL2
+viewer (`host/viewer.c`) shows it and feeds input back. DRM is stubbed
+(`guest/src/drmstub.c`). **Linux/WSL only** (qemu-user is Linux-only).
+
+Verified gotchas baked into the shim (each was a real bug):
+- **SDL 1.2 pre-silences the audio callback buffer** before every callback (`memset`
+  to `spec.silence`); games `SDL_MixAudio` onto silence. Not doing this = the big
+  distortion bug.
+- **No threads** under qemu-user (LinuxThreads `clone()`=EINVAL) → pump the game's
+  audio callback from `SDL_Flip`/`SDL_Delay`; closed-loop cushion keyed on the
+  viewer's `a_read` (NOT wall-clock).
+- `SDL_BuildAudioCVT`/`ConvertAudio` must really convert (U8→S16, resample, downmix).
+- `SDL_Flip` must **frame-cap ~60fps** (GP2X SDL_Flip blocks vsync; ours is instant →
+  games run ~80× too fast). `FAKESDL_FPS` env.
+- `SDL_LoadBMP_RW` must handle **1/4/8/24/32-bit** BMP — GP2X `.pbm` art is mostly
+  4-bit + 1-bit (this was the "only sprites render, no room" Cave Story bug).
+- DRM: Inka "NED" `getserial` reads the handset serial from **`/dev/i2c-0`**; with no
+  device it bails to `gp2xmenu`. Our stub libinkadrm/libdrmcode return success.
+  Deicide assets are PLAINTEXT (`getcode`=0 stub still yields correct graphics).
+- **GINGE is useless on PC** (framebuffer/Pandora-host-locked, closed-source core) —
+  that's why we wrote our own shim.
+- `tools/extract_dat.py`: Deicide's `d3return_en.dat` is a plaintext packed archive,
+  **fixed 140-byte header/entry** (filename cstr, size u32 @+132, data @+140), 2758
+  files. The game reads `dat/snd/*.wav` etc. as loose files → MUST extract or audio is
+  uninitialized-buffer garbage.
+
+### 2. Unicorn engine  →  for **GP2X** (static games) and the **native cross-platform** goal
+GP2X `.gpe` are **GPEComp** self-extractors (rlyeh, UCL) that decompress to a **fully
+statically-linked** binary → **no dynamic linker → `LD_PRELOAD` can't intercept
+anything**. So GP2X needs syscall-level emulation. `host/unicorn/me_unicorn.c` is a
+small, portable `qemu-user`-equivalent: **Unicorn ARM CPU + our ELF loader + a
+Linux-ARM syscall shim + GP2X hardware emulation**, presenting to the same shm viewer.
+This ALSO yields native Windows/macOS/Linux binaries (no qemu/WSL) — GP2X support and
+cross-platform converge here.
+
+What it implements:
+- Static ARM ET_EXEC loader (PT_LOAD → Unicorn mem); SysV stack (argc/argv/envp/auxv
+  with AT_PAGESZ/AT_RANDOM); brk; a bump `mmap` region; lazy mem-fault mapping.
+- **kuser helper page @ `0xffff0f**`** (ARMv5 has no HW TLS register): get_tls reads
+  `0xffff0ff0`, plus cmpxchg/memory_barrier/version stubs. `set_tls` (0xf0005) writes
+  `0xffff0ff0`. Without this glibc dies "Cannot allocate TLS block".
+- **OABI *and* EABI syscalls**: GP2X 2005-era glibc uses legacy **OABI** (`swi
+  #(0x900000+nr)`, nr in the instruction immediate); modern toolchains use EABI
+  (`svc 0`, nr in r7). Detected by reading the SVC immediate at `pc-4`.
+- syscalls: write/read/open(at)/close/lseek; brk; **file-backed `old_mmap`(90) +
+  `mmap2`(192)** (pread); `stat`/`fstat`/`stat64` (OABI struct: st_mode@8, st_size@20);
+  uname (Linux/2.6.24/armv5tel); getuid family; rt_sig*; writev; misc stubs.
+- **Device interception**: `/dev/{fb0,fb1,mem,gpio,dsp,mixer}` → fake fds (not host).
+  mmap of `/dev/mem` tracked phys→guest; mmap of `0xC0000000` = MMSP2 reg block with a
+  `UC_HOOK_MEM_WRITE` hook watching **MLC_STL_OADRL `0x290e` / OADRH `0x2910`** (the
+  framebuffer flip register, from the paeryn SDL register map). `/dev/fb0` mmap tracked
+  as `g_fb_guest`.
+- **Present**: 320×240 RGB565 → shm. Payback is **single-buffered** (writes 0 to OADR,
+  never flips), so we present the live `/dev/fb0` region **periodically from the syscall
+  loop** (stopgap). Proper OADR-flip present is wired for double-buffered titles.
+
+## Repo layout
+
+```
+guest/   src/{fakesdl.c, drmstub.c, gp2xshm.h}  build_guest.sh   (ARM, OS-agnostic)
+host/    viewer.c  build_viewer.sh                                (native SDL2 viewer)
+host/    unicorn/{me_unicorn.c, build.sh, test/hello.c}           (portable engine)
+tools/   extract_dat.py                                           (Deicide .dat unpacker)
+magiceyes.sh   README.md  TODOS.md  CLAUDE.md  .gitattributes  .gitignore
+bin/     (build outputs, gitignored)
+```
+`gp2xshm.h` is the shm contract (RGB565 framebuffer + button bitmap + audio ring),
+shared by the shim, the viewer, and the Unicorn engine.
+
+## Build & run
+
+**Wiz path (qemu+shim, Linux/WSL):**
+```sh
+MAGICEYES_SDK=<GPH SDK dir>  guest/build_guest.sh   # builds libSDL/libinkadrm/libdrmcode (ARM)
+host/build_viewer.sh                                # native SDL2 viewer
+MAGICEYES_ROOTFS=<wiz-rootfs> ./magiceyes.sh game.gpe
+```
+**Unicorn path (GP2X / portable):**
+```sh
+host/unicorn/build.sh                               # needs libunicorn-dev 2.x
+# run a DECOMPRESSED static binary; run the viewer alongside to see it:
+host/bin/me_unicorn /path/to/decompressed.gpe       # ME_TRACE=1 for syscall trace
+```
+Controls (viewer): arrows=D-pad, Z/X/A/S=A/B/X/Y, Enter=Start, RShift/Backspace=Select,
+Q/W=L/R, Esc=quit.
+
+## Dev environment & gotchas (IMPORTANT)
+
+- Host dev is **WSL Ubuntu 24.04** + `qemu-user-static`, `libunicorn-dev` (2.0.1),
+  `gcc-arm-linux-gnueabi` (for test ELFs), `python3-lzo`+`ubi_reader`, `binutils`.
+  Passwordless sudo is enabled; `/mnt/tmp` exists `1777` (GPEComp decompresses there).
+- **`wsl.exe ... bash -lc '...'` mangles inline shell variables and `VAR=/path`
+  assignments** (MSYS path conversion). Symptoms: empty `$VAR`, paths like
+  `/foo` instead of `/mnt/e/...`. **Always put logic in a script FILE** and run
+  `bash /mnt/e/.../script.sh`, or use **literal paths only** (no shell vars) in `-lc`.
+- **GPH SDK toolchain** (`gcc-4.0.2-glibc-2.3.6`, for building the ARM shim): it's a
+  **32-bit x86** binary (needs `i386` multilib), and must run from **ext4, not `/mnt`
+  drvfs** (drvfs breaks gcc's vfork+exec of cc1, and 32-bit `stat` hits EOVERFLOW on
+  drvfs inodes). `build_guest.sh` copies it to `~/.magiceyes` and adds `-B` for
+  cc1/as/crt + `-isystem` for stddef/stdarg + `GCC_EXEC_PREFIX`/`COMPILER_PATH`.
+- Build the shim against the **SDK's own SDL 1.2 headers** so SDL_Surface/RWops/etc.
+  are ABI-identical to the real SDL_image/SDL_mixer the game also loads.
+- ABI: Wiz + GP2X are both **EABI soft-float, glibc 2.3.6, interp `/lib/ld-linux.so.2`**
+  (run under `qemu-arm`, or load directly in the Unicorn engine).
+
+## External assets (NOT in git — re-stage in the new repo)
+
+These are large/firmware/game files kept outside the repo. In the romnas working tree
+they live under `tools/scratch/gp2x/` and the operator's drives:
+- **Wiz rootfs**: extract `wiz_ubifs.img` (from the Wiz firmware zip) with
+  `ubireader_extract_files` → glibc/SDL/libstdc++/libpng3 + the real
+  libinkadrm/libdrmcode. Point `MAGICEYES_ROOTFS` at it.
+- **GPH SDK** (`GPH_SDK-10.02_linux.tar.gz`): toolchain + `DGE/include/SDL/` headers.
+- **paeryn GP2X SDL source** (`SDL-1.2.9-GP2X-paeryn`): the MMSP2 register map lives in
+  `src/video/gp2x/mmsp2_regs.h` + `SDL_gp2xvideo.c` (OADRL/OADRH = fb address).
+- **GP2X firmware** F100 (`FW4.1.0`) / F200 (`4.1.1`): `gp2xupdate.gpu` is the updater
+  *program*; the base rootfs is on-device (the patch tar is only an overlay). A GP2X
+  rootfs may be reusable from the Wiz one (both EABI glibc-2.3.6) for SDL needs.
+- **Games** (operator-supplied, legally dumped): Deicide 3, and freeware Cave Story
+  (doukutsu — note: that build is missing `data/Org/` music), Payback, Knight Lore.
+- GP2X games are GPEComp; decompress by running the stub from **ext4** with `/mnt/tmp`
+  writable (it writes `/mnt/tmp/<name>_tmp`), then run that static binary in the engine.
+  TODO: an offline `tools/un-gpecomp` (UCL) so there's no `/mnt/tmp`+exec dance.
+
+## Roadmap / next steps (see TODOS.md for full detail)
+
+1. **Get Payback past LOADING → gameplay**: add `time`(13)/`statfs`(99)/`pipe`(42),
+   handle/avoid `fork`(2), give it time/input. Check it isn't stalled polling a hw
+   status reg we return 0 for (vsync/DMA).
+2. **Input**: GP2X buttons are MMSP2 GPIO registers (read from the `0xC0000000` mmap) —
+   write the shm button state into those reg offsets. (Payback didn't open `/dev/GPIO`.)
+3. **Audio**: `/dev/dsp` (OSS) → shm audio ring → viewer (reuse the Wiz audio path).
+4. **Proper flip** for double-buffered titles (OADR hook is wired; periodic fb0 present
+   is the single-buffered stopgap).
+5. **Caanoo** (Pollux) profile; per-device `{rootfs, button map, SoC}` profiles.
+6. **Cleanup** the engine's debug instrumentation (verbose DEV/MMSP2/sc logs, mem-fault
+   lazy-map) behind one `MAGICEYES_DEBUG` switch; strip the shim's `FAKESDL_*` probes.
+7. **Native cross-platform**: the Unicorn engine is portable C — build it for Windows/
+   macOS (Unicorn + SDL2) to drop the WSL/qemu dependency entirely. The guest side is
+   unchanged.
+
+## Conventions
+
+- Commit straight to `main`, **no `Co-Authored-By` trailer**.
+- `.gitattributes` forces LF on scripts/sources so they run under Linux/WSL regardless
+  of the host's `core.autocrlf`.
+- Don't commit firmware libs, game data, the rootfs, or `bin/` (see `.gitignore`).

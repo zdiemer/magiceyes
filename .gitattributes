@@ -1,0 +1,9 @@
+# magiceyes ships shell scripts + C that must run under Linux/WSL — keep LF
+# regardless of the host's core.autocrlf so the build/launcher scripts work.
+*.sh  text eol=lf
+*.py  text eol=lf
+*.c   text eol=lf
+*.h   text eol=lf
+*.md  text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf

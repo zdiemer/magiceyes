@@ -1,0 +1,33 @@
+/* Stub for the GP2X/Wiz Inka Entworks "NED" DRM (libinkadrm.so.0 / libdrmcode.so.0).
+ *
+ * The real getserial() reads the handset serial from /dev/i2c-0 (an EEPROM);
+ * with no physical Wiz that open fails and the title bails back to gp2xmenu.
+ * These stubs satisfy the boot gate without the device. If a title decrypts its
+ * assets using getcode()/getrandnum() keyed on the real serial, stubbing will
+ * instead yield garbled data -- that outcome tells us the title is serial-locked
+ * and genuinely needs the device's serial (preservation fallback).
+ *
+ * Built once, staged as BOTH libinkadrm.so.0 and libdrmcode.so.0 (each exports
+ * the full set; the loader resolves each symbol from whichever is first).
+ */
+#include <string.h>
+
+/* Most likely signature: fills a caller buffer with the serial string. */
+int getserial(char *buf)
+{
+    if (buf) {
+        /* 16-char dummy Wiz serial */
+        memcpy(buf, "0000000000000000", 16);
+        buf[16] = '\0';
+    }
+    return 0;
+}
+
+/* DRM session lifecycle + helpers -- success / benign values.
+   K&R empty parens so any argument list the caller uses is accepted. */
+int NED_Initialize() { return 0; }
+int ND_Initialize()  { return 0; }
+int ND_Terminate()   { return 0; }
+int getcode()        { return 0; }
+int getrandnum()     { return 0x5a5a5a5a; }
+int com_drm_time()   { return 0; }
