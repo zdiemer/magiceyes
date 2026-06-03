@@ -25,17 +25,28 @@ WORKING:
   manager, manager clones the worker, worker restarts main via SIGRTMIN(32) and main's
   handler runs. Payback then proceeds through its loader fork+exec into the game.
 
-NEXT (the current blocker):
-- After the post-fork popen-style helper (child `execve`s an external tool, fails),
-  the parent crashes: a fake pipe fd value (PIPEFD_R=2000=0x7d0) is **dereferenced as a
-  pointer**, then `UC_ERR_WRITE_PROT` at pc=0x1ff000 (control flow off the rails).
-  Suspect popen/fdopen on our fake pipe fds, or a fork-restore gap. Debug by
-  disassembling around the open(`0x2a91a8`)/time site + the caller of pc 0x1ff000.
-- `execve`(11) unimplemented (the helper the child runs); make it a clean failure or
-  implement it (it ELF-loads + resets the process — interacts with fork/threads).
-- Multiple pipes: the in-engine pipe is a single pair (PIPEFD_R/W). LinuxThreads' manager
-  pipe + a popen pipe coexisting will collide → needs a small pipe table.
-- Then: input (GPIO regs ← shm), audio (/dev/dsp → shm ring), proper double-buffer flip.
+FIXED (was the post-fork crash): switching the CPU context *inside* a UC_HOOK_BLOCK
+corrupted state — Unicorn kept executing the current block with the swapped-in
+registers (manager thread ran a real loop with r2=pipe-fd → bad deref → WRITE_PROT).
+Now the block hook only flags g_preempt + uc_emu_stop, and the main loop time-slices
+at a clean boundary (same rule the syscall-driven switches followed). Also: real
+munmap (uc_mem_unmap) so the mmap/munmap churn doesn't overflow Unicorn's region
+table; nanosleep yields to other threads. **Payback now runs its full game loop
+across both threads and renders the loading screen.**
+
+NEXT (the current blocker — audio init / music scan):
+- Payback sits at "Accessing data..." in its audio+music loop: it opens /dev/dsp every
+  frame, fires ~14k OSS ioctls, and re-mmaps Data/Music/*.ama. Our ioctl returns 0 for
+  everything incl SNDCTL_DSP_GETOSPACE → the game sees "no audio buffer space" and never
+  finishes. Implement real **/dev/dsp OSS**: SNDCTL_DSP_{SPEED,SETFMT,STEREO,GETOSPACE,
+  GETBLKSIZE,RESET,SYNC} (return sane buffer space) + route writes to the shm audio ring
+  (reuse the Wiz viewer audio path). Verify the .ama mmap returns correct header bytes.
+- `execve`(11) unimplemented — Payback's `system("/bin/sh ... exit 0")` helper; harmless
+  failure for now (child exits 127, parent reaps it), but make it a clean -ENOSYS/clean
+  child exit rather than relying on the fork path.
+- Single in-engine pipe pair (PIPEFD_R/W) — fine so far (only LinuxThreads' manager pipe
+  seen); add a small pipe table if a popen pipe ever coexists.
+- Then: input (GPIO regs ← shm buttons), proper double-buffer flip for OADR titles.
 
 Decompress note: run the GPEComp stub under qemu (binfmt + QEMU_LD_PREFIX) and recover
 `/mnt/tmp/<name>_tmp` via an inode pin (`tools/scratch/gp2x/decomp_payback.sh` in romnas)
