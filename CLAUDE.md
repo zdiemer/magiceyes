@@ -150,6 +150,18 @@ they live under `tools/scratch/gp2x/` and the operator's drives:
   writable (it writes `/mnt/tmp/<name>_tmp`), then run that static binary in the engine.
   TODO: an offline `tools/un-gpecomp` (UCL) so there's no `/mnt/tmp`+exec dance.
 
+Keep these in a **shared, gitignored dir** (re-derivable but slow to rebuild) and point
+the env vars at it, e.g. a sibling `../magiceyes-assets/`:
+```
+MAGICEYES_ROOTFS=../magiceyes-assets/wiz-rootfs   # extracted wiz_ubifs
+MAGICEYES_SDK=../magiceyes-assets/GPH_SDK         # toolchain + SDL headers
+# games + firmware + paeryn-sdl reference also live there
+```
+`build_guest.sh` regenerates the ext4 toolchain copy (`~/.magiceyes`) itself; the
+decompressed `*_tmp` binaries live in `/mnt/tmp` and are recreated by running the stub.
+During this project the originals were under romnas `tools/scratch/gp2x/` and the
+operator's `F:\Roms\GP2X` (F100/F200 firmware, SDL src, games) + the Wiz firmware zip.
+
 ## Roadmap / next steps (see TODOS.md for full detail)
 
 1. **Get Payback past LOADING → gameplay**: add `time`(13)/`statfs`(99)/`pipe`(42),
