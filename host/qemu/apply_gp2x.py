@@ -131,6 +131,19 @@ REPLACEMENTS = [
      '#else\n'
      '        return get_errno(safe_kill(arg1, target_to_host_signal(arg2)));\n'
      '#endif\n'),
+    # getpid() -> per-thread tid (2.4 LinuxThreads: each thread has a unique pid;
+    # without this, restart signals misroute to the main thread -> cond/mutex
+    # handshakes fall back to the manager's 2s poll -> ~50000x slower sync)
+    ('    case TARGET_NR_getpid:\n'
+     '        return get_errno(getpid());\n'
+     '#endif\n',
+     '    case TARGET_NR_getpid:\n'
+     '#ifdef CONFIG_GP2X\n'
+     '        return get_errno(sys_gettid());\n'
+     '#else\n'
+     '        return get_errno(getpid());\n'
+     '#endif\n'
+     '#endif\n'),
     # throttle a pathological missing-asset open loop (open case)
     ('        fd_trans_unregister(ret);\n'
      '        unlock_user(p, arg1, 0);\n'
