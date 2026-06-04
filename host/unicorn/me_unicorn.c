@@ -91,7 +91,6 @@ struct thread {
 static struct thread g_th[MAXTH];
 static int g_nth = 0, g_cur = 0, g_next_tid = 100;  /* main != pid 1 (LinuxThreads orphan check) */
 static int g_switched = 0;   /* a syscall changed the running thread this trap */
-static int g_preempt = 0;    /* block hook asked the main loop to time-slice */
 
 /* CLONE_* flags we care about */
 #define ME_CLONE_VM            0x00000100
@@ -639,6 +638,8 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (g_trace) fprintf(stderr, "  [thread %d exit] -> next slot %d\n", g_th[g_cur].tid, j);
             if (j >= 0) { sched_switch_to(j); return 0; }
         }
+        fprintf(stderr, "  [REAL EXIT] code=%u nr=%u tid=%d forked=%d nth=%d nsnap=%d\n",
+                a0, nr, g_th[g_cur].tid, g_forked, g_nth, g_nsnap);
         g_exit = 1; g_exit_code = a0; uc_emu_stop(g_uc); return 0;
     case 4: {  /* write(fd, buf, count) */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
@@ -997,26 +998,8 @@ static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     return true;  /* retry the faulting access */
 }
 
-/* Preemption: yield between basic blocks so a CPU-bound thread (spinlock/busy
-   wait that never makes a syscall) can't starve the others. */
-static void block_hook(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
-    (void)addr; (void)size; (void)user;
-    /* present the framebuffer periodically even when the game does pure mmap'd I/O
-       (menu/game loops poll GPIO + draw without syscalls, so the syscall-gated
-       present in sys_dispatch would otherwise freeze the screen). */
-    { static unsigned pc = 0; if (g_fb_guest && (++pc & 0x3ffff) == 0) present_active(); }
-    if (g_forked || g_nth < 2 || g_preempt) return;  /* fork child is single-threaded */
-    if (getenv("ME_NOPREEMPT")) return;
-    static unsigned c = 0;
-    if (++c < 40000) return;
-    c = 0;
-    /* Switching the CPU context inside a block hook corrupts state (Unicorn still
-       runs the current block with the swapped-in registers). Instead stop here and
-       let the main loop time-slice at a clean boundary — but only if another thread
-       is actually runnable. */
-    for (int i = 0; i < g_nth; i++)
-        if (i != g_cur && g_th[i].state == TH_RUN) { g_preempt = 1; uc_emu_stop(uc); return; }
-}
+/* Preemption is driven by uc_emu_start's instruction-count limit in the main loop
+   (a per-basic-block UC_HOOK_BLOCK callback was far too much overhead -> choppy). */
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
@@ -1052,36 +1035,33 @@ int main(int argc, char **argv) {
     g_th[0].ppid = 1;
     g_th[0].state = TH_RUN;
 
-    uc_hook h, hm, hb;
+    uc_hook h, hm;
     uc_hook_add(g_uc, &h, UC_HOOK_INTR, intr_cb, NULL, 1, 0);
-    uc_hook_add(g_uc, &hb, UC_HOOK_BLOCK, block_hook, NULL, 1, 0);
     uc_hook_add(g_uc, &hm, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
 
     if (g_trace) fprintf(stderr, "entry=%08x sp=%08x brk=%08x\n", entry, sp, g_brk);
+    /* Run in instruction-count time-slices. Blocking syscalls switch threads inline
+       (g_switched); when a slice's count expires we round-robin to another runnable
+       thread. The loop only exits on real process exit, so a stray uc_emu_start
+       return can't freeze the engine. */
     uint32_t pc = entry;
+    unsigned slice = 0; int errs = 0;
+    const uint64_t SLICE = getenv("ME_SLICE") ? strtoull(getenv("ME_SLICE"), 0, 0) : 700000;
     while (!g_exit) {
-        e = uc_emu_start(g_uc, pc, 0, 0, 0);
+        e = uc_emu_start(g_uc, pc, 0, 0, SLICE);
         if (g_exit) break;
-        if (g_preempt) {        /* time-slice to another runnable thread (clean boundary) */
-            g_preempt = 0;
-            uc_context_save(g_uc, g_th[g_cur].ctx);
-            uc_mem_read(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
-            int j = sched_pick();
-            if (j >= 0 && j != g_cur) {
-                g_cur = j;
-                uc_mem_write(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
-                uc_context_restore(g_uc, g_th[g_cur].ctx);
-                deliver_signals();
-            }
-            uint32_t cpsr = gread(UC_ARM_REG_CPSR);
-            pc = gread(UC_ARM_REG_PC) | ((cpsr & 0x20) ? 1u : 0u);  /* keep Thumb bit */
-            continue;
-        }
-        if (e && !g_exit)
-            fprintf(stderr, "me_unicorn: emu stopped: %s (pc=%08x)\n",
-                    uc_strerror(e), gread(UC_ARM_REG_PC));
-        break;
+        if (e != UC_ERR_OK) {
+            if (errs < 30) fprintf(stderr, "me_unicorn: emu err %s pc=%08x\n",
+                                   uc_strerror(e), gread(UC_ARM_REG_PC));
+            if (++errs > 200) { fprintf(stderr, "me_unicorn: too many errors, stopping\n"); break; }
+        } else if (errs) errs = 0;
+        int j = sched_pick();                 /* time-slice / wake sleepers */
+        if (j >= 0 && j != g_cur) sched_switch_to(j);
+        g_switched = 0;
+        if ((++slice & 3) == 0 && g_fb_guest) present_active();
+        uint32_t cpsr = gread(UC_ARM_REG_CPSR);
+        pc = gread(UC_ARM_REG_PC) | ((cpsr & 0x20) ? 1u : 0u);   /* keep Thumb bit */
     }
     uc_close(g_uc);
     return g_exit_code;
