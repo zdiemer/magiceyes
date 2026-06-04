@@ -10,8 +10,13 @@ hardware. magiceyes runs the unmodified `.gpe` by emulating the ARM CPU and
 **replacing the device's SDL + DRM with our own implementations** that render to
 a normal window, instead of trying to emulate the whole SoC.
 
-> Status: **working** — verified end-to-end on Deicide 3 (commercial, Inka DRM)
-> and Cave Story/NXEngine (homebrew): correct video, audio, input, and timing.
+> Status:
+> - **Wiz: working** — verified end-to-end on Deicide 3 (commercial, Inka DRM) and
+>   Cave Story/NXEngine (homebrew): correct video, audio, input, timing (qemu-user + shim).
+> - **GP2X (F100/F200): in progress** — a from-scratch Unicorn backend boots a static
+>   commercial title (Payback) to its interactive menus with input + audio, but runs ~6 fps
+>   (Unicorn JIT-speed-bound). **Pivoting the GP2X backend to a forked qemu-user** for speed
+>   + native threading — see `CLAUDE.md` ("the QEMU pivot") and `TODOS.md`.
 
 ## Architecture
 

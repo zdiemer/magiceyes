@@ -4,9 +4,25 @@ Status: Wiz support verified end-to-end (Deicide 3 commercial + Cave Story). Now
 generalizing to the whole Game Park Holdings family + hardening for spin-out into
 its own repo.
 
-## In progress
+## NEXT (decided): pivot the GP2X backend from Unicorn to forked qemu-user
 
-### GP2X via the Unicorn backend — scheduler DONE, chasing a post-fork crash
+The Unicorn backend boots Payback to its interactive menus (input+audio) but is
+structurally ~6 fps (Unicorn TCG: working preemption disables block chaining → ~21 MIPS;
+chaining-mode crashes on cross-thread uc_emu_stop / starves the menu). **Decision: fork
+qemu-user (`qemu-arm`)** — same TCG but full chaining (fast) + native threads/signals/fork
+(deletes our scheduler/signals/sync-fork). Plan in CLAUDE.md ("the QEMU pivot"):
+1. Clone + build vanilla `qemu-arm` in WSL (prove the toolchain).
+2. Patch `linux-user/syscall.c` to intercept the GP2X devices (open/mmap/ioctl) — reuse
+   the device contract in CLAUDE.md (MMSP2 regs/timer/GPIO, /dev/fb0+fb1, /dev/dsp OSS).
+3. Host helper thread: advance the µs timer, inject GPIO from shm, present the fb to the
+   viewer shm (qemu accesses those mmaps as fast host memory; no per-access hook).
+4. Reach parity with the Unicorn build (boots Payback to menus), then make it the default.
+Keep the SDL2 viewer, shm contract, `tools/gp2x/decomp_*.sh`, and the Unicorn backend as a
+fallback. Lose native Win/macOS (qemu-user is Linux; GP2X path was always WSL).
+
+## In progress (Unicorn backend — now a fallback; see CLAUDE.md for full state)
+
+### GP2X via the Unicorn backend — boots Payback to menus; ~6fps (Unicorn-speed-bound)
 The Unicorn engine (`host/unicorn/me_unicorn.c`) is the chosen path (we own every
 syscall, so we fake GP2X hardware for static binaries, and it's the same work that
 delivers the native cross-platform binary). Status on **Payback** (static GP2X game):

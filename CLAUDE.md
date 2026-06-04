@@ -179,6 +179,57 @@ operator's `F:\Roms\GP2X` (F100/F200 firmware, SDL src, games) + the Wiz firmwar
    macOS (Unicorn + SDL2) to drop the WSL/qemu dependency entirely. The guest side is
    unchanged.
 
+## GP2X status (Unicorn backend) + the QEMU pivot — READ THIS
+
+**Where GP2X got to (Unicorn engine, `host/unicorn/me_unicorn.c`):** a static GP2X
+commercial game (**Payback**) **boots all the way to its interactive first-boot menus**
+(loading → create-profile → set-language → main menu → chapter select) with **working
+input and audio**, via a from-scratch engine: ELF loader, OABI/EABI syscalls, synchronous
+`fork`, a **cooperative thread scheduler** (clone/futex/yield/signals — the full glibc
+LinuxThreads handshake), `/dev/dsp` OSS audio → shm ring, MMSP2 emulation (µs timer, GPIO
+buttons, dual-fb present). Real milestone; proved out the whole GP2X hardware contract.
+
+**Why we're pivoting to QEMU (decided):** the Unicorn backend is **structurally slow**
+(~6 fps). Root cause (measured, not our overhead): any working preemption (the
+`uc_emu_start` instruction-count slice) **disables Unicorn's TCG block chaining → ~21
+MIPS**, and this menu's full-screen animated background needs ~4M instr/frame. Chaining
+(no count limit) reaches ~90 MIPS but then cross-thread `uc_emu_stop` *crashes* this
+Unicorn and the timeout-slice + our hand-rolled scheduler starve/under-present the menu.
+Hooks (~9k/s) and mmap churn (now free-listed) are NOT the bottleneck.
+
+**The QEMU plan** (`host/qemu/`, to build): fork **qemu-user** (`qemu-arm`) — same TCG JIT
+but full chaining (hundreds of MIPS) **and native threads/signals/fork** (deletes our
+scheduler + signals + sync-fork — our biggest bug surface). GP2X games are *static* so we
+can't `LD_PRELOAD` a shim (that's the Wiz path); instead **patch `linux-user/syscall.c`**
+to intercept the GP2X devices (contract below). A small **host helper thread** advances
+the MMSP2 timer, injects GPIO from shm input, and presents the framebuffer (qemu accesses
+the mmap'd MMSP2/fb regions as plain fast host memory — no per-access hook). Keep the SDL2
+viewer, shm contract, decomp tooling, device knowledge. Lose native Win/macOS (qemu-user
+is Linux — GP2X was always WSL; this unifies Wiz+GP2X under qemu). Keep Unicorn as a
+fallback until parity. First step: clone + build vanilla `qemu-arm` in WSL, then add the
+device interception incrementally.
+
+**GP2X hardware contract (worked out in Unicorn — port to qemu syscall.c):**
+- Binary: EABI structs + **OABI syscalls** (`swi #(0x900000+nr)`); glibc 2.3.6 LinuxThreads.
+- `/dev/fb0` + `/dev/fb1` (mmap, 320x240x16): **double-buffered** (OADR written 0, no OADR
+  flip) → present whichever buffer most recently changed.
+- `/dev/mem` mmap @ phys **0xC0000000** = MMSP2 regs: **TCOUNT timer @0x0a00** (µs, must
+  advance); **GPIO** @0x1198 lo = 8-way stick, 0x1184 hi = START/SEL/L/R/A/B/X/Y, 0x1186
+  lo = VOL, all active-low; MLC `OADRL/OADRH` @0x290e/0x2910. Input =
+  `~((m[0x1198]&0xff)|(m[0x1184]&0xff00)|(m[0x1186]<<16))` w/ diagonal fixups
+  (`gp2x_joystick_read`); button bits match `gp2xshm.h` (A=12,B=13,X=14,Y=15,START=8,…).
+- `/dev/dsp` OSS: SNDCTL_DSP_{SPEED,STEREO,CHANNELS,SETFMT,GETBLKSIZE,SETFRAGMENT,GETFMTS,
+  GETOSPACE,GETODELAY,RESET,SYNC,POST}; **GETOSPACE must report real free space** (0 ⇒ the
+  game thinks the buffer is always full); writes → shm audio ring.
+- `stat64`: ARM EABI is st_mode@16/st_size@40/sizeof 112, BUT glibc 2.3.6's buffer is
+  smaller — writing 112B **overflowed + crashed** at startup; we reverted to the 88B
+  old-stat fill. Get the exact glibc-2.3.6 size from GPH SDK headers before redoing it.
+- GPEComp games decompress to `/mnt/tmp/<name>_tmp` (static) via `tools/gp2x/decomp_*.sh`
+  (inode-pin trick). Test binary: `~/pbtest/Payback_tmp` (10MB static), run from `~/pbtest`
+  (needs `Data/`). **`Data/Music/*.ama` are absent** in this freeware copy (only copy the
+  user has) → the music worker error-loops; `tools/gp2x/fake_music.sh` is a placeholder.
+- Interactive run: `bash run-gp2x.sh ~/pbtest/Payback_tmp` (engine + SDL2 viewer, WSLg).
+
 ## Conventions
 
 - Commit straight to `main`, **no `Co-Authored-By` trailer**.
