@@ -113,8 +113,16 @@ static void *phys_to_host(gp2x_dev_t *d, uint32_t phys) {
 }
 
 /* ---- timer ---- */
+/* The GP2X MMSP2 system timer (TCOUNT @ 0x0a00) runs at 7.3728 MHz, not 1 MHz.
+   Advancing it at 1 MHz makes the game read time passing ~7.4x too slowly -> the
+   simulation runs in slow motion and the in-game clock barely moves. Match the
+   real frequency. ME_GP2X_TIMESCALE overrides the multiplier for experiments. */
+#define GP2X_TIMER_HZ 7372800.0
 uint32_t gp2x_timer_us(gp2x_dev_t *d) {
-    return (uint32_t)((host_now() - d->t0) * 1e6);
+    double hz = GP2X_TIMER_HZ;
+    const char *s = getenv("ME_GP2X_TIMESCALE");
+    if (s) hz = 1e6 * atof(s);
+    return (uint32_t)((host_now() - d->t0) * hz);
 }
 
 /* ---- GPIO (active-low; matches gp2xshm.h button enum) ---- */

@@ -127,6 +127,9 @@ abi_long gp2x_mmap(abi_ulong addr, abi_ulong len, int prot, int fd, off_t offset
         return -TARGET_ENOMEM;   /* device region mmap failed (fatal anyway) */
     }
     void *host = g2h_untagged(g);
+    if (getenv("ME_GP2X_DEBUG"))
+        fprintf(stderr, "[gp2x] mmap kind=%d phys=%08x -> guest=%08x host=%p len=%u\n",
+                kind, (uint32_t)offset, (uint32_t)g, host, (uint32_t)len);
     /* /dev/fb0,fb1 mmap at offset 0: register at the fb's advertised phys (what we
        returned from FBIOGET_FSCREENINFO) so an OADR flip to that phys resolves here. */
     uint32_t phys = (kind == K_FB) ? e->phys : (uint32_t)offset;
