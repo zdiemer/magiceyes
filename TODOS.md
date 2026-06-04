@@ -34,7 +34,39 @@ Build: `host/qemu/build_qemu.sh`. Run: `host/qemu/run-gp2x-qemu.sh <static-binar
 The SDL2 viewer, shm contract, and `tools/gp2x/decomp_*.sh` are unchanged; the Unicorn
 backend stays as a fallback. See `host/qemu/README.md`.
 
-### THE CURRENT BLOCKER: ~4fps "slow motion" (fine-grained thread sync) — see below
+### GP2X SPEED: two root-cause bugs FIXED; residual ~9fps is CPU-bound rendering
+Payback: was ~4fps in SLOW MOTION; now ~9fps at CORRECT simulation speed. Two fixes:
+- **getpid() -> per-thread tid** (commit): glibc-2.3.6 LinuxThreads emulates a 2.4 kernel
+  where each thread's getpid() is its unique pid and threads signal via kill(p_pid). qemu's
+  shared-pid getpid() misrouted every restart signal -> cond/mutex fell back to the manager's
+  2s poll. Microbench (tools/gp2x/bench/, GPH SDK glibc-2.3.6 toolchain): 0.5 -> 26000
+  handoffs/sec (~50000x; native NPTL ~34000). General: any cond/mutex-heavy LinuxThreads title.
+- **TCOUNT @ 7.3728 MHz, not 1 MHz** (commit): the GP2X system timer runs at 7.3728 MHz; we
+  advanced it at 1 MHz so the game read time ~7.4x too slowly -> slow motion + the in-game clock
+  stuck (operator saw pause-menu time-elapsed = 0). Now correct. `tools/gp2x/test_timescale.sh`
+  sweeps `ME_GP2X_TIMESCALE`; Payback plateaus ~9fps above ~20x (timer no longer the gate).
+- **Residual ~9fps is CPU-bound** (not sync, not audio, not the 2D blitter): at high TIMESCALE
+  the main thread is 100% of one core. Payback uses the **MMSP2 MLC multi-layer display**
+  (regs 0x2880-0x28d8: screen 319/239, layer fb addrs 0x03da.../0x03ed...; NOT the 2D blitter,
+  whose region is zero) and software-renders into those layers; a worker (Thread 3 @ guest pc
+  0xae168) busy-waits on a game queue (0xe9ead0/0xe9eae8 = game RAM, r4=16384=audio chunk) that
+  the main fills. Open question: is ~9fps genuine render cost amplified by a qemu-TCG pathology
+  (CF_PARALLEL after the first clone? unaligned fb writes? kuser-cmpxchg traps?), or a producer/
+  consumer spin pattern? Next: measure qemu's effective MIPS for the render loop; check whether
+  the pre-clone (single-threaded, non-CF_PARALLEL) phase renders faster. Tools: `cpuprobe.sh`,
+  `find_spin.sh`, `profile_main.sh`, `who_spins.sh`, `mon.py` (real GAME_fps via OADR flips).
+- We do NOT present all MLC layers (only the OADR scanout) — visible rendering is mostly right
+  but multi-layer compositing/scaling is unemulated; revisit for correctness.
+
+### Other GP2X games (operator-supplied; track issues — goal is general-purpose)
+- **Blazar** (static ELF, `assets`/F:\Roms\GP2X\Blazar_v1-30_gp2x\blazar.gpe): **SIGSEGV at
+  startup** under the backend — investigate (different device/feature; not yet traced).
+- **Knight Lore** (`~/kltest/knightlore.gpe`): **dynamically linked** (interp /lib/ld-linux.so.2)
+  -> Wiz-style path (needs the rootfs + maybe libSDL), not the static-GP2X path. Different setup.
+- Untested: Odonata, Quartz2, Retrovirus, Vektar, Wind & Water (in F:\Roms\GP2X). Decompress
+  GPEComp ones (tools/gp2x/decomp_*.sh) or run static ELFs directly; record each game's issues.
+
+### (historical) THE CURRENT BLOCKER: ~4fps "slow motion" (fine-grained thread sync) — see below
 Payback reaches **gameplay** on the qemu backend (set-language → create-profile → main menu →
 mission, with correct video/audio/input) BUT runs at **~4fps** ("slow motion"). Diagnosis (a
 long bisect — tools: `mon.py`, `cpuprobe.sh`, `find_spin.sh`, `profile_main.sh`, `find_gate.sh`):
