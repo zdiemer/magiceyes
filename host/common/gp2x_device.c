@@ -41,6 +41,8 @@ struct gp2x_dev {
     uint32_t    last_hb;          /* last seen viewer heartbeat */
     double      last_hb_t;        /* host time it last changed */
     int         debug;            /* ME_GP2X_DEBUG: log regions + present decisions */
+    uint32_t    last_oadr;        /* last MLC scanout address (flip detection) */
+    uint32_t    flips;            /* count of real game flips (== actual frame rate) */
 };
 
 /* ---- time ---- */
@@ -189,9 +191,26 @@ static void present_active(gp2x_dev_t *d) {
     else gp2x_present_rgb565(d, surf_nonblank(b) > surf_nonblank(a) ? b : a, 320, 240);
 }
 
+/* Count real game frames by watching the MLC scanout address (OADR) flip. Called
+   every helper tick (~1kHz) so it catches flips up to ~1000fps; published to shm
+   so a monitor can read the ACTUAL frame rate (frame_seq only counts presents). */
+static void count_flip(gp2x_dev_t *d) {
+    if (!d->mmsp2) return;
+    uint16_t lo, hi;
+    memcpy(&lo, (uint8_t *)d->mmsp2 + GP2X_REG_OADRL, 2);
+    memcpy(&hi, (uint8_t *)d->mmsp2 + GP2X_REG_OADRH, 2);
+    uint32_t phys = ((uint32_t)hi << 16) | lo;
+    if (phys && phys != d->last_oadr) {
+        d->last_oadr = phys;
+        d->flips++;
+        if (d->shm) d->shm->reserved[0] = d->flips;   /* monitor: real fps source */
+    }
+}
+
 /* ---- service tick (helper thread) ---- */
 void gp2x_tick(gp2x_dev_t *d) {
     if (!d) return;
+    count_flip(d);
     if (d->mmsp2) {
         uint32_t us = gp2x_timer_us(d);
         memcpy((uint8_t *)d->mmsp2 + GP2X_REG_TCOUNT, &us, 4);

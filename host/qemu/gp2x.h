@@ -27,6 +27,11 @@ abi_long gp2x_mmap(abi_ulong addr, abi_ulong len, int prot, int fd, off_t offset
 abi_long gp2x_ioctl(int fd, abi_long cmd, abi_long arg);
 abi_long gp2x_write(int fd, abi_long buf, abi_long count);
 
+/* Note an open()/openat() result (ret) so a pathological missing-asset loop
+   (e.g. a music worker cycling absent .ama files) can be throttled — its mmap/
+   munmap churn otherwise starves the game via qemu's global mmap_lock. */
+void gp2x_after_open(abi_long ret);
+
 /* True if execve of `path` should be a successful no-op: GP2X games shell out
    (/bin/sh) and load kernel modules (insmod) only for best-effort device tweaks
    that don't exist on PC. The forked child should just exit(0). */

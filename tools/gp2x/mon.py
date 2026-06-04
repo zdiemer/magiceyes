@@ -15,16 +15,18 @@ def main():
     def rd():
         seq = struct.unpack_from("<I", m, 12)[0]
         aw, ar, hb = struct.unpack_from("<III", m, 40)
-        return seq, aw, ar, hb
-    pseq, paw, par, phb = rd()
-    print(f"{'t':>3} {'fps':>5} {'ring_fill':>10} {'drain_Bps':>10} {'hb/s':>6}")
+        flips = struct.unpack_from("<I", m, 52)[0]   # reserved[0] = real game flips
+        return seq, aw, ar, hb, flips
+    pseq, paw, par, phb, pfl = rd()
+    print(f"{'t':>3} {'GAME_fps':>9} {'present':>8} {'ring_fill':>10} {'drain_Bps':>10}")
     for t in range(secs):
         time.sleep(1)
-        seq, aw, ar, hb = rd()
+        seq, aw, ar, hb, fl = rd()
         fill = (aw - ar) & 0xffffffff
         drain = (ar - par) & 0xffffffff
-        print(f"{t:>3} {seq-pseq:>5} {fill:>10} {drain:>10} {hb-phb:>6}")
-        pseq, paw, par, phb = seq, aw, ar, hb
+        gfps = (fl - pfl) & 0xffffffff
+        print(f"{t:>3} {gfps:>9} {seq-pseq:>8} {fill:>10} {drain:>10}")
+        pseq, paw, par, phb, pfl = seq, aw, ar, hb, fl
 
 if __name__ == "__main__":
     main()

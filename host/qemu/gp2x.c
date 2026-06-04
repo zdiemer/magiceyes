@@ -176,6 +176,24 @@ abi_long gp2x_ioctl(int fd, abi_long cmd, abi_long arg) {
     return r;
 }
 
+void gp2x_after_open(abi_long ret) {
+    static __thread int streak;
+    if (ret < 0) {
+        /* Throttle a pathological missing-asset loop. GP2X games ship a music
+           worker that cycles a playlist; when the *.ama files are absent it spins
+           open()=ENOENT, and each iteration also mallocs a ~260KB decode buffer
+           (glibc uses mmap above its threshold) then frees it. qemu's GLOBAL
+           mmap_lock serializes that mmap/munmap churn across every thread, so the
+           worker starves the game (2-3fps). A streak of failed opens -> back off;
+           any successful open resets it, so real assets are never throttled. */
+        if (++streak > 4) {
+            usleep(50000);
+        }
+    } else {
+        streak = 0;
+    }
+}
+
 bool gp2x_execve_noop(const char *path) {
     if (!path) return false;
     const char *base = strrchr(path, '/');

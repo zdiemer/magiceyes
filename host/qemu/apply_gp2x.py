@@ -113,6 +113,53 @@ HOOKS = [
 ]
 
 
+# (old, new) exact replacements applied to syscall.c after the insertion HOOKS.
+REPLACEMENTS = [
+    # LinuxThreads signals threads via kill(tid); route to the exact thread (tgkill)
+    ('    case TARGET_NR_kill:\n'
+     '        return get_errno(safe_kill(arg1, target_to_host_signal(arg2)));\n',
+     '    case TARGET_NR_kill:\n'
+     '#ifdef CONFIG_GP2X\n'
+     '        {\n'
+     '            int hsig = target_to_host_signal(arg2);\n'
+     '            int r = safe_tgkill(getpid(), arg1, hsig);\n'
+     '            if (r == -1 && errno == ESRCH) {\n'
+     '                r = safe_kill(arg1, hsig);\n'
+     '            }\n'
+     '            return get_errno(r);\n'
+     '        }\n'
+     '#else\n'
+     '        return get_errno(safe_kill(arg1, target_to_host_signal(arg2)));\n'
+     '#endif\n'),
+    # throttle a pathological missing-asset open loop (open case)
+    ('        fd_trans_unregister(ret);\n'
+     '        unlock_user(p, arg1, 0);\n'
+     '        return ret;\n'
+     '#endif\n'
+     '    case TARGET_NR_openat:\n',
+     '        fd_trans_unregister(ret);\n'
+     '#ifdef CONFIG_GP2X\n'
+     '        gp2x_after_open(ret);\n'
+     '#endif\n'
+     '        unlock_user(p, arg1, 0);\n'
+     '        return ret;\n'
+     '#endif\n'
+     '    case TARGET_NR_openat:\n'),
+    # throttle (openat case)
+    ('        fd_trans_unregister(ret);\n'
+     '        unlock_user(p, arg2, 0);\n'
+     '        return ret;\n'
+     '#if defined(TARGET_NR_name_to_handle_at)',
+     '        fd_trans_unregister(ret);\n'
+     '#ifdef CONFIG_GP2X\n'
+     '        gp2x_after_open(ret);\n'
+     '#endif\n'
+     '        unlock_user(p, arg2, 0);\n'
+     '        return ret;\n'
+     '#if defined(TARGET_NR_name_to_handle_at)'),
+]
+
+
 def patch_syscall():
     path = os.path.join(LU, "syscall.c")
     with open(path) as f:
@@ -120,6 +167,12 @@ def patch_syscall():
     if "magiceyes GP2X device interception" in s:
         print("  syscall.c already patched")
         return
+    for old, new in REPLACEMENTS:
+        if old not in s:
+            sys.exit(f"ERROR: replacement anchor not found in syscall.c:\n{old!r}")
+        if s.count(old) != 1:
+            sys.exit(f"ERROR: replacement not unique ({s.count(old)}x):\n{old!r}")
+        s = s.replace(old, new)
     for anchor, ins, where in HOOKS:
         if anchor not in s:
             sys.exit(f"ERROR: anchor not found in syscall.c:\n{anchor!r}")
