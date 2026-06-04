@@ -585,21 +585,22 @@ static void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 
-/* fill the ARM EABI `struct stat64` (packed: st_mode@16, st_size@44 u64). Using the
-   old-stat layout here made stat64 callers read a garbage size and reject files. */
+/* fill the ARM EABI `struct stat64` — offsets verified empirically (sizeof 112):
+   st_dev@0 st_ino@8 st_mode@16 st_nlink@20 st_uid@24 st_gid@28 st_rdev@32
+   st_size@40 st_blksize@48 st_blocks@56. (Payback is EABI structs + OABI syscalls;
+   my earlier packed @44 guess gave a garbage size and crashed the game.) */
 static void fill_stat64(uint32_t gbuf, struct stat *hs) {
-    uint8_t b[104]; memset(b, 0, sizeof b);
+    uint8_t b[112]; memset(b, 0, sizeof b);
     *(uint64_t *)(b + 0)  = (uint64_t)hs->st_dev;
-    *(uint32_t *)(b + 12) = (uint32_t)hs->st_ino;          /* __st_ino */
+    *(uint64_t *)(b + 8)  = (uint64_t)hs->st_ino;
     *(uint32_t *)(b + 16) = (uint32_t)hs->st_mode;
     *(uint32_t *)(b + 20) = (uint32_t)(hs->st_nlink ? hs->st_nlink : 1);
     *(uint32_t *)(b + 24) = (uint32_t)hs->st_uid;
     *(uint32_t *)(b + 28) = (uint32_t)hs->st_gid;
     *(uint64_t *)(b + 32) = (uint64_t)hs->st_rdev;
-    *(uint64_t *)(b + 44) = (uint64_t)hs->st_size;         /* packed at 44 */
-    *(uint32_t *)(b + 52) = 4096;                           /* st_blksize */
+    *(uint64_t *)(b + 40) = (uint64_t)hs->st_size;
+    *(uint32_t *)(b + 48) = 4096;                          /* st_blksize */
     *(uint64_t *)(b + 56) = (uint64_t)((hs->st_size + 511) / 512); /* st_blocks */
-    *(uint64_t *)(b + 96) = (uint64_t)hs->st_ino;          /* full st_ino */
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 
@@ -932,7 +933,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (nr == 197) ok = fstat((int)a0, &s);
         else { char p[1024]; uc_mem_read(g_uc, a0, p, sizeof p); p[1023] = 0;
                ok = (nr == 196) ? lstat(p, &s) : stat(p, &s); }
-        if (ok) return -errno; fill_stat64(a1, &s); return 0;
+        if (ok) return -errno; fill_oabi_stat(a1, &s); return 0;  /* 88B: fits the game's buf */
     }
     case 146: { /* writev(fd, iov, cnt) */
         long tot = 0;
