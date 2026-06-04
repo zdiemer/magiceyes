@@ -34,6 +34,39 @@ Build: `host/qemu/build_qemu.sh`. Run: `host/qemu/run-gp2x-qemu.sh <static-binar
 The SDL2 viewer, shm contract, and `tools/gp2x/decomp_*.sh` are unchanged; the Unicorn
 backend stays as a fallback. See `host/qemu/README.md`.
 
+### THE CURRENT BLOCKER: ~4fps "slow motion" (fine-grained thread sync) — see below
+Payback reaches **gameplay** on the qemu backend (set-language → create-profile → main menu →
+mission, with correct video/audio/input) BUT runs at **~4fps** ("slow motion"). Diagnosis (a
+long bisect — tools: `mon.py`, `cpuprobe.sh`, `find_spin.sh`, `profile_main.sh`, `find_gate.sh`):
+- **Measure the REAL fps with `mon.py`**: `frame_seq` counts the helper thread's *presents*
+  (always ~60fps) — misleading. `count_flip()` watches the MLC OADR scanout flip (a real game
+  frame) and publishes to shm `reserved[0]`; mon.py shows it as `GAME_fps`. Real rate ~2-3fps,
+  now ~4fps after the music throttle.
+- **RULED OUT**: audio backpressure (non-blocking audio still 4fps); music-worker mmap churn
+  (FIXED — throttle, 2-3→4fps, see below); ARM cmpxchg (qemu uses a host atomic, not stop-the-
+  world); multi-core vs `taskset -c 0` single-core (both 4fps); inflated nanosleeps (accurate:
+  1ms req = 1.1ms actual); any single >30ms blocking syscall (none).
+- **What it IS**: the game's own fine-grained cross-thread synchronization. With ~5 threads:
+  one worker spin-polls a GAME memory flag at ~47% of one core (e.g. `while (*0xe9eae8 != 0)`
+  at guest pc 0xae168); the main thread blocks in glibc `__pthread_wait_for_restart_signal`
+  (sigsuspend, pc 0x13309c) waiting for SIGRTMIN(32); the LinuxThreads manager is in poll();
+  two idle workers `clock_nanosleep(1ms)`-poll ~2000/s. The process uses <1 core total, so it's
+  WAITING (handoffs), not CPU-bound. The per-frame cost is spread across many short thread
+  handoffs (flag + restart-signal + 1ms poll), each cheap but serialized → ~250ms/frame.
+  Both backends are sync-bound here (Unicorn was ~6fps for a different reason — TCG chaining).
+- **MUSIC-WORKER THROTTLE (committed)**: GP2X games cycle a music playlist; absent `*.ama`
+  files → the worker spins `open()=ENOENT` + a 260KB malloc(=mmap)/free per track, ~700/s, and
+  qemu's GLOBAL `mmap_lock` serializes that across all threads. `gp2x_after_open()` throttles a
+  streak of failed opens (resets on success). General; 2-3→4fps; CPU 86%→47%.
+- **kill→tgkill (committed)**: LinuxThreads wakes threads via `kill(tid)`; host kill() hits the
+  thread group, so route to the exact thread via tgkill. Necessary but not sufficient.
+- **Open directions** (uncertain payoff): reduce qemu's per-signal / safe-syscall round-trip
+  cost for the restart-signal handshake; investigate whether the spun-on flag is set by a
+  thread gated on a hardware event we don't deliver (GP2X interrupt → flag?); or accept that
+  heavily-threaded titles are slow under emulation and target lighter ones. Watchpoints via the
+  gdbstub are too slow to trace the flag's producer. A LinuxThreads cond-ping-pong microbench
+  (built with the GPH SDK glibc-2.3.6 toolchain) would quantify the per-handoff cost.
+
 ### NEXT on the qemu backend
 - **Input VERIFIED**: pressing A advances set-language → create-profile (the A-Z name-entry
   screen); a no-input control stays on set-language, so the transition is input-caused.
