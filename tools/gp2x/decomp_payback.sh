@@ -2,7 +2,7 @@
 # Recreate the decompressed static Payback binary. Run the GPEComp stub under
 # qemu (binfmt) and pin an fd on the temp the instant it appears; the fd survives
 # the stub's post-exec unlink, so after the stub exits we read the complete file.
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
 export QEMU_LD_PREFIX="$ROOT"
 SRC=/mnt/tmp/Payback_tmp
 DST=/home/zachd/pbtest/Payback_tmp

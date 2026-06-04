@@ -1,6 +1,6 @@
 #!/bin/bash
 set -u
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
 cd "/mnt/e/Deicide 3/deicide3_eng" || exit 2
 LOG=/tmp/d3.strace
 OUT=/tmp/d3.out

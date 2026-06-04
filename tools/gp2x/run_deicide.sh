@@ -2,7 +2,7 @@
 # Run Deicide 3 under qemu-user with the REAL Wiz DRM libs + dummy SDL video/audio.
 # Goal: see how far it gets (DRM init? SDL init? game loop? asset read?) without a display.
 set -u
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
 GAME_DIR="/mnt/e/Deicide 3/deicide3_eng"
 
 cd "$GAME_DIR" || exit 2

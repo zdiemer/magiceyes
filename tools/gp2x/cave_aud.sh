@@ -1,7 +1,7 @@
 #!/bin/bash
 # Capture a LOUD Cave Story audio dump (real-rate headless consumer + Start taps).
 set -u
-BASE=/mnt/e/Code/romnas/tools/scratch/gp2x
+BASE=/mnt/e/Code/magiceyes/assets
 ROOT="$BASE/rootfs/0/rootfs"
 GDIR="$BASE/games/doukutsu/doukutsu"
 RAW=/tmp/cave.raw

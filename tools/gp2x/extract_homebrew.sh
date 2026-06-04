@@ -1,6 +1,6 @@
 #!/bin/bash
 set -u
-BASE=/mnt/e/Code/romnas/tools/scratch/gp2x
+BASE=/mnt/e/Code/magiceyes/assets
 DL=/mnt/c/Users/zachd/Downloads
 G="$BASE/games"
 mkdir -p "$G"

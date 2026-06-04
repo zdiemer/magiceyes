@@ -2,7 +2,7 @@
 # Launch a .gpe under qemu (renders to shm) + the SDL2 viewer window (WSLg).
 # usage: run_view.sh <game_dir> <gpe> [seconds] [scale]
 set -u
-BASE=/mnt/e/Code/romnas/tools/scratch/gp2x
+BASE=/mnt/e/Code/magiceyes/assets
 ROOT="$BASE/rootfs/0/rootfs"
 VIEWER="$BASE/shim/out/viewer"
 GDIR="$1"; GPE="$2"; SECS="${3:-60}"; SCALE="${4:-3}"

@@ -2,7 +2,7 @@
 # Probe Payback's menu input: baseline, settle check, then each button with a snapshot.
 ME=/mnt/e/Code/magiceyes/bin/me_unicorn
 SNAP=/mnt/e/Code/magiceyes/tools/dev/snap.py
-O=/mnt/e/Code/romnas/tools/scratch/gp2x
+O=/mnt/e/Code/magiceyes/assets
 cd /home/zachd/pbtest || exit 1
 pkill -9 me_unicorn 2>/dev/null; sleep 1
 "$ME" ./Payback_tmp >/dev/null 2>/tmp/pbs.log &

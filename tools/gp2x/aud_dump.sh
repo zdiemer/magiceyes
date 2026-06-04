@@ -2,7 +2,7 @@
 # Capture the PCM a game produces (pre-playback) + report its audio params.
 # usage: aud_dump.sh <game_dir> <gpe> [secs]
 set -u
-BASE=/mnt/e/Code/romnas/tools/scratch/gp2x
+BASE=/mnt/e/Code/magiceyes/assets
 ROOT="$BASE/rootfs/0/rootfs"
 GDIR="$1"; GPE="$2"; SECS="${3:-8}"
 RAW=/tmp/aud.raw

@@ -2,7 +2,7 @@
 # Scope the MMSP2 hardware shim: what /dev nodes, mmaps, ioctls do GP2X games hit?
 # Run the EABI GP2X games under qemu with the Wiz rootfs (EABI glibc-compatible).
 set -u
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
 recon() {
   local name="$1" gpe="$2"
   echo "############ $name ############"
@@ -18,5 +18,5 @@ recon() {
   echo "--- game stdout (head) ---"; head -8 /tmp/gx.out
   echo
 }
-recon "Knight Lore" "/mnt/e/Code/romnas/tools/scratch/gp2x/games/knightlore/Knight Lore/knightlore.gpe"
-recon "Payback" "/mnt/e/Code/romnas/tools/scratch/gp2x/games/payback/Payback/Payback/Payback"
+recon "Knight Lore" "/mnt/e/Code/magiceyes/assets/games/knightlore/Knight Lore/knightlore.gpe"
+recon "Payback" "/mnt/e/Code/magiceyes/assets/games/payback/Payback/Payback/Payback"

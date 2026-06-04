@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
-G=/mnt/e/Code/romnas/tools/scratch/gp2x/ginge
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
+G=/mnt/e/Code/magiceyes/assets/ginge
 BB="$ROOT/bin/busybox"
 
 echo "### tooling presence ###"

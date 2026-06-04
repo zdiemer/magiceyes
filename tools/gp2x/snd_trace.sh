@@ -1,6 +1,6 @@
 #!/bin/bash
 set -u
-BASE=/mnt/e/Code/romnas/tools/scratch/gp2x
+BASE=/mnt/e/Code/magiceyes/assets
 ROOT="$BASE/rootfs/0/rootfs"
 GDIR="$BASE/games/doukutsu/doukutsu"
 cd "$GDIR" || exit 2

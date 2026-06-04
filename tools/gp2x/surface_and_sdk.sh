@@ -1,9 +1,9 @@
 #!/bin/bash
 set -u
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
 GAME="/mnt/e/Deicide 3/deicide3_eng/d3return_en.gpe"
 DL=/mnt/c/Users/zachd/Downloads
-SDK=/mnt/e/Code/romnas/tools/scratch/gp2x/sdk
+SDK=/mnt/e/Code/magiceyes/assets/sdk
 
 undsdl() { readelf --dyn-syms "$1" 2>/dev/null | awk '$7=="UND" && $8 ~ /^(SDL_|IMG_|Mix_|TTF_)/ {print $8}' | sort -u; }
 

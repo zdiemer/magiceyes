@@ -3,7 +3,7 @@
 # no-op unlink() LD_PRELOAD'd into the GUEST (via qemu -E, so the x86 qemu host
 # binary is unaffected). The stub's cleanup unlink becomes a no-op, so the
 # decompressed payload it wrote to /mnt/tmp persists and we copy it at leisure.
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
 SRC=/mnt/tmp/knightlore.gpe_tmp
 DST=/home/zachd/kltest/kl_tmp
 cp -f /home/zachd/kltest/nounlink.so "$ROOT/nounlink.so"

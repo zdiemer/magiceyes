@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 1 smoke test: can qemu-user run an EABI glibc-2.3.6 binary from the Wiz rootfs?
 set -u
-ROOT=/mnt/e/Code/romnas/tools/scratch/gp2x/rootfs/0/rootfs
+ROOT=/mnt/e/Code/magiceyes/assets/rootfs/0/rootfs
 
 echo "=== resolve /bin/sh ==="
 ls -la "$ROOT/bin/sh" "$ROOT/usr/bin/sh" 2>&1

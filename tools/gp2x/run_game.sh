@@ -2,7 +2,7 @@
 # Run a GP2X/Wiz .gpe under qemu-user with our fake-SDL shim and snapshot frames.
 # usage: run_game.sh <game_dir> <gpe_name> [seconds]
 set -u
-BASE=/mnt/e/Code/romnas/tools/scratch/gp2x
+BASE=/mnt/e/Code/magiceyes/assets
 ROOT="$BASE/rootfs/0/rootfs"
 SNAP="$BASE/shim/snap.py"
 GDIR="$1"; GPE="$2"; SECS="${3:-8}"

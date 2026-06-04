@@ -1,6 +1,6 @@
 #!/bin/bash
 set -u
-G="/mnt/e/Code/romnas/tools/scratch/gp2x/games/doukutsu/doukutsu"
+G="/mnt/e/Code/magiceyes/assets/games/doukutsu/doukutsu"
 echo "=== top-level game dir ==="
 ls -la "$G"
 echo "=== data/ subdirs ==="

@@ -2,3 +2,6 @@ bin/
 rootfs/
 *.o
 *.so*
+
+# large/derivable GP2X+Wiz assets (rootfs, SDK, games, firmware, paeryn-sdl)
+/assets/

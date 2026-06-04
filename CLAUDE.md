@@ -150,8 +150,12 @@ they live under `tools/scratch/gp2x/` and the operator's drives:
   writable (it writes `/mnt/tmp/<name>_tmp`), then run that static binary in the engine.
   TODO: an offline `tools/un-gpecomp` (UCL) so there's no `/mnt/tmp`+exec dance.
 
-Keep these in a **shared, gitignored dir** (re-derivable but slow to rebuild) and point
-the env vars at it, e.g. a sibling `../magiceyes-assets/`:
+These large/derivable assets now live in **`assets/` in this repo (gitignored)** —
+`assets/rootfs` (extracted wiz_ubifs), `assets/sdk` (GPH SDK), `assets/paeryn-sdl` (GP2X
+SDL source w/ the MMSP2 register map), `assets/games`, `assets/firmware`, `assets/ginge`,
+`assets/gp2x_fw`, `assets/shim`. The `tools/gp2x/*.sh` scripts reference
+`/mnt/e/Code/magiceyes/assets/...` (WSL path — adjust for your tree). Alternatively keep
+them in a shared dir and point env vars at it, e.g. `../magiceyes-assets/`:
 ```
 MAGICEYES_ROOTFS=../magiceyes-assets/wiz-rootfs   # extracted wiz_ubifs
 MAGICEYES_SDK=../magiceyes-assets/GPH_SDK         # toolchain + SDL headers

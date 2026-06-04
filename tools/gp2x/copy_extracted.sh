@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 SRC="/mnt/e/Deicide 3/deicide3_eng/dat/snd"
-DST="/mnt/e/Code/romnas/tools/scratch/gp2x/shots/extracted"
+DST="/mnt/e/Code/magiceyes/assets/shots/extracted"
 mkdir -p "$DST"
 cp "$SRC/eff/wav00.wav" "$SRC/eff/wav01.wav" "$SRC/eff/cta.wav" \
    "$SRC/eff/tick.wav" "$SRC/voice/000002.wav" "$DST/" 2>&1
