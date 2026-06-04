@@ -49,24 +49,32 @@ loops that draw via pure mmap I/O still update; fake fd ranges moved far above r
 fds (were aliasing past ~1000 opens → close no-op → fd leak); device fd slots reused on
 close (re-opening /dev/dsp was exhausting the 64-slot table → game exited).
 
+DONE this round:
+- **Frame cap + stability**: cooperative timer — nanosleep/poll sleep on real deadlines
+  (TH_SLEEPING + wake_deadline); sched_pick wakes sleepers / real-sleeps to the earliest.
+  The LinuxThreads manager's poll(2s) was spinning getppid/poll ~10k/s and starving the
+  menu — now it sleeps (poll 61739->56). Game logic paces (~nanosleep-driven).
+- **Dual framebuffer**: the game double-buffers across /dev/fb0+fb1 (writes OADR=0). We
+  now track both and present whichever just changed (present_active/buf_hash) — this fixed
+  the "black after menu" screens (they were on fb1, which we weren't presenting).
+- **Input mapping verified** by disassembly: Payback's gp2x_joystick_read @ 0xadf14 =
+  ~((base[0x1198]&0xff)|(base[0x1184]&0xff00)|(base[0x1186]<<16)) w/ diagonal fixups —
+  exactly what our GPIO injection produces (A -> GP2X_A). Reaches the game.
+- **Interactive viewer**: `run-gp2x.sh` runs the engine + SDL2 viewer (window + keyboard
+  + audio). The right tool to drive the menus and confirm input end-to-end.
+
 NEXT (toward fully playable):
-- **Input not yet confirmed** — the menus don't react to our GPIO injection. Verify the
-  exact GP2X bit layout against Payback's input read (it reads 0x1184/0x1186/0x1198 from
-  the /dev/mem MMSP2 mmap). Either the bit positions are off, or the menu reads input via
-  a path we haven't mapped. Tactic: log the values Payback computes from those regs while
-  a button is held; try bit permutations until DONE/Select fires.
-- **Non-determinism / stalls** — runs vary (sometimes advances far, sometimes freezes).
-  The music worker error-loops on the missing Data/Music/*.ama (ENOENT) and, never
-  blocking, races/starves the menu thread. Needs either the real music data or making the
-  failing-music worker block/back off so it can't hog the scheduler.
-- **No frame cap** — runs ~uncapped (thousands of fps) because nanosleep yields instantly.
-  Make nanosleep also honour real elapsed time (pace) without re-starving the worker.
-- **Music data**: Data/Music/ in this freeware copy has only _Playlist.txt; the 20 .ama
-  tracks are absent. AMA_Open validates header+size, so substitutes (e.g. Speech .ama)
-  fail. Need the real tracks for music; the game otherwise error-loops.
-- `execve`(11) unimplemented — Payback's `system("/bin/sh ... exit 0")`; make it a clean
-  -ENOSYS path rather than relying on the fork child.
-- Then: actual gameplay (MMSP2 MLC video/blit completeness), double-buffer flip, Caanoo.
+- **Confirm menu advance interactively** — headless, A is received (verified) but the
+  set-language menu doesn't visibly advance (no new assets loaded; the bg animation just
+  freezes). Could be: wrong confirm button, a precondition (profile), or worker
+  interference. Run `run-gp2x.sh ~/pbtest/Payback_tmp` and try buttons in real time.
+- **Music worker waste** — still busy-loops on the missing Data/Music/*.ama (data
+  unavailable — only copy of the game). It no longer blocks (paced scheduler) but burns
+  CPU; consider detecting the pathological failing-open loop and backing it off.
+- **Gameplay video** — once past the menus: validate the in-game render path (MMSP2 MLC
+  layers / 2D blitter) presents correctly; the dual-fb present may need extending.
+- `execve`(11) — make Payback's `system("/bin/sh ...")` a clean -ENOSYS.
+- Caanoo / per-device profiles.
 
 Decompress note: run the GPEComp stub under qemu (binfmt + QEMU_LD_PREFIX) and recover
 `/mnt/tmp/<name>_tmp` via an inode pin (`tools/scratch/gp2x/decomp_payback.sh` in romnas)
