@@ -2,8 +2,10 @@
 """Apply the magiceyes GP2X device interception to a qemu source tree.
 
 Copies the glue + shared device model into qemu's linux-user/ and patches
-linux-user/syscall.c (6 small hooks) and linux-user/meson.build (2 sources).
-Idempotent: re-running is a no-op once applied.
+linux-user/syscall.c (hooks + replacements incl. the LinuxThreads worker-exit
+fix), linux-user/main.c, accel/tcg/user-exec.c (GP2X SMC-freeze) and
+linux-user/meson.build (2 sources). Idempotent: re-running is a no-op once
+applied.
 
 Usage: apply_gp2x.py [QEMU_SRC]     (default: $QEMU_SRC or ~/src/qemu)
 """
@@ -170,6 +172,44 @@ REPLACEMENTS = [
      '        unlock_user(p, arg2, 0);\n'
      '        return ret;\n'
      '#if defined(TARGET_NR_name_to_handle_at)'),
+    # LinuxThreads worker-exit. glibc 2.3.6 _exit() issues exit_group first and
+    # only falls back to NR_exit if it errors. On real GP2X each LinuxThreads
+    # thread is its own thread group, so a worker's _exit ends just that thread
+    # (the manager reaps it) while the game keeps running. We run threads with
+    # CLONE_THREAD (one group), so a literal exit_group would kill the whole
+    # game -- this is what made Payback "crash" when its AMA audio worker
+    # finished a decode. Convert a *non-main* thread's exit_group into a
+    # single-thread exit (the main thread's exit_group still quits the process).
+    ('    case TARGET_NR_exit_group:\n'
+     '        preexit_cleanup(cpu_env, arg1);\n'
+     '        return get_errno(exit_group(arg1));\n',
+     '    case TARGET_NR_exit_group:\n'
+     '#ifdef CONFIG_GP2X\n'
+     '        if (first_cpu != cpu && CPU_NEXT(first_cpu)) {\n'
+     '            if (block_signals()) {\n'
+     '                return -QEMU_ERESTARTSYS;\n'
+     '            }\n'
+     '            pthread_mutex_lock(&clone_lock);\n'
+     '            if (CPU_NEXT(first_cpu)) {\n'
+     '                TaskState *ts = cpu->opaque;\n'
+     '                if (ts->child_tidptr) {\n'
+     '                    put_user_u32(0, ts->child_tidptr);\n'
+     '                    do_sys_futex(g2h(cpu, ts->child_tidptr),\n'
+     '                                 FUTEX_WAKE, INT_MAX, NULL, NULL, 0);\n'
+     '                }\n'
+     '                object_unparent(OBJECT(cpu));\n'
+     '                object_unref(OBJECT(cpu));\n'
+     '                pthread_mutex_unlock(&clone_lock);\n'
+     '                thread_cpu = NULL;\n'
+     '                g_free(ts);\n'
+     '                rcu_unregister_thread();\n'
+     '                pthread_exit(NULL);\n'
+     '            }\n'
+     '            pthread_mutex_unlock(&clone_lock);\n'
+     '        }\n'
+     '#endif\n'
+     '        preexit_cleanup(cpu_env, arg1);\n'
+     '        return get_errno(exit_group(arg1));\n'),
 ]
 
 
@@ -220,6 +260,114 @@ def patch_main():
     print("  main.c loader error -> stderr")
 
 
+def patch_userexec():
+    """GP2X SMC-freeze in accel/tcg/user-exec.c.
+
+    GP2X games place hot scratch *data* (the .iwram* sections) on the same page
+    as hot *code*, so every data store triggers a full-page TB invalidation
+    (false self-modifying-code) -- measured at ~24k faults/s on one page, which
+    starves rendering (Payback gameplay: 6.6fps vs 30fps). Once a page has
+    clearly thrashed we stop SMC-protecting it: data stores no longer fault and
+    the co-located code TBs survive. GP2X binaries install IWRAM code once at
+    startup, so this is safe; opt out with ME_GP2X_NOSMCFREEZE."""
+    path = os.path.join(QEMU, "accel", "tcg", "user-exec.c")
+    with open(path) as f:
+        s = f.read()
+    if "gp2x_page_frozen" in s:
+        print("  user-exec.c already patched")
+        return
+
+    helper = (
+        "#ifdef CONFIG_GP2X\n"
+        "/* SMC-freeze for GP2X IWRAM-style pages (hot scratch data co-located\n"
+        " * with hot code). Indexed by guest page number; covers the low 64MB\n"
+        " * (all GP2X RAM-resident code/data -- MMIO is at 0xC0000000, no TBs). */\n"
+        "#define GP2X_FREEZE_PAGES (0x4000000u >> TARGET_PAGE_BITS)\n"
+        "#define GP2X_FREEZE_THRESH 512\n"
+        "static uint16_t gp2x_smc_faults[GP2X_FREEZE_PAGES];\n"
+        "static uint8_t gp2x_smc_frozen[GP2X_FREEZE_PAGES];\n"
+        "\n"
+        "static inline bool gp2x_page_frozen(target_ulong addr)\n"
+        "{\n"
+        "    target_ulong pg = addr >> TARGET_PAGE_BITS;\n"
+        "    return pg < GP2X_FREEZE_PAGES && gp2x_smc_frozen[pg];\n"
+        "}\n"
+        "\n"
+        "static void gp2x_smc_note_fault(target_ulong address)\n"
+        "{\n"
+        "    target_ulong pg;\n"
+        "    if (getenv(\"ME_GP2X_NOSMCFREEZE\")) {\n"
+        "        return;\n"
+        "    }\n"
+        "    pg = address >> TARGET_PAGE_BITS;\n"
+        "    if (pg >= GP2X_FREEZE_PAGES || gp2x_smc_frozen[pg]) {\n"
+        "        return;\n"
+        "    }\n"
+        "    if (gp2x_smc_faults[pg] < 0xffff &&\n"
+        "        ++gp2x_smc_faults[pg] >= GP2X_FREEZE_THRESH) {\n"
+        "        gp2x_smc_frozen[pg] = 1;\n"
+        "        if (getenv(\"ME_GP2X_SMCLOG\")) {\n"
+        "            fprintf(stderr, \"[gp2x] SMC-freeze page=%08x (stopped \"\n"
+        "                    \"%d-fault thrash)\\n\",\n"
+        "                    (uint32_t)(address & TARGET_PAGE_MASK),\n"
+        "                    GP2X_FREEZE_THRESH);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "#endif\n"
+        "\n"
+    )
+    anchor_pp = "void page_protect(tb_page_addr_t address)\n"
+    if anchor_pp not in s:
+        sys.exit("ERROR: user-exec.c page_protect anchor not found")
+    s = s.replace(anchor_pp, helper + anchor_pp, 1)
+
+    # In page_protect: leave frozen pages host-writable (skip the RO mprotect)
+    # while still clearing PAGE_WRITE in the flags so tb_record()'s invariant
+    # holds.
+    old_pp = (
+        "    if (prot & PAGE_WRITE) {\n"
+        "        pageflags_set_clear(start, last, 0, PAGE_WRITE);\n"
+        "        mprotect(g2h_untagged(start), qemu_host_page_size,\n"
+        "                 prot & (PAGE_READ | PAGE_EXEC) ? PROT_READ : PROT_NONE);\n"
+        "    }\n"
+    )
+    new_pp = (
+        "    if (prot & PAGE_WRITE) {\n"
+        "#ifdef CONFIG_GP2X\n"
+        "        if (gp2x_page_frozen(start)) {\n"
+        "            pageflags_set_clear(start, last, 0, PAGE_WRITE);\n"
+        "            mprotect(g2h_untagged(start), qemu_host_page_size,\n"
+        "                     PROT_READ | PROT_WRITE);\n"
+        "            return;\n"
+        "        }\n"
+        "#endif\n"
+        "        pageflags_set_clear(start, last, 0, PAGE_WRITE);\n"
+        "        mprotect(g2h_untagged(start), qemu_host_page_size,\n"
+        "                 prot & (PAGE_READ | PAGE_EXEC) ? PROT_READ : PROT_NONE);\n"
+        "    }\n"
+    )
+    if s.count(old_pp) != 1:
+        sys.exit("ERROR: user-exec.c page_protect write-branch not unique")
+    s = s.replace(old_pp, new_pp)
+
+    # In page_unprotect: count the thrash and freeze over threshold.
+    old_pu = "    current_tb_invalidated = false;\n"
+    new_pu = (
+        "#ifdef CONFIG_GP2X\n"
+        "    gp2x_smc_note_fault(address);\n"
+        "#endif\n"
+        "    current_tb_invalidated = false;\n"
+    )
+    if s.count(old_pu) != 1:
+        sys.exit("ERROR: user-exec.c page_unprotect anchor not unique")
+    s = s.replace(old_pu, new_pu)
+
+    with open(path, "w") as f:
+        f.write(s)
+    print("  user-exec.c patched (SMC-freeze)")
+
+
 def patch_meson():
     path = os.path.join(LU, "meson.build")
     with open(path) as f:
@@ -244,6 +392,7 @@ def main():
     print(f"  copied {len(COPIES)} files into {LU}")
     patch_syscall()
     patch_main()
+    patch_userexec()
     patch_meson()
     print("apply_gp2x: done")
 

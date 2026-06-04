@@ -6,10 +6,11 @@ its own repo.
 
 ## DONE: pivoted the GP2X backend from Unicorn to forked qemu-user
 
-The qemu-user backend (`host/qemu/`) **boots Payback to its interactive menus at
-~60fps** (the set-language/create-profile menus render live, with audio) — a ~10×
-framerate win over the Unicorn backend's structural ~6fps, which was the whole point of
-the pivot. How it shook out vs the original plan:
+The qemu-user backend (`host/qemu/`) runs **Payback playable end-to-end — menus AND
+gameplay at a steady 30fps, with audio, input, and no crash** (see "GP2X SPEED + CRASH:
+RESOLVED" below for the four fixes that got it there) — versus the Unicorn backend's
+structural ~6fps, which was the whole point of the pivot. How it shook out vs the original
+plan:
 1. **Built vanilla `qemu-arm` v8.2.2** in WSL (`host/qemu/fetch_qemu.sh`, arm-linux-user
    target only → minutes, not a full-tree build).
 2. **Device interception** is `host/qemu/gp2x.c` + the engine-agnostic device model
@@ -34,8 +35,32 @@ Build: `host/qemu/build_qemu.sh`. Run: `host/qemu/run-gp2x-qemu.sh <static-binar
 The SDL2 viewer, shm contract, and `tools/gp2x/decomp_*.sh` are unchanged; the Unicorn
 backend stays as a fallback. See `host/qemu/README.md`.
 
-### GP2X SPEED: two root-cause bugs FIXED; residual ~9fps is CPU-bound rendering
-Payback: was ~4fps in SLOW MOTION; now ~9fps at CORRECT simulation speed. Two fixes:
+### GP2X SPEED + CRASH: RESOLVED — Payback is playable end-to-end @ 30fps with audio
+Payback now runs **menus AND gameplay at a steady 30fps (the hardware-correct rate), with
+audio, input, and no crash**. Trajectory: ~4fps slow-motion → 30fps. Four fixes:
+- **SMC-freeze** (`accel/tcg/user-exec.c`) — the big one: gameplay **6.6→30fps**, CPU 84%→10%.
+  Payback's RWE segment interleaves the GP2X **`.iwram*` scratch sections (flagged executable)
+  with `.text`**, so a hot data variable (`0x19a444`) shares a 4KB page with hot code
+  (`0x19a470`). Each data store there triggers a **full-page TB invalidation** (false SMC) —
+  ~24k SIGSEGV+invalidate/s on one page → ~33 MIPS. Fix: after 512 SMC faults on a page, stop
+  SMC-protecting it (keep it host-writable; clear PAGE_WRITE in flags so `tb_record`'s
+  invariant holds). Safe because GP2X games install IWRAM code once at startup; `ME_GP2X_NOSMC
+  FREEZE` opts out, `ME_GP2X_SMCLOG` diagnoses. **This was the user's "stutter/sub-10fps".**
+- **LinuxThreads worker-exit** (`linux-user/syscall.c` exit_group) — the AMA "crash": glibc
+  2.3.6 `_exit()` runs **exit_group first**; with our CLONE_THREAD model that killed the whole
+  game when the **AMA audio decode worker finished a song**. Fix: a non-main thread's
+  exit_group (`first_cpu != cpu`) becomes a single-thread exit. (Game now survives music
+  present/absent/finished.) Diagnosed with a temporary exit_group backtrace dump (not shipped
+  — walking a dying thread's stack can itself fault during teardown).
+- **TIMER PITFALL (not a bug — measurement trap):** render fps scales linearly with the TCOUNT
+  rate (`fps ≈ 4.15 × MHz`). The default (no env) 7.3728 MHz → 30fps with audio exactly
+  real-time = correct. But **`ME_GP2X_TIMESCALE=N` sets the timer to N *MHz*** (not an N×
+  multiplier), so the many tools hard-coding `ME_GP2X_TIMESCALE=1` run at **1 MHz → a bogus
+  4fps**. Don't trust an fps number from a script that pins TIMESCALE=1. 30fps is genuine
+  hardware behavior (the game waits 245760 TCOUNT ticks/frame, = 1/60s only if it assumed a
+  14.7456 MHz timer; at the real 7.3728 MHz that's 30fps).
+
+Earlier two fixes (still relevant, kept for the record):
 - **getpid() -> per-thread tid** (commit): glibc-2.3.6 LinuxThreads emulates a 2.4 kernel
   where each thread's getpid() is its unique pid and threads signal via kill(p_pid). qemu's
   shared-pid getpid() misrouted every restart signal -> cond/mutex fell back to the manager's
@@ -45,16 +70,11 @@ Payback: was ~4fps in SLOW MOTION; now ~9fps at CORRECT simulation speed. Two fi
   advanced it at 1 MHz so the game read time ~7.4x too slowly -> slow motion + the in-game clock
   stuck (operator saw pause-menu time-elapsed = 0). Now correct. `tools/gp2x/test_timescale.sh`
   sweeps `ME_GP2X_TIMESCALE`; Payback plateaus ~9fps above ~20x (timer no longer the gate).
-- **Residual ~9fps is CPU-bound** (not sync, not audio, not the 2D blitter): at high TIMESCALE
-  the main thread is 100% of one core. Payback uses the **MMSP2 MLC multi-layer display**
-  (regs 0x2880-0x28d8: screen 319/239, layer fb addrs 0x03da.../0x03ed...; NOT the 2D blitter,
-  whose region is zero) and software-renders into those layers; a worker (Thread 3 @ guest pc
-  0xae168) busy-waits on a game queue (0xe9ead0/0xe9eae8 = game RAM, r4=16384=audio chunk) that
-  the main fills. Open question: is ~9fps genuine render cost amplified by a qemu-TCG pathology
-  (CF_PARALLEL after the first clone? unaligned fb writes? kuser-cmpxchg traps?), or a producer/
-  consumer spin pattern? Next: measure qemu's effective MIPS for the render loop; check whether
-  the pre-clone (single-threaded, non-CF_PARALLEL) phase renders faster. Tools: `cpuprobe.sh`,
-  `find_spin.sh`, `profile_main.sh`, `who_spins.sh`, `mon.py` (real GAME_fps via OADR flips).
+- **The "residual ~9fps CPU-bound" open question is ANSWERED:** the CPU-bound cost was the
+  `.iwram` false-SMC thrash above (the main thread WAS 100% of a core re-translating, not
+  genuinely rendering). The SMC-freeze drops that core to ~10% and rendering reaches the
+  30fps timer cap. (`mon.py`'s `GAME_fps` via OADR is misleading for Payback, which never
+  flips OADR — measure distinct framebuffer *contents* instead.)
 - We do NOT present all MLC layers (only the OADR scanout) — visible rendering is mostly right
   but multi-layer compositing/scaling is unemulated; revisit for correctness.
 

@@ -14,12 +14,13 @@ and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too
   and **Cave Story / NXEngine** both render with correct **video, audio, input, and
   timing**. Backend = qemu-user + our **fake-SDL shim** (`guest/`) + native SDL2
   **viewer** (`host/viewer.c`).
-- **GP2X, interactive menus @ ~60fps** (qemu backend): **Payback** (commercial, static)
-  boots to its first-boot menus — rendered live with audio and native threads — via the
-  **forked qemu-user backend** (`host/qemu/`), and **input works**: pressing A advances
-  set-language → create-profile (verified headlessly with `tools/gp2x/input_probe.sh` +
-  a no-input control). This is the chosen path (the QEMU pivot, below); it's ~10× the
-  Unicorn backend's ~6fps. (Gotcha: the game needs `Data/Config/*.ini` readable+writable —
+- **GP2X, playable end-to-end @ 30fps** (qemu backend): **Payback** (commercial, static)
+  boots → menus → **gameplay** with **video @ a solid 30fps (the hardware-correct rate),
+  audio, input, native threads, and no crash**, via the **forked qemu-user backend**
+  (`host/qemu/`). Two fixes got it there (both in `apply_gp2x.py`, details below):
+  the **SMC-freeze** (gameplay 6.6→30fps; the .iwram false-SMC pathology) and the
+  **LinuxThreads worker-exit** fix (the AMA-audio "crash"). This is the chosen path
+  (the QEMU pivot, below). (Gotcha: the game needs `Data/Config/*.ini` readable+writable —
   mode-000 ini files caused EACCES and stuck the menu; `chmod -R u+rwX Data/`.) The
   **Unicorn backend** (`host/unicorn/`) is kept as a fallback.
 
@@ -209,9 +210,10 @@ MIPS**, and this menu's full-screen animated background needs ~4M instr/frame. C
 Unicorn and the timeout-slice + our hand-rolled scheduler starve/under-present the menu.
 Hooks (~9k/s) and mmap churn (now free-listed) are NOT the bottleneck.
 
-**The QEMU plan — DONE (`host/qemu/`).** Forked **qemu-user** (`qemu-arm` v8.2.2): same TCG
-JIT but full chaining + native threads/signals/fork, so Payback boots to its menus at
-~60fps (vs ~6fps) and the entire hand-rolled scheduler/signal/sync-fork machinery is gone.
+**The QEMU plan — DONE & PLAYABLE (`host/qemu/`).** Forked **qemu-user** (`qemu-arm` v8.2.2):
+same TCG JIT but full chaining + native threads/signals/fork, so Payback runs **menus AND
+gameplay at a steady 30fps with audio + no crash** and the entire hand-rolled scheduler/
+signal/sync-fork machinery is gone.
 GP2X games are *static* (can't `LD_PRELOAD` — that's the Wiz path), so we **patch
 `linux-user/`** to intercept the GP2X devices (`host/qemu/gp2x.c` + the engine-agnostic
 device model `host/common/gp2x_device.{c,h}`, extracted from me_unicorn.c). Device mmaps
@@ -232,6 +234,41 @@ then works natively. Also: the decompressed binary **must be `chmod +x`** (qemu'
 contract, decomp tooling. Native Win/macOS is gone (qemu-user is Linux — GP2X was always WSL;
 this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
 
+**Two fixes that made it playable (both reproduced by `apply_gp2x.py`):**
+- **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* framerate fix: gameplay **6.6→30fps**.
+  Payback's RWE segment has the GP2X **`.iwram*` scratch sections (executable) interleaved
+  with `.text`**, so a hot data variable (`0x19a444`) shares a page with hot code
+  (`0x19a470`). Every data store there triggers a **full-page TB invalidation** (false
+  self-modifying-code) — ~24k SIGSEGV+invalidate/s on one page, pinning qemu at ~33 MIPS
+  (CPU 84%). Fix: once a page exceeds 512 SMC faults, **stop SMC-protecting it** (leave it
+  host-writable, clear PAGE_WRITE in the flags so `tb_record`'s invariant holds). GP2X games
+  install IWRAM code once at startup, so it's safe; opt out with `ME_GP2X_NOSMCFREEZE`. CPU
+  drops 84%→10%. Confirm/diagnose with `ME_GP2X_SMCLOG=1` (logs the thrashing page + fault
+  offsets). *This was the user-reported "stutter/sub-10fps" — not the MLC overlay.*
+- **LinuxThreads worker-exit** (`linux-user/syscall.c`, `exit_group` case) — *the* AMA
+  "crash" fix. glibc 2.3.6 `_exit()` issues **exit_group first** (`svc 0x9000f8`), falling
+  back to `NR_exit` only if it errors. On real GP2X each LinuxThreads thread is its own
+  thread group, so a worker's `_exit` ends just that thread (manager reaps it) while the game
+  runs on. We run threads with **CLONE_THREAD (one group)**, so a worker's exit_group killed
+  the **whole game** when the **AMA audio decode worker finished a song** (chain:
+  pthread_start_thread `0x130f00` → decode `0x14dc0` → `_exit` `0x157878`). Fix: convert a
+  **non-main** thread's exit_group (`first_cpu != cpu`) into a single-thread exit (the same
+  teardown `NR_exit` does); the main thread's exit_group still quits. (Diagnosed with a
+  temporary exit_group backtrace dump — pc/lr + bl-preceded stack scan — not shipped, since
+  walking a dying thread's stack can itself fault during teardown.)
+
+**Framerate / timer — IMPORTANT pitfall.** Payback is a **30fps** game in this section and
+that *is* the hardware-correct rate: its frame loop spins on `nanosleep` until **TCOUNT**
+(MMSP2 timer @0x0a00) advances ~245760 ticks/frame, and at the documented **7.3728 MHz** that
+is 33ms = 30fps with audio exactly real-time (the audio ring drains at 176400 B/s). Render
+rate scales **linearly with the TCOUNT rate** (`fps ≈ 4.15 × MHz`, capped ~60). **Gotcha:
+`ME_GP2X_TIMESCALE=N` sets the timer to `N` *MHz*, not an N× multiplier** — so
+`ME_GP2X_TIMESCALE=1` runs it at **1 MHz** (→ 4fps, looks like a perf bug but is just a slow
+clock); the default (no env) is the correct 7.3728 MHz → 30fps. `=14.7456` reaches ~60fps but
+runs ~15% fast. Measuring with `tools/gp2x/*` that hard-code `ME_GP2X_TIMESCALE=1` will show a
+bogus 4fps. Note the game internally *assumes* a 14.7456 MHz (2×) timer (it waits 245760 ticks
+thinking that's 1/60s), so on real hardware too it lands at 30fps.
+
 **GP2X hardware contract (worked out in Unicorn — port to qemu syscall.c):**
 - Binary: EABI structs + **OABI syscalls** (`swi #(0x900000+nr)`); glibc 2.3.6 LinuxThreads.
 - `/dev/fb0` + `/dev/fb1` (mmap, 320x240x16): **double-buffered** (OADR written 0, no OADR
@@ -249,9 +286,12 @@ this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
   old-stat fill. Get the exact glibc-2.3.6 size from GPH SDK headers before redoing it.
 - GPEComp games decompress to `/mnt/tmp/<name>_tmp` (static) via `tools/gp2x/decomp_*.sh`
   (inode-pin trick). Test binary: `~/pbtest/Payback_tmp` (10MB static), run from `~/pbtest`
-  (needs `Data/`). **`Data/Music/*.ama` are absent** in this freeware copy (only copy the
-  user has) → the music worker error-loops; `tools/gp2x/fake_music.sh` is a placeholder.
-- Interactive run: `bash run-gp2x.sh ~/pbtest/Payback_tmp` (engine + SDL2 viewer, WSLg).
+  (needs `Data/`). The freeware copy lacked `Data/Music/*.ama`; the **full set (21 `.ama`,
+  ~190MB) is on the Payback ISO** (`F:\Roms\GP2X\Payback (Unknown).zip`, mounted at
+  `~/pb_mnt`) — copied into `~/pbtest/Data/Music/`. With the worker-exit fix the game survives
+  whether music is present, absent (worker error-loops harmlessly), or finishes a song.
+- Interactive run (qemu): `bash host/qemu/run-gp2x-qemu.sh ~/pbtest/Payback_tmp` (qemu-arm +
+  SDL2 viewer, WSLg). The old `run-gp2x.sh` launches the **Unicorn** fallback.
 
 ## Conventions
 
