@@ -86,6 +86,7 @@ struct thread {
     int has_sigsave;        /* a signal handler is running; sigsave holds the resume regs */
     uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
     double wake_deadline;   /* TH_SLEEPING: host time at which to wake (nanosleep) */
+    int enoent_streak;      /* consecutive failed opens -> back off (music worker) */
 };
 static struct thread g_th[MAXTH];
 static int g_nth = 0, g_cur = 0, g_next_tid = 100;  /* main != pid 1 (LinuxThreads orphan check) */
@@ -723,9 +724,19 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; uc_mem_read(g_uc, a0, p, sizeof p); p[sizeof p - 1] = 0;
         int d = dev_open(p); if (d >= 0) return d;
         long r = open(p, (int)a1, a2); int e2 = errno;
-        if (g_trace) fprintf(stderr, "  open(\"%s\")=%ld%s tid=%d\n", p, r < 0 ? (long)-e2 : r,
-                             r < 0 ? (e2 == 24 ? " EMFILE" : " ERR") : "", g_th[g_cur].tid);
-        return r < 0 ? -e2 : r;
+        if (r >= 0) { g_th[g_cur].enoent_streak = 0; return r; }
+        /* a thread tight-looping on missing files (the music worker on the absent
+           Data/Music/*.ama) burns the single-threaded emulator's throughput and starves
+           the game; back it off after a streak of failures so the menu/game gets CPU. */
+        if (e2 == ENOENT && ++g_th[g_cur].enoent_streak > 16) {
+            g_th[g_cur].enoent_streak = 0;
+            gwrite(UC_ARM_REG_R0, (uint32_t)-e2);
+            g_th[g_cur].wake_deadline = host_now() + 0.03;
+            g_th[g_cur].state = TH_SLEEPING;
+            int j = sched_pick();
+            if (j >= 0 && j != g_cur) sched_switch_to(j);
+        }
+        return -e2;
     }
     case 322: { /* openat(dirfd, path, flags, mode) */
         char p[1024]; uc_mem_read(g_uc, a1, p, sizeof p); p[sizeof p - 1] = 0;
