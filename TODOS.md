@@ -79,8 +79,12 @@ Earlier two fixes (still relevant, kept for the record):
   but multi-layer compositing/scaling is unemulated; revisit for correctness.
 
 ### Other GP2X games (operator-supplied; track issues — goal is general-purpose)
-- **Blazar** (static ELF, `assets`/F:\Roms\GP2X\Blazar_v1-30_gp2x\blazar.gpe): **SIGSEGV at
-  startup** under the backend — investigate (different device/feature; not yet traced).
+- **Blazar** (static ELF, `~/blazartest/blazar.gpe`): now **runs further** with the current
+  build — inits graphics (320x240, ~38 frames presented) and streams audio (write(fd8, 3528B
+  chunks) + nanosleep pacing) for a couple seconds, then **guest SIGSEGV at si_addr=0x15**
+  (null+offset deref — a struct/pointer the game expected from a device/syscall came back 0).
+  Not the SMC/worker-exit bugs. Next: run with ME_TRACE / catch the faulting guest pc, see
+  which device read or syscall returns 0 where a pointer is expected.
 - **Knight Lore** (`~/kltest/knightlore.gpe`): **dynamically linked** (interp /lib/ld-linux.so.2)
   -> Wiz-style path (needs the rootfs + maybe libSDL), not the static-GP2X path. Different setup.
 - Untested: Odonata, Quartz2, Retrovirus, Vektar, Wind & Water (in F:\Roms\GP2X). Decompress
