@@ -7,5 +7,5 @@ mkdir -p "$ME/bin"
 CC="${CC:-cc}"
 "$CC" -O2 -Wall -o "$ME/bin/me_unicorn" "$HERE/me_unicorn.c" \
   -I "$ME/guest/src" \
-  $(pkg-config --cflags --libs unicorn 2>/dev/null || echo "-lunicorn") -lrt
+  $(pkg-config --cflags --libs unicorn 2>/dev/null || echo "-lunicorn") -lrt -lpthread
 echo "built -> $ME/bin/me_unicorn"

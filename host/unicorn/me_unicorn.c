@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <time.h>
+#include <pthread.h>
 #include <elf.h>
 #include "gp2xshm.h"
 
@@ -91,6 +92,7 @@ struct thread {
 static struct thread g_th[MAXTH];
 static int g_nth = 0, g_cur = 0, g_next_tid = 100;  /* main != pid 1 (LinuxThreads orphan check) */
 static int g_switched = 0;   /* a syscall changed the running thread this trap */
+static unsigned long g_n_rd = 0, g_n_wr = 0, g_n_fault = 0;  /* hook-call profiling */
 
 /* CLONE_* flags we care about */
 #define ME_CLONE_VM            0x00000100
@@ -476,6 +478,7 @@ static void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                            int size, int64_t value, void *user) {
     (void)type; (void)user;
     if (!g_mmsp2_guest) return;
+    g_n_wr++;
     uint32_t off = (uint32_t)addr - g_mmsp2_guest;
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  MMSP2 wr %04x sz%d=%08x\n", off, size, (uint32_t)value); }
@@ -496,6 +499,7 @@ static void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                           int size, int64_t value, void *user) {
     (void)type; (void)size; (void)value; (void)user;
     if (!g_mmsp2_guest) return;
+    g_n_rd++;
     uint32_t off = (uint32_t)addr - g_mmsp2_guest;
     if (off == 0x0a00) {           /* TCOUNT: 1us free-running counter */
         static double t0 = 0; struct timeval tv; gettimeofday(&tv, NULL);
@@ -523,21 +527,37 @@ static void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
 
 #define GMAP_FIXED 0x10u
 #define GMAP_ANON  0x20u
+/* mmap free-list: recycle freed regions instead of uc_mem_unmap, which flushes
+   Unicorn's JIT translation cache (the game churns same-size anon maps ~150/s, which
+   otherwise re-translates everything -> ~21 MIPS / single-digit fps). */
+struct freereg { uint32_t addr, len; };
+static struct freereg g_free[256]; static int g_nfree = 0;
+
 /* unified mmap for old_mmap(90) and mmap2(192); file-backed reads via pread. */
 static long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) {
     uint32_t l = ALIGN_UP(len ? len : 1);
-    uint32_t at;
-    if ((flags & GMAP_FIXED) && addr) at = ALIGN_DN(addr);
-    else {
-        /* align to the allocation size when it's a power of two (capped at 2MB):
-           LinuxThreads needs its STACK_SIZE-sized thread stacks STACK_SIZE-aligned
-           so sp&~(size-1) locates the thread descriptor, else it retries forever. */
-        uint32_t align = PAGE;
-        if (l > PAGE && (l & (l - 1)) == 0) align = l > 0x200000u ? 0x200000u : l;
-        g_mmap_next = (g_mmap_next + align - 1) & ~(align - 1);
-        at = g_mmap_next; g_mmap_next += l;
+    uint32_t at = 0;
+    if ((flags & GMAP_FIXED) && addr) {
+        at = ALIGN_DN(addr);
+        map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+    } else {
+        for (int i = 0; i < g_nfree; i++)        /* reuse a freed same-size region */
+            if (g_free[i].len == l) { at = g_free[i].addr; g_free[i] = g_free[--g_nfree]; break; }
+        if (at) {
+            if (!getenv("ME_NOZERO")) {          /* anon mmap memory must read as zero */
+                uint8_t *z = calloc(1, l);
+                if (z) { uc_mem_write(g_uc, at, z, l); free(z); }
+            }
+        } else {
+            /* align power-of-two allocs to their size (2MB thread stacks must be
+               2MB-aligned so sp&~(size-1) finds the LinuxThreads descriptor). */
+            uint32_t align = PAGE;
+            if (l > PAGE && (l & (l - 1)) == 0) align = l > 0x200000u ? 0x200000u : l;
+            g_mmap_next = (g_mmap_next + align - 1) & ~(align - 1);
+            at = g_mmap_next; g_mmap_next += l;
+            map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+        }
     }
-    map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
     if (!(flags & GMAP_ANON) && fd >= 0 && len) {
         uint8_t *tmp = malloc(len);
         ssize_t n = pread(fd, tmp, len, (off_t)off);
@@ -680,10 +700,11 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
         return do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
     }
-    case 91: { /* munmap(addr, len) — actually free it so Unicorn's region table
-                  doesn't overflow (mmap/munmap churn would otherwise leak regions) */
+    case 91: { /* munmap(addr, len) — recycle via the free-list rather than uc_mem_unmap,
+                  which flushes the JIT cache. Real-unmap only if the list overflows. */
         uint32_t a = ALIGN_DN(a0), l = ALIGN_UP(a1);
-        if (l) uc_mem_unmap(g_uc, a, l);   /* ignore errors: may be unaligned/partial */
+        if (l) { if (g_nfree < 256) g_free[g_nfree++] = (struct freereg){a, l};
+                 else uc_mem_unmap(g_uc, a, l); }
         return 0;
     }
     case 2: { /* fork: snapshot, run the child in-line, restore parent on its exit */
@@ -754,10 +775,10 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         /* a thread tight-looping on missing files (the music worker on the absent
            Data/Music/*.ama) burns the single-threaded emulator's throughput and starves
            the game; back it off after a streak of failures so the menu/game gets CPU. */
-        if (e2 == ENOENT && ++g_th[g_cur].enoent_streak > 8) {
+        if (e2 == ENOENT && ++g_th[g_cur].enoent_streak > 3) {
             g_th[g_cur].enoent_streak = 0;
             gwrite(UC_ARM_REG_R0, (uint32_t)-e2);
-            g_th[g_cur].wake_deadline = host_now() + 0.05;
+            g_th[g_cur].wake_deadline = host_now() + 0.25;
             g_th[g_cur].state = TH_SLEEPING;
             int j = sched_pick();
             if (j >= 0 && j != g_cur) sched_switch_to(j);
@@ -980,6 +1001,7 @@ static void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
 static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                            int size, int64_t value, void *user) {
     (void)value; (void)user;
+    g_n_fault++;
     static int n = 0;
     uint32_t a = (uint32_t)addr;
     if (n++ < 60)
@@ -998,8 +1020,17 @@ static bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     return true;  /* retry the faulting access */
 }
 
-/* Preemption is driven by uc_emu_start's instruction-count limit in the main loop
-   (a per-basic-block UC_HOOK_BLOCK callback was far too much overhead -> choppy). */
+/* Preemption: a host timer thread stops emulation every few ms. Unlike a per-block
+   hook or uc_emu_start's instruction-count limit (both disable Unicorn's block
+   chaining -> ~21 MIPS), an external uc_emu_stop keeps chaining enabled (fast) while
+   still letting the main loop time-slice between guest threads. */
+static volatile int g_timer_run = 1;
+static unsigned g_slice_us = 6000;
+static void *timer_thread(void *arg) {
+    (void)arg;
+    while (g_timer_run) { usleep(g_slice_us); if (!g_exit) uc_emu_stop(g_uc); }
+    return NULL;
+}
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
@@ -1041,16 +1072,27 @@ int main(int argc, char **argv) {
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
 
     if (g_trace) fprintf(stderr, "entry=%08x sp=%08x brk=%08x\n", entry, sp, g_brk);
-    /* Run in instruction-count time-slices. Blocking syscalls switch threads inline
-       (g_switched); when a slice's count expires we round-robin to another runnable
-       thread. The loop only exits on real process exit, so a stray uc_emu_start
-       return can't freeze the engine. */
+    /* Time-slice via a host timer (uc_emu_stop) so block chaining stays enabled.
+       Blocking syscalls switch threads inline; on each slice we round-robin. The loop
+       only exits on real process exit, so a stray uc_emu_start return can't freeze it. */
+    if (getenv("ME_SLICE_US")) g_slice_us = (unsigned)strtoul(getenv("ME_SLICE_US"), 0, 0);
     uint32_t pc = entry;
     unsigned slice = 0; int errs = 0;
-    const uint64_t SLICE = getenv("ME_SLICE") ? strtoull(getenv("ME_SLICE"), 0, 0) : 700000;
+    /* count-based time-slice. A host-timer/timeout slice would keep Unicorn's block
+       chaining (faster) but cross-thread uc_emu_stop crashes this Unicorn and the
+       timeout slice starves the menu; the count slice is the stable choice (~21 MIPS,
+       ~6fps for this heavy animated menu — Unicorn speed is the ceiling here). */
+    const uint64_t SLICE = getenv("ME_SLICE") ? strtoull(getenv("ME_SLICE"), 0, 0) : 2000000;
+    const uint64_t TMO = 0; (void)g_slice_us; (void)timer_thread;
+    int prof = getenv("ME_PROF") ? 1 : 0; double prof_t = 0; unsigned prof_s = 0;
     while (!g_exit) {
-        e = uc_emu_start(g_uc, pc, 0, 0, SLICE);
+        e = uc_emu_start(g_uc, pc, 0, TMO, SLICE);
         if (g_exit) break;
+        if (prof) { double now = host_now(); if (!prof_t) prof_t = now; prof_s++;
+            if (now - prof_t >= 2.0) { double dt = now - prof_t;
+                fprintf(stderr, "PROF: %.0f slices/s  mmsp2_rd=%.0f/s wr=%.0f/s fault=%.0f/s\n",
+                    prof_s / dt, g_n_rd / dt, g_n_wr / dt, g_n_fault / dt);
+                prof_t = now; prof_s = 0; g_n_rd = g_n_wr = g_n_fault = 0; } }
         if (e != UC_ERR_OK) {
             if (errs < 30) fprintf(stderr, "me_unicorn: emu err %s pc=%08x\n",
                                    uc_strerror(e), gread(UC_ARM_REG_PC));
