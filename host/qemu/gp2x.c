@@ -176,6 +176,18 @@ abi_long gp2x_ioctl(int fd, abi_long cmd, abi_long arg) {
     return r;
 }
 
+bool gp2x_execve_noop(const char *path) {
+    if (!path) return false;
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    /* GP2X games shell out (/bin/sh) for best-effort device tweaks (CPU clock,
+       LCD/TV-out timing) and load kernel modules (insmod) that don't exist on PC.
+       None can run meaningfully here, so the forked child just exits(0) cleanly
+       instead of failing the exec and churning binfmt. Real game/stage chain-loads
+       (execve of an ARM ELF) are left to qemu. */
+    return !strcmp(base, "sh") || !strcmp(base, "insmod");
+}
+
 abi_long gp2x_write(int fd, abi_long buf, abi_long count) {
     if (kind_for_fd(fd) != K_DSP) {
         return count;                        /* discard non-dsp device writes */

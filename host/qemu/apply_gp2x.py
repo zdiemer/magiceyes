@@ -82,6 +82,19 @@ HOOKS = [
      '        }\n'
      '#endif\n',
      "after"),
+    # execve: GP2X /bin/sh + insmod device-tweak helpers -> clean child exit(0)
+    ('    case TARGET_NR_execve:\n',
+     '#ifdef CONFIG_GP2X\n'
+     '        {\n'
+     '            char *gp = lock_user_string(arg1);\n'
+     '            if (gp) {\n'
+     '                int noop = gp2x_execve_noop(gp);\n'
+     '                unlock_user(gp, arg1, 0);\n'
+     '                if (noop) _exit(0);\n'
+     '            }\n'
+     '        }\n'
+     '#endif\n',
+     "after"),
     # do_fork: accept old LinuxThreads clones (glibc 2.3.6) as real host threads
     ('        if (((flags & CLONE_THREAD_FLAGS) != CLONE_THREAD_FLAGS) ||\n',
      '#ifdef CONFIG_GP2X\n'

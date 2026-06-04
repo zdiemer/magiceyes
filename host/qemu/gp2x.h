@@ -23,8 +23,13 @@ void gp2x_on_close(int fd);
    (phys == offset) with the device model. Returns a guest address or -errno. */
 abi_long gp2x_mmap(abi_ulong addr, abi_ulong len, int prot, int fd, off_t offset);
 
-/* ioctl/write on a device fd (OSS /dev/dsp audio; others no-op). */
+/* ioctl/write on a device fd (OSS /dev/dsp audio; fb screeninfo; others no-op). */
 abi_long gp2x_ioctl(int fd, abi_long cmd, abi_long arg);
 abi_long gp2x_write(int fd, abi_long buf, abi_long count);
+
+/* True if execve of `path` should be a successful no-op: GP2X games shell out
+   (/bin/sh) and load kernel modules (insmod) only for best-effort device tweaks
+   that don't exist on PC. The forked child should just exit(0). */
+bool gp2x_execve_noop(const char *path);
 
 #endif /* MAGICEYES_GP2X_H */
