@@ -16,6 +16,7 @@ exec 3< "$SRC" 2>/dev/null
 wait "$RUN" 2>/dev/null
 cat <&3 > "$DST" 2>/dev/null
 exec 3<&-
+chmod +x "$DST"   # qemu's loader needs an execute bit (prepare_binprm) — `cat >` drops it
 echo "=== recovered ==="
 ls -la "$DST" 2>/dev/null
 file "$DST" 2>/dev/null

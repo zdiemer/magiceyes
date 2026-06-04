@@ -4,21 +4,49 @@ Status: Wiz support verified end-to-end (Deicide 3 commercial + Cave Story). Now
 generalizing to the whole Game Park Holdings family + hardening for spin-out into
 its own repo.
 
-## NEXT (decided): pivot the GP2X backend from Unicorn to forked qemu-user
+## DONE: pivoted the GP2X backend from Unicorn to forked qemu-user
 
-The Unicorn backend boots Payback to its interactive menus (input+audio) but is
-structurally ~6 fps (Unicorn TCG: working preemption disables block chaining → ~21 MIPS;
-chaining-mode crashes on cross-thread uc_emu_stop / starves the menu). **Decision: fork
-qemu-user (`qemu-arm`)** — same TCG but full chaining (fast) + native threads/signals/fork
-(deletes our scheduler/signals/sync-fork). Plan in CLAUDE.md ("the QEMU pivot"):
-1. Clone + build vanilla `qemu-arm` in WSL (prove the toolchain).
-2. Patch `linux-user/syscall.c` to intercept the GP2X devices (open/mmap/ioctl) — reuse
-   the device contract in CLAUDE.md (MMSP2 regs/timer/GPIO, /dev/fb0+fb1, /dev/dsp OSS).
-3. Host helper thread: advance the µs timer, inject GPIO from shm, present the fb to the
-   viewer shm (qemu accesses those mmaps as fast host memory; no per-access hook).
-4. Reach parity with the Unicorn build (boots Payback to menus), then make it the default.
-Keep the SDL2 viewer, shm contract, `tools/gp2x/decomp_*.sh`, and the Unicorn backend as a
-fallback. Lose native Win/macOS (qemu-user is Linux; GP2X path was always WSL).
+The qemu-user backend (`host/qemu/`) **boots Payback to its interactive menus at
+~60fps** (the set-language/create-profile menus render live, with audio) — a ~10×
+framerate win over the Unicorn backend's structural ~6fps, which was the whole point of
+the pivot. How it shook out vs the original plan:
+1. **Built vanilla `qemu-arm` v8.2.2** in WSL (`host/qemu/fetch_qemu.sh`, arm-linux-user
+   target only → minutes, not a full-tree build).
+2. **Device interception** is `host/qemu/gp2x.c` + the engine-agnostic device model
+   `host/common/gp2x_device.{c,h}` (extracted from me_unicorn.c, host-pointer based).
+   `apply_gp2x.py` copies these into qemu's `linux-user/` and patches `syscall.c`
+   (open/openat/mmap/ioctl/write/close hooks), `main.c` (a silent-loader-error fix), and
+   `meson.build`. Device mmaps become anonymous host RAM registered by phys==offset.
+3. **Helper thread** advances the MMSP2 µs timer, injects GPIO from shm, presents the fb
+   — qemu touches the mmap'd regs as plain host memory (g2h), no per-access hook.
+4. **The real blocker (not in the original plan): glibc 2.3.6 LinuxThreads clones.** They
+   use `CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND` *without* `CLONE_THREAD/CLONE_SYSVSEM`,
+   which vanilla qemu rejects with EINVAL. A small `do_fork` relaxation (supply the missing
+   flags → run as a real host thread) makes the full LinuxThreads handshake work natively,
+   deleting the Unicorn backend's entire cooperative scheduler/signal/sync-fork machinery.
+5. Also discovered: the decompressed binary **must be executable** (`chmod +x` — qemu's
+   `prepare_binprm` rejects it otherwise; the silent failure cost a while to find — now
+   fixed in `decomp_payback.sh` and surfaced by the main.c patch). `mmap_min_addr` was a
+   red herring (qemu relocates via guest_base).
+
+Build: `host/qemu/build_qemu.sh`. Run: `host/qemu/run-gp2x-qemu.sh <static-binary>`
+(engine + viewer) or `tools/gp2x/qemu_run.sh <bin>` (headless smoke + fps + snapshot).
+The SDL2 viewer, shm contract, and `tools/gp2x/decomp_*.sh` are unchanged; the Unicorn
+backend stays as a fallback. See `host/qemu/README.md`.
+
+### NEXT on the qemu backend
+- **Interactive input verification**: headless reaches the menus and GPIO injection is
+  wired (helper thread writes the button regs); confirm the menus actually *advance* on
+  keypress via `run-gp2x-qemu.sh` (the Unicorn build was uncertain here — real threads may
+  behave differently). Then validate in-game video once past the menus.
+- **Thread-directed signals**: LinuxThreads `pthread_kill(thread, sig)` becomes a host
+  `kill(tid)`; if a title needs precise per-thread signal delivery (suspend/cancel),
+  route qemu's kill→`tgkill(getpid(), tid, sig)`. Not needed for Payback so far.
+- **Make qemu the default** GP2X path in `magiceyes.sh` once input is confirmed.
+- Music worker still error-loops on the absent `Data/Music/*.ama` (freeware copy lacks
+  them) — harmless now (native thread, paced by the missing-file opens).
+- Fold the Unicorn backend onto the shared `gp2x_device.c` (it still has its own copy of
+  the device logic) so there's one implementation; low priority (fallback, and it works).
 
 ## In progress (Unicorn backend — now a fallback; see CLAUDE.md for full state)
 

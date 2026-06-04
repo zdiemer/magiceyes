@@ -14,10 +14,12 @@ and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too
   and **Cave Story / NXEngine** both render with correct **video, audio, input, and
   timing**. Backend = qemu-user + our **fake-SDL shim** (`guest/`) + native SDL2
   **viewer** (`host/viewer.c`).
-- **GP2X, rendering** (WIP): **Payback** (commercial, static) shows its loading
-  screen via the **Unicorn backend** (`host/unicorn/`) — a from-scratch portable
-  ARM-Linux engine. It boots through full OS init and presents its framebuffer.
-  Not yet past LOADING; no input/audio yet.
+- **GP2X, boots to menus @ ~60fps** (qemu backend): **Payback** (commercial, static)
+  boots to its interactive first-boot menus (set-language/create-profile) — rendered
+  live with audio and native threads — via the **forked qemu-user backend**
+  (`host/qemu/`). This is the chosen path (the QEMU pivot, below); it's ~10× the
+  Unicorn backend's ~6fps. The **Unicorn backend** (`host/unicorn/`) still boots
+  Payback to the same menus and is kept as a fallback.
 
 ## Two backends (this is the core design)
 
@@ -87,8 +89,12 @@ What it implements:
 ```
 guest/   src/{fakesdl.c, drmstub.c, gp2xshm.h}  build_guest.sh   (ARM, OS-agnostic)
 host/    viewer.c  build_viewer.sh                                (native SDL2 viewer)
-host/    unicorn/{me_unicorn.c, build.sh, test/hello.c}           (portable engine)
+host/    common/{gp2x_device.c, gp2x_device.h}                    (engine-agnostic GP2X model)
+host/    unicorn/{me_unicorn.c, build.sh, test/hello.c}           (portable engine, fallback)
+host/    qemu/{gp2x.c, gp2x.h, apply_gp2x.py, fetch_qemu.sh,      (qemu-user GP2X backend)
+              build_qemu.sh, run-gp2x-qemu.sh, README.md}
 tools/   extract_dat.py                                           (Deicide .dat unpacker)
+tools/   gp2x/{decomp_*.sh, qemu_run.sh, shm_peek.py, ...}        (decomp + run/inspect)
 magiceyes.sh   README.md  TODOS.md  CLAUDE.md  .gitattributes  .gitignore
 bin/     (build outputs, gitignored)
 ```
@@ -201,17 +207,28 @@ MIPS**, and this menu's full-screen animated background needs ~4M instr/frame. C
 Unicorn and the timeout-slice + our hand-rolled scheduler starve/under-present the menu.
 Hooks (~9k/s) and mmap churn (now free-listed) are NOT the bottleneck.
 
-**The QEMU plan** (`host/qemu/`, to build): fork **qemu-user** (`qemu-arm`) — same TCG JIT
-but full chaining (hundreds of MIPS) **and native threads/signals/fork** (deletes our
-scheduler + signals + sync-fork — our biggest bug surface). GP2X games are *static* so we
-can't `LD_PRELOAD` a shim (that's the Wiz path); instead **patch `linux-user/syscall.c`**
-to intercept the GP2X devices (contract below). A small **host helper thread** advances
-the MMSP2 timer, injects GPIO from shm input, and presents the framebuffer (qemu accesses
-the mmap'd MMSP2/fb regions as plain fast host memory — no per-access hook). Keep the SDL2
-viewer, shm contract, decomp tooling, device knowledge. Lose native Win/macOS (qemu-user
-is Linux — GP2X was always WSL; this unifies Wiz+GP2X under qemu). Keep Unicorn as a
-fallback until parity. First step: clone + build vanilla `qemu-arm` in WSL, then add the
-device interception incrementally.
+**The QEMU plan — DONE (`host/qemu/`).** Forked **qemu-user** (`qemu-arm` v8.2.2): same TCG
+JIT but full chaining + native threads/signals/fork, so Payback boots to its menus at
+~60fps (vs ~6fps) and the entire hand-rolled scheduler/signal/sync-fork machinery is gone.
+GP2X games are *static* (can't `LD_PRELOAD` — that's the Wiz path), so we **patch
+`linux-user/`** to intercept the GP2X devices (`host/qemu/gp2x.c` + the engine-agnostic
+device model `host/common/gp2x_device.{c,h}`, extracted from me_unicorn.c). Device mmaps
+become anonymous host RAM registered by phys==offset; a **host helper thread** advances the
+MMSP2 µs timer, injects GPIO from shm, and presents the fb — qemu touches those regions as
+plain host memory (g2h), **no per-access hook**. `apply_gp2x.py` copies the files into
+qemu's tree and patches `syscall.c`/`main.c`/`meson.build` idempotently (a fresh qemu clone
++ apply + build reproduces the fork). Build: `host/qemu/build_qemu.sh`. Run:
+`host/qemu/run-gp2x-qemu.sh <static-binary>`. See `host/qemu/README.md` and TODOS.md.
+
+**The one surprise the plan missed: glibc 2.3.6 LinuxThreads clones** (`CLONE_VM|CLONE_FS|
+CLONE_FILES|CLONE_SIGHAND`, *no* `CLONE_THREAD/CLONE_SYSVSEM`) — vanilla qemu rejects these
+with EINVAL (the "no threads under qemu-user" gotcha). A small `do_fork` relaxation supplies
+the missing flags so each LinuxThreads thread runs as a real host thread; the full handshake
+then works natively. Also: the decompressed binary **must be `chmod +x`** (qemu's
+`prepare_binprm` rejects it silently otherwise — now fixed in `decomp_payback.sh`);
+`mmap_min_addr` was a red herring (qemu relocates via guest_base). Kept the SDL2 viewer, shm
+contract, decomp tooling. Native Win/macOS is gone (qemu-user is Linux — GP2X was always WSL;
+this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
 
 **GP2X hardware contract (worked out in Unicorn — port to qemu syscall.c):**
 - Binary: EABI structs + **OABI syscalls** (`swi #(0x900000+nr)`); glibc 2.3.6 LinuxThreads.
