@@ -87,6 +87,15 @@ int gp2x_open_device(const char *path) {
     ensure_init();
     int fd = open("/dev/null", O_RDWR);    /* real fd so close/dup/fcntl just work */
     if (fd < 0) return -1;
+    /* Never hand back fd 0/1/2: the game closes stdin/out/err, so open() can return
+       0 here, and audio/file code routinely treats a 0 (or <=0) fd as failure (and
+       it would alias stdin/out/err). Push the device fd to >= 3. */
+    if (fd < 3) {
+        int hi = fcntl(fd, F_DUPFD, 3);
+        close(fd);
+        if (hi < 0) return -1;
+        fd = hi;
+    }
     if (g_nfds < GP2X_MAXFD) {
         g_fds[g_nfds].fd = fd;
         g_fds[g_nfds].kind = kind;
