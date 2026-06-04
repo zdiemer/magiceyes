@@ -35,10 +35,15 @@ The SDL2 viewer, shm contract, and `tools/gp2x/decomp_*.sh` are unchanged; the U
 backend stays as a fallback. See `host/qemu/README.md`.
 
 ### NEXT on the qemu backend
-- **Interactive input verification**: headless reaches the menus and GPIO injection is
-  wired (helper thread writes the button regs); confirm the menus actually *advance* on
-  keypress via `run-gp2x-qemu.sh` (the Unicorn build was uncertain here — real threads may
-  behave differently). Then validate in-game video once past the menus.
+- **Input VERIFIED**: pressing A advances set-language → create-profile (the A-Z name-entry
+  screen); a no-input control stays on set-language, so the transition is input-caused.
+  Tooling: `tools/gp2x/input_probe.{sh,py}` injects buttons into shm headlessly + snapshots.
+  The Unicorn build's "menu won't advance" was really a **`Data/Config/*.ini` perms** issue:
+  `Payback.ini`/`Slot1.ini` had mode 000 (no read) → the game got EACCES loading its config/
+  profile and stuck on set-language. `chmod -R u+rwX Data/` fixes it; the game writes profile
+  state to `Slot1.ini`, so Data/ must be writable. (Add to decomp/setup tooling.)
+- **Drive a full profile + reach the main menu / gameplay**, then validate in-game video
+  (MMSP2 MLC layers / 2D blitter) presents correctly; extend dual-fb present if needed.
 - **Thread-directed signals**: LinuxThreads `pthread_kill(thread, sig)` becomes a host
   `kill(tid)`; if a title needs precise per-thread signal delivery (suspend/cancel),
   route qemu's kill→`tgkill(getpid(), tid, sig)`. Not needed for Payback so far.

@@ -14,12 +14,14 @@ and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too
   and **Cave Story / NXEngine** both render with correct **video, audio, input, and
   timing**. Backend = qemu-user + our **fake-SDL shim** (`guest/`) + native SDL2
   **viewer** (`host/viewer.c`).
-- **GP2X, boots to menus @ ~60fps** (qemu backend): **Payback** (commercial, static)
-  boots to its interactive first-boot menus (set-language/create-profile) — rendered
-  live with audio and native threads — via the **forked qemu-user backend**
-  (`host/qemu/`). This is the chosen path (the QEMU pivot, below); it's ~10× the
-  Unicorn backend's ~6fps. The **Unicorn backend** (`host/unicorn/`) still boots
-  Payback to the same menus and is kept as a fallback.
+- **GP2X, interactive menus @ ~60fps** (qemu backend): **Payback** (commercial, static)
+  boots to its first-boot menus — rendered live with audio and native threads — via the
+  **forked qemu-user backend** (`host/qemu/`), and **input works**: pressing A advances
+  set-language → create-profile (verified headlessly with `tools/gp2x/input_probe.sh` +
+  a no-input control). This is the chosen path (the QEMU pivot, below); it's ~10× the
+  Unicorn backend's ~6fps. (Gotcha: the game needs `Data/Config/*.ini` readable+writable —
+  mode-000 ini files caused EACCES and stuck the menu; `chmod -R u+rwX Data/`.) The
+  **Unicorn backend** (`host/unicorn/`) is kept as a fallback.
 
 ## Two backends (this is the core design)
 
