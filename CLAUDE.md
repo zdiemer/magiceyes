@@ -14,12 +14,14 @@ and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too
   and **Cave Story / NXEngine** both render with correct **video, audio, input, and
   timing**. Backend = qemu-user + our **fake-SDL shim** (`guest/`) + native SDL2
   **viewer** (`host/viewer.c`).
-- **GP2X, playable end-to-end @ 30fps** (qemu backend): **Payback** (commercial, static)
-  boots → menus → **gameplay** with **video @ a solid 30fps (the hardware-correct rate),
+- **GP2X, playable end-to-end @ 60fps** (qemu backend): **Payback** (commercial, static)
+  boots → menus → **gameplay** with **video @ a solid 60fps (correct full speed),
   audio, input, native threads, and no crash**, via the **forked qemu-user backend**
-  (`host/qemu/`). Two fixes got it there (both in `apply_gp2x.py`, details below):
-  the **SMC-freeze** (gameplay 6.6→30fps; the .iwram false-SMC pathology) and the
-  **LinuxThreads worker-exit** fix (the AMA-audio "crash"). This is the chosen path
+  (`host/qemu/`). Three fixes got it there (details below): the **SMC-freeze**
+  (`apply_gp2x.py`; killed the .iwram false-SMC thrash that capped CPU), the
+  **LinuxThreads worker-exit** fix (`apply_gp2x.py`; the AMA-audio "crash"), and the
+  **14.7456 MHz TCOUNT rate** (`gp2x_device.c`; the frame-pacing timer — 30→60fps).
+  This is the chosen path
   (the QEMU pivot, below). (Gotcha: the game needs `Data/Config/*.ini` readable+writable —
   mode-000 ini files caused EACCES and stuck the menu; `chmod -R u+rwX Data/`.) The
   **Unicorn backend** (`host/unicorn/`) is kept as a fallback.
@@ -212,7 +214,7 @@ Hooks (~9k/s) and mmap churn (now free-listed) are NOT the bottleneck.
 
 **The QEMU plan — DONE & PLAYABLE (`host/qemu/`).** Forked **qemu-user** (`qemu-arm` v8.2.2):
 same TCG JIT but full chaining + native threads/signals/fork, so Payback runs **menus AND
-gameplay at a steady 30fps with audio + no crash** and the entire hand-rolled scheduler/
+gameplay at a steady 60fps with audio + no crash** and the entire hand-rolled scheduler/
 signal/sync-fork machinery is gone.
 GP2X games are *static* (can't `LD_PRELOAD` — that's the Wiz path), so we **patch
 `linux-user/`** to intercept the GP2X devices (`host/qemu/gp2x.c` + the engine-agnostic
@@ -235,7 +237,9 @@ contract, decomp tooling. Native Win/macOS is gone (qemu-user is Linux — GP2X 
 this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
 
 **Two fixes that made it playable (both reproduced by `apply_gp2x.py`):**
-- **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* framerate fix: gameplay **6.6→30fps**.
+- **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* CPU-cost fix that lets rendering reach the
+  timer's frame cap: with it gameplay hits the full **60fps**; without it the re-translation
+  thrash caps gameplay at **6.6fps** (and CPU at 84% vs 10%).
   Payback's RWE segment has the GP2X **`.iwram*` scratch sections (executable) interleaved
   with `.text`**, so a hot data variable (`0x19a444`) shares a page with hot code
   (`0x19a470`). Every data store there triggers a **full-page TB invalidation** (false
@@ -257,17 +261,22 @@ this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
   temporary exit_group backtrace dump — pc/lr + bl-preceded stack scan — not shipped, since
   walking a dying thread's stack can itself fault during teardown.)
 
-**Framerate / timer — IMPORTANT pitfall.** Payback is a **30fps** game in this section and
-that *is* the hardware-correct rate: its frame loop spins on `nanosleep` until **TCOUNT**
-(MMSP2 timer @0x0a00) advances ~245760 ticks/frame, and at the documented **7.3728 MHz** that
-is 33ms = 30fps with audio exactly real-time (the audio ring drains at 176400 B/s). Render
-rate scales **linearly with the TCOUNT rate** (`fps ≈ 4.15 × MHz`, capped ~60). **Gotcha:
-`ME_GP2X_TIMESCALE=N` sets the timer to `N` *MHz*, not an N× multiplier** — so
-`ME_GP2X_TIMESCALE=1` runs it at **1 MHz** (→ 4fps, looks like a perf bug but is just a slow
-clock); the default (no env) is the correct 7.3728 MHz → 30fps. `=14.7456` reaches ~60fps but
-runs ~15% fast. Measuring with `tools/gp2x/*` that hard-code `ME_GP2X_TIMESCALE=1` will show a
-bogus 4fps. Note the game internally *assumes* a 14.7456 MHz (2×) timer (it waits 245760 ticks
-thinking that's 1/60s), so on real hardware too it lands at 30fps.
+**Framerate / timer — the TCOUNT rate is 14.7456 MHz (= 60fps).** Payback's frame loop spins
+on `nanosleep` until **TCOUNT** (MMSP2 timer @0x0a00) advances **245760 ticks/frame**; the game
+was written assuming a **14.7456 MHz** timer (245760 = 14745600/60 = 2× the 7.3728 MHz reference
+crystal), so at that rate it hits **60fps**. Render fps scales **linearly with the TCOUNT rate**
+(`fps ≈ 4.15 × MHz`). Critically, the **simulation speed is NOT timer-coupled** — it is real-time
+clocked elsewhere: measured world-scroll speed is the same (~64–67 px/s) at 7.3728 and 14.7456
+MHz; only the frame rate changes (30→60fps), and audio stays real-time (drain 176400 B/s) at
+both. So 14.7456 is the correct value (full speed, no speed-up) and `gp2x_device.c` now defaults
+to it. Earlier mistakes for the record: **1 MHz** = the original slow-motion bug; **7.3728 MHz**
+= half-rate (correct speed but capped at 30fps); the false "30fps is hardware-correct" read came
+from trusting the audio-drain (which is *our* wall-clock logic, so it can't validate the guest
+timer). **Gotcha: `ME_GP2X_TIMESCALE=N` sets the timer to `N` *MHz*, not an N× multiplier** — so
+`ME_GP2X_TIMESCALE=1` runs at **1 MHz → a bogus 4fps**; several `tools/gp2x/*` hard-code `=1`,
+so don't trust an fps from them. To measure sim speed independent of fps, use world-scroll
+cross-correlation over a *fixed real interval* (≤0.2s sampling so the shift stays within the
+±40px search window) — `tools/gp2x/measure_scroll_speed.sh`.
 
 **GP2X hardware contract (worked out in Unicorn — port to qemu syscall.c):**
 - Binary: EABI structs + **OABI syscalls** (`swi #(0x900000+nr)`); glibc 2.3.6 LinuxThreads.

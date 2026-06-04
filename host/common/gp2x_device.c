@@ -113,11 +113,17 @@ static void *phys_to_host(gp2x_dev_t *d, uint32_t phys) {
 }
 
 /* ---- timer ---- */
-/* The GP2X MMSP2 system timer (TCOUNT @ 0x0a00) runs at 7.3728 MHz, not 1 MHz.
-   Advancing it at 1 MHz makes the game read time passing ~7.4x too slowly -> the
-   simulation runs in slow motion and the in-game clock barely moves. Match the
-   real frequency. ME_GP2X_TIMESCALE overrides the multiplier for experiments. */
-#define GP2X_TIMER_HZ 7372800.0
+/* The GP2X MMSP2 system timer (TCOUNT @ 0x0a00) runs at 14.7456 MHz (= 2x the
+   7.3728 MHz reference crystal). Games pace frames by busy-waiting on it; Payback
+   waits 245760 ticks/frame == 1/60s at this rate, so the correct rate yields
+   60fps. Crucially the *simulation speed* is NOT timer-coupled (it is real-time
+   clocked elsewhere): measured world-scroll speed is identical at 7.3728 and
+   14.7456 MHz (~64 px/s), only the frame rate changes (30 -> 60fps). So 14.7456
+   is the right value -- it doubles fps with no change in game speed. (7.3728 was
+   half-rate: correct speed but capped at 30fps; 1 MHz was the old slow-motion
+   bug, ~7.4x too slow.) ME_GP2X_TIMESCALE=N overrides to N *MHz* (NOT an Nx
+   multiplier) for experiments -- so =1 is 1 MHz, not "1x". */
+#define GP2X_TIMER_HZ 14745600.0
 uint32_t gp2x_timer_us(gp2x_dev_t *d) {
     double hz = GP2X_TIMER_HZ;
     const char *s = getenv("ME_GP2X_TIMESCALE");
@@ -234,6 +240,10 @@ void gp2x_tick(gp2x_dev_t *d) {
 /* ---- /dev/dsp (OSS) audio ring ---- */
 static void aud_drain(gp2x_dev_t *d) {
     if (!d->shm) return;
+    /* Diagnostic: instant drain — keep the ring empty so the game never blocks
+       on /dev/dsp and writes audio at its *true* (game-speed-coupled) rate.
+       a_write delta/sec then measures whether the simulation runs at real time. */
+    if (getenv("ME_GP2X_AUDIO_FREERUN")) { d->shm->a_read = d->shm->a_write; return; }
     double now = host_now();
     /* If a viewer is attached it consumes the ring via real playback and owns
        a_read; advancing a_read here too would double-drain it (underruns/stutter).
