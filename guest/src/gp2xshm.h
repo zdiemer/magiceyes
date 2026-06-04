@@ -40,7 +40,10 @@ typedef struct {
     uint32_t audio_active;     /* 1 once audio is opened+unpaused */
     volatile uint32_t a_write; /* shim byte write cursor into aring */
     volatile uint32_t a_read;  /* viewer byte read cursor into aring */
-    uint32_t reserved[4];
+    volatile uint32_t viewer_heartbeat; /* viewer bumps each loop; lets the producer
+                                           tell "viewer attached" (it owns a_read) from
+                                           "headless" (producer must drain a_read itself) */
+    uint32_t reserved[3];
     uint8_t  pixels[GP2XSHM_FBBYTES]; /* RGB565, width*height valid */
     uint8_t  aring[GP2XSHM_ARING];    /* PCM ring buffer (shim->viewer) */
 } gp2x_shm_t;

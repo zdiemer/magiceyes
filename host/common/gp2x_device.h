@@ -32,6 +32,24 @@
 #define GP2X_REG_OADRL    0x290e   /* MLC output addr low  (fb phys lo16) */
 #define GP2X_REG_OADRH    0x2910   /* MLC output addr high (fb phys hi16) */
 
+/* GP2X framebuffer geometry + the physical addresses we advertise for /dev/fb0
+   and /dev/fb1 (via FBIOGET_FSCREENINFO.smem_start). The game writes one of these
+   to the MLC OADR register to flip; we resolve it back to the right surface. They
+   sit just above the 0x02000000+32MB /dev/mem window so phys lookups are unambiguous. */
+#define GP2X_FB_W       320
+#define GP2X_FB_H       240
+#define GP2X_FB_BPP     16
+#define GP2X_FB_LEN     (GP2X_FB_W * GP2X_FB_H * 2)   /* 153600 */
+#define GP2X_FB_STRIDE  (GP2X_FB_W * 2)               /* 640 */
+#define GP2X_FB0_PHYS   0x04000000u
+#define GP2X_FB1_PHYS   0x04040000u
+
+/* Linux fbdev ioctls (GP2X /dev/fb0,fb1). */
+#define GP2X_FBIOGET_VSCREENINFO 0x4600
+#define GP2X_FBIOPUT_VSCREENINFO 0x4601
+#define GP2X_FBIOGET_FSCREENINFO 0x4602
+#define GP2X_FBIOPAN_DISPLAY     0x4606
+
 /* OSS /dev/dsp ioctl low bytes (type 'P'); see gp2x_dsp_ioctl. */
 #define GP2X_DSP_RESET     0x00
 #define GP2X_DSP_SYNC      0x01
@@ -84,5 +102,12 @@ void gp2x_present_rgb565(gp2x_dev_t *d, const void *src, uint32_t w, uint32_t h)
 int  gp2x_dsp_ioctl(gp2x_dev_t *d, uint32_t cmd, void *arg, uint32_t *outlen);
 /* Queue PCM into the audio ring; returns bytes accepted (<= n). */
 uint32_t gp2x_dsp_write(gp2x_dev_t *d, const void *pcm, uint32_t n);
+
+/* Fill a Linux fb_fix_screeninfo (>=80 bytes) for a 320x240x16 GP2X framebuffer
+   whose physical base is `smem_start` (GP2X_FB0_PHYS / GP2X_FB1_PHYS). The game
+   reads smem_start and writes it to the MLC OADR to flip. */
+void gp2x_fill_fscreeninfo(void *buf, uint32_t smem_start);
+/* Fill a Linux fb_var_screeninfo (>=160 bytes): 320x240, RGB565. */
+void gp2x_fill_vscreeninfo(void *buf);
 
 #endif /* GP2X_DEVICE_H */

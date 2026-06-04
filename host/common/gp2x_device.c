@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/mman.h>
+#include <stdio.h>
 
 struct memregion { uint32_t phys, len; void *host; };
 
@@ -37,6 +38,9 @@ struct gp2x_dev {
     uint32_t    aud_freq, aud_ch, aud_bits;
     double      aud_t0;
     int         aud_on;
+    uint32_t    last_hb;          /* last seen viewer heartbeat */
+    double      last_hb_t;        /* host time it last changed */
+    int         debug;            /* ME_GP2X_DEBUG: log regions + present decisions */
 };
 
 /* ---- time ---- */
@@ -52,6 +56,7 @@ gp2x_dev_t *gp2x_open(void) {
     if (!d) return NULL;
     d->aud_freq = 44100; d->aud_ch = 2; d->aud_bits = 16;
     d->t0 = host_now();
+    d->debug = getenv("ME_GP2X_DEBUG") != NULL;
 
     int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
     if (fd < 0) { free(d); return NULL; }
@@ -83,12 +88,18 @@ void gp2x_map_region(gp2x_dev_t *d, uint32_t phys, void *host, uint32_t len) {
     if (d->nreg < (int)(sizeof d->reg / sizeof d->reg[0]))
         d->reg[d->nreg++] = (struct memregion){ phys, len, host };
     if (phys == GP2X_MMSP2_PHYS) { d->mmsp2 = host; d->mmsp2_len = len; }
+    if (d->debug)
+        fprintf(stderr, "[gp2x] map_region phys=%08x host=%p len=%u%s\n",
+                phys, host, len, phys == GP2X_MMSP2_PHYS ? "  <MMSP2>" : "");
 }
 
 void gp2x_set_fb(gp2x_dev_t *d, void *host, uint32_t len) {
     if (!d || !host) return;
     if (!d->fb[0])               { d->fb[0] = host; d->fb_len[0] = len; }
     else if (!d->fb[1] && host != d->fb[0]) { d->fb[1] = host; d->fb_len[1] = len; }
+    if (d->debug)
+        fprintf(stderr, "[gp2x] set_fb host=%p len=%u (fb0=%p fb1=%p)\n",
+                host, len, d->fb[0], d->fb[1]);
 }
 
 /* phys -> host pointer (for MLC OADR scanout). */
@@ -153,18 +164,26 @@ static void present_active(gp2x_dev_t *d) {
 
     void *a = d->fb[0], *b = d->fb[1];
     /* if the MLC scanout register points at a known region, prefer it */
+    uint32_t oadr_phys = 0;
+    void *oadr = NULL;
     if (d->mmsp2) {
         uint16_t lo, hi;
         memcpy(&lo, (uint8_t *)d->mmsp2 + GP2X_REG_OADRL, 2);
         memcpy(&hi, (uint8_t *)d->mmsp2 + GP2X_REG_OADRH, 2);
-        uint32_t phys = ((uint32_t)hi << 16) | lo;
-        void *oadr = phys ? phys_to_host(d, phys) : NULL;
-        if (oadr) { gp2x_present_rgb565(d, oadr, 320, 240); return; }
+        oadr_phys = ((uint32_t)hi << 16) | lo;
+        oadr = oadr_phys ? phys_to_host(d, oadr_phys) : NULL;
     }
-    if (!a && !b) return;
     uint32_t n0 = surf_hash(a), n1 = surf_hash(b);
     int c0 = (n0 != d->hash[0]), c1 = (n1 != d->hash[1]);
+    if (d->debug) {
+        static int n = 0;
+        if (n++ % 30 == 0)
+            fprintf(stderr, "[gp2x] present: OADR=%08x->%p fb0%s fb1%s\n",
+                    oadr_phys, oadr, c0 ? "*" : " ", c1 ? "*" : " ");
+    }
     d->hash[0] = n0; d->hash[1] = n1;
+    if (oadr) { gp2x_present_rgb565(d, oadr, 320, 240); return; }
+    if (!a && !b) return;
     if (c1 && b)      gp2x_present_rgb565(d, b, 320, 240);
     else if (c0 && a) gp2x_present_rgb565(d, a, 320, 240);
     else gp2x_present_rgb565(d, surf_nonblank(b) > surf_nonblank(a) ? b : a, 320, 240);
@@ -188,10 +207,19 @@ void gp2x_tick(gp2x_dev_t *d) {
 /* ---- /dev/dsp (OSS) audio ring ---- */
 static void aud_drain(gp2x_dev_t *d) {
     if (!d->shm) return;
-    if (!d->aud_on) { d->aud_t0 = host_now(); d->aud_on = 1; }
+    double now = host_now();
+    /* If a viewer is attached it consumes the ring via real playback and owns
+       a_read; advancing a_read here too would double-drain it (underruns/stutter).
+       Detect the viewer by its heartbeat and yield a_read to it. */
+    uint32_t hb = d->shm->viewer_heartbeat;
+    if (hb != d->last_hb) { d->last_hb = hb; d->last_hb_t = now; }
+    if (now - d->last_hb_t < 0.5) { d->aud_on = 0; return; }  /* viewer alive */
+    /* headless: advance a_read as if played in real time so the ring drains and
+       the game keeps producing at the right rate. */
+    if (!d->aud_on) { d->aud_t0 = now; d->aud_on = 1; }
     uint32_t bps = d->aud_freq * d->aud_ch * (d->aud_bits / 8);
     if (!bps) return;
-    uint64_t consumed = (uint64_t)((host_now() - d->aud_t0) * bps);
+    uint64_t consumed = (uint64_t)((now - d->aud_t0) * bps);
     if (consumed > d->shm->a_write) consumed = d->shm->a_write;
     if (consumed > d->shm->a_read) d->shm->a_read = (uint32_t)consumed;
 }
@@ -214,6 +242,31 @@ uint32_t gp2x_dsp_write(gp2x_dev_t *d, const void *pcm, uint32_t n) {
         d->shm->a_write += n;
     }
     return n;
+}
+
+/* ---- /dev/fb0,fb1 screeninfo (Linux fbdev ABI, 32-bit ARM target) ---- */
+void gp2x_fill_fscreeninfo(void *buf, uint32_t smem_start) {
+    uint8_t *b = buf;
+    memset(b, 0, 80);
+    memcpy(b + 0, "MagicEyes-MLC", 13);          /* id[16] */
+    *(uint32_t *)(b + 16) = smem_start;           /* smem_start (phys base) */
+    *(uint32_t *)(b + 20) = GP2X_FB_LEN;          /* smem_len */
+    *(uint32_t *)(b + 24) = 0;                     /* type = FB_TYPE_PACKED_PIXELS */
+    *(uint32_t *)(b + 32) = 2;                     /* visual = FB_VISUAL_TRUECOLOR */
+    *(uint32_t *)(b + 44) = GP2X_FB_STRIDE;        /* line_length = 640 */
+}
+void gp2x_fill_vscreeninfo(void *buf) {
+    uint8_t *b = buf;
+    memset(b, 0, 160);
+    *(uint32_t *)(b + 0)  = GP2X_FB_W;             /* xres */
+    *(uint32_t *)(b + 4)  = GP2X_FB_H;             /* yres */
+    *(uint32_t *)(b + 8)  = GP2X_FB_W;             /* xres_virtual */
+    *(uint32_t *)(b + 12) = GP2X_FB_H;             /* yres_virtual */
+    *(uint32_t *)(b + 24) = GP2X_FB_BPP;           /* bits_per_pixel */
+    /* fb_bitfield red@32, green@44, blue@56, transp@68 : {offset,length,msb_right} */
+    *(uint32_t *)(b + 32) = 11; *(uint32_t *)(b + 36) = 5;   /* red   */
+    *(uint32_t *)(b + 44) = 5;  *(uint32_t *)(b + 48) = 6;   /* green */
+    *(uint32_t *)(b + 56) = 0;  *(uint32_t *)(b + 60) = 5;   /* blue  */
 }
 
 int gp2x_dsp_ioctl(gp2x_dev_t *d, uint32_t cmd, void *arg, uint32_t *outlen) {

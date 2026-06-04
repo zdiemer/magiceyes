@@ -62,6 +62,7 @@ int main(int argc, char **argv) {
             if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) running = 0;
         }
         if (shm->quit) running = 0;
+        shm->viewer_heartbeat++;   /* tell the producer a viewer is consuming a_read */
 
         /* keyboard -> GP2X buttons */
         const Uint8 *k = SDL_GetKeyboardState(NULL);

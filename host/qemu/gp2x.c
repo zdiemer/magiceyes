@@ -30,7 +30,7 @@
 enum { K_FB = 1, K_MEM, K_GPIO, K_DSP, K_MIXER };
 
 #define GP2X_MAXFD 64
-static struct devfd { int fd; int kind; } g_fds[GP2X_MAXFD];
+static struct devfd { int fd; int kind; uint32_t phys; } g_fds[GP2X_MAXFD];
 static int g_nfds;
 
 static gp2x_dev_t *g_dev;
@@ -47,10 +47,14 @@ static int kind_of_path(const char *path) {
     return 0;
 }
 
-static int kind_for_fd(int fd) {
+static struct devfd *fd_entry(int fd) {
     for (int i = 0; i < g_nfds; i++)
-        if (g_fds[i].fd == fd) return g_fds[i].kind;
-    return 0;
+        if (g_fds[i].fd == fd) return &g_fds[i];
+    return NULL;
+}
+static int kind_for_fd(int fd) {
+    struct devfd *e = fd_entry(fd);
+    return e ? e->kind : 0;
 }
 
 bool gp2x_is_fd(int fd) { return fd >= 0 && kind_for_fd(fd) != 0; }
@@ -99,6 +103,10 @@ int gp2x_open_device(const char *path) {
     if (g_nfds < GP2X_MAXFD) {
         g_fds[g_nfds].fd = fd;
         g_fds[g_nfds].kind = kind;
+        /* fb0/fb1 each get a distinct physical base; the game reads it via
+           FBIOGET_FSCREENINFO and writes it to the MLC OADR to flip. */
+        g_fds[g_nfds].phys = (kind == K_FB)
+            ? (!strcmp(path, "/dev/fb1") ? GP2X_FB1_PHYS : GP2X_FB0_PHYS) : 0;
         g_nfds++;
     }
     return fd;
@@ -110,7 +118,8 @@ void gp2x_on_close(int fd) {
 }
 
 abi_long gp2x_mmap(abi_ulong addr, abi_ulong len, int prot, int fd, off_t offset) {
-    int kind = kind_for_fd(fd);
+    struct devfd *e = fd_entry(fd);
+    int kind = e ? e->kind : 0;
     /* back the device region with anonymous guest RAM the game can read/write */
     abi_long g = target_mmap(addr, len, prot | PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -118,8 +127,11 @@ abi_long gp2x_mmap(abi_ulong addr, abi_ulong len, int prot, int fd, off_t offset
         return -TARGET_ENOMEM;   /* device region mmap failed (fatal anyway) */
     }
     void *host = g2h_untagged(g);
+    /* /dev/fb0,fb1 mmap at offset 0: register at the fb's advertised phys (what we
+       returned from FBIOGET_FSCREENINFO) so an OADR flip to that phys resolves here. */
+    uint32_t phys = (kind == K_FB) ? e->phys : (uint32_t)offset;
     pthread_mutex_lock(&g_lock);
-    gp2x_map_region(g_dev, (uint32_t)offset, host, (uint32_t)len);
+    gp2x_map_region(g_dev, phys, host, (uint32_t)len);
     if (kind == K_FB) {
         gp2x_set_fb(g_dev, host, (uint32_t)len);
     }
@@ -128,6 +140,25 @@ abi_long gp2x_mmap(abi_ulong addr, abi_ulong len, int prot, int fd, off_t offset
 }
 
 abi_long gp2x_ioctl(int fd, abi_long cmd, abi_long arg) {
+    struct devfd *e = fd_entry(fd);
+    if (e && e->kind == K_FB) {
+        /* framebuffer screeninfo: hand the game each fb's phys + RGB565 geometry */
+        if (cmd == GP2X_FBIOGET_FSCREENINFO && arg) {
+            uint8_t info[80];
+            gp2x_fill_fscreeninfo(info, e->phys);
+            void *p = lock_user(VERIFY_WRITE, arg, sizeof info, 0);
+            if (p) { memcpy(p, info, sizeof info); unlock_user(p, arg, sizeof info); }
+            return 0;
+        }
+        if (cmd == GP2X_FBIOGET_VSCREENINFO && arg) {
+            uint8_t info[160];
+            gp2x_fill_vscreeninfo(info);
+            void *p = lock_user(VERIFY_WRITE, arg, sizeof info, 0);
+            if (p) { memcpy(p, info, sizeof info); unlock_user(p, arg, sizeof info); }
+            return 0;
+        }
+        return 0;                           /* PUT_VSCREENINFO / PAN / etc.: accept */
+    }
     if (kind_for_fd(fd) != K_DSP) {
         return 0;                           /* /dev/mixer etc.: succeed, no-op */
     }
