@@ -385,6 +385,12 @@ static uint32_t buf_hash(uint32_t g) {
 /* present whichever fb the game just rendered to (its content changed since last
    frame); fall back to the non-blank one for a fully static screen. */
 static void present_active(void) {
+    static double last = 0;            /* cap to ~60fps: the game's tiny nanosleeps call
+                                          this ~2000/s, and hashing+copying every time
+                                          (300MB/s) was choking the emulator. */
+    double now = host_now();
+    if (now - last < 0.016) return;
+    last = now;
     static uint32_t h0 = 0, h1 = 0;
     uint32_t n0 = buf_hash(g_fb_guest), n1 = buf_hash(g_fb_guest2);
     int c0 = (n0 != h0), c1 = (n1 != h1);
@@ -728,10 +734,10 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         /* a thread tight-looping on missing files (the music worker on the absent
            Data/Music/*.ama) burns the single-threaded emulator's throughput and starves
            the game; back it off after a streak of failures so the menu/game gets CPU. */
-        if (e2 == ENOENT && ++g_th[g_cur].enoent_streak > 16) {
+        if (e2 == ENOENT && ++g_th[g_cur].enoent_streak > 8) {
             g_th[g_cur].enoent_streak = 0;
             gwrite(UC_ARM_REG_R0, (uint32_t)-e2);
-            g_th[g_cur].wake_deadline = host_now() + 0.03;
+            g_th[g_cur].wake_deadline = host_now() + 0.05;
             g_th[g_cur].state = TH_SLEEPING;
             int j = sched_pick();
             if (j >= 0 && j != g_cur) sched_switch_to(j);
