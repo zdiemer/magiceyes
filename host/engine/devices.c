@@ -63,8 +63,16 @@ void present_guest(uint32_t g) {
     }
     g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
 }
+/* Once the game page-flips to a real fb address (double-buffering), lock the display to that
+   front buffer: the change-heuristic in present_active() otherwise shows the half-drawn back
+   buffer between flips -> sprites/text flicker. Updated on each OADR flip. */
+int g_flip_active = 0; uint32_t g_flip_guest = 0;
 void present_fb(uint32_t phys) {
-    uint32_t g; if (phys_to_guest(phys, &g)) present_guest(g);
+    uint32_t g;
+    if (phys_to_guest(phys, &g)) {
+        if (!getenv("ME_GP2X_NOFLIPLOCK")) { g_flip_active = 1; g_flip_guest = g; }
+        present_guest(g);
+    }
 }
 /* the game double-buffers across fb0/fb1; present whichever currently has content. */
 int buf_score(uint32_t g) {
@@ -96,6 +104,10 @@ void present_active(void) {
     double now = host_now();
     if (now - last < 0.016) return;
     last = now;
+    if (g_flip_active) {              /* double-buffered: show the flipped-to front buffer only */
+        if (g_flip_guest) present_guest(g_flip_guest);
+        return;
+    }
     static uint32_t h0 = 0, h1 = 0;
     uint32_t n0 = buf_hash(g_fb_guest), n1 = buf_hash(g_fb_guest2);
     int c0 = (n0 != h0), c1 = (n1 != h1);
