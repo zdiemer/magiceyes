@@ -294,16 +294,17 @@ binary with no VM. Guest side is untouched (it already owns the SDL/audio/DRM
 surface, so the remaining syscall surface is modest: file I/O, mmap, ioctl, time,
 shm). Lives under `host/` next to the qemu backend.
 
-### Native Windows: black screen (Unicorn engine renders nothing; Linux works)
-The native Windows build (`host/win/`, incl. the single-process `magiceyes.exe` bundle) runs
-Payback's loop + audio but the guest **draws no pixels** (fb stays black), while the *identical*
-engine on **Linux/WSL renders and plays fully** (operator-confirmed). Narrowed to a Windows-only,
-timing-sensitive **thread-sync / memory-ordering race** in the native-threads model (winpthreads
-vs glibc NPTL): two manifestations — reaches the gameplay loop but renders black, or hangs in
-single-threaded init (`nth=1`). Full write-up + diagnostics (`ME_FBWATCH`, `ME_PCHOOK`) and the
-fixes already landed (`__ARM_NR_cacheflush`-driven present, `host_open_flags`/`O_BINARY`,
-unbuffered stderr) in `host/win/WINDOWS_RENDER_DEBUG.md`. Next: diff main's syscall returns
-WSL↔Windows on the single-threaded init path; audit restart-signal/futex delivery under winpthreads.
+### Native Windows: RESOLVED — Payback renders + plays (only load speed remains)
+The native Windows build (`bin/magiceyes.exe` bundle) now renders Payback correctly (intro + title
+pixel-equivalent to WSL), runs the frame loop at the hardware-correct **25fps**, and streams audio.
+The black screen was a stack of Windows-only host-portability bugs (NOT a thread race, as first
+suspected): host-vs-Linux **errno** values, missing **/proc + /etc** fakes (the guest's glibc init
+diverged on ENOENT), **O_BINARY** open flags, **cacheflush-driven present**, and the ~15.6ms
+**timer resolution** (`timeBeginPeriod(1)`). Found by diffing main's syscall+return stream
+(`ME_SCRET`) WSL↔Windows. Full write-up: `host/win/WINDOWS_RENDER_DEBUG.md`.
+**Remaining:** initial load is ~3–4x slower than WSL (~16–34s vs ~4s) — CPU-bound parallel TCG
+warmup, steady-state gameplay fps is at parity. Likely winpthreads lock/scheduling or MinGW-TCG
+JIT throughput; not yet root-caused.
 
 ### Engine headless-blocks without a viewer (make it self-drain)
 The Unicorn engine's audio producer paces against the viewer consuming the shm ring, so a
