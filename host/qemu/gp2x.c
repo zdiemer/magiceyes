@@ -27,7 +27,7 @@
 #include "gp2x_device.h"
 #include "gp2x.h"
 
-enum { K_FB = 1, K_MEM, K_GPIO, K_DSP, K_MIXER };
+enum { K_FB = 1, K_MEM, K_GPIO, K_DSP, K_MIXER, K_I2C };
 
 #define GP2X_MAXFD 64
 static struct devfd { int fd; int kind; uint32_t phys; } g_fds[GP2X_MAXFD];
@@ -44,6 +44,7 @@ static int kind_of_path(const char *path) {
     if (!strcmp(path, "/dev/gpio"))           return K_GPIO;
     if (!strncmp(path, "/dev/dsp", 8))        return K_DSP;
     if (!strncmp(path, "/dev/mixer", 10))     return K_MIXER;
+    if (!strncmp(path, "/dev/i2c-", 9))       return K_I2C;  /* handset serial EEPROM */
     return 0;
 }
 
@@ -161,6 +162,33 @@ abi_long gp2x_ioctl(int fd, abi_long cmd, abi_long arg) {
             return 0;
         }
         return 0;                           /* PUT_VSCREENINFO / PAN / etc.: accept */
+    }
+    if (e && e->kind == K_I2C) {
+        /* GP2X reads its handset serial from the I2C EEPROM (/dev/i2c-0). Games use
+           I2C_RDWR (0x0707) with a write msg (EEPROM addr) + a read msg (the bytes);
+           with no device they error and some bail to a black screen. Fill the read
+           buffer(s) with a stable non-zero serial so the read "succeeds". */
+        if (cmd == 0x0707 && arg) {          /* I2C_RDWR: struct {i2c_msg *msgs; u32 n} */
+            uint32_t msgs = 0, n = 0;
+            get_user_u32(msgs, arg);
+            get_user_u32(n, arg + 4);
+            for (uint32_t i = 0; i < n && i < 16; i++) {
+                uint32_t m = msgs + i * 12;  /* sizeof(i2c_msg) on 32-bit ARM */
+                uint16_t flags = 0, len = 0; uint32_t bufp = 0;
+                get_user_u16(flags, m + 2);
+                get_user_u16(len, m + 4);
+                get_user_u32(bufp, m + 8);
+                if ((flags & 1) && bufp && len) {        /* I2C_M_RD */
+                    void *b = lock_user(VERIFY_WRITE, bufp, len, 0);
+                    if (b) {
+                        for (uint16_t k = 0; k < len; k++)
+                            ((uint8_t *)b)[k] = (uint8_t)(0x10 + (k & 0x3f));
+                        unlock_user(b, bufp, len);
+                    }
+                }
+            }
+        }
+        return 0;                            /* I2C_SLAVE / I2C_TIMEOUT / etc.: succeed */
     }
     if (kind_for_fd(fd) != K_DSP) {
         return 0;                           /* /dev/mixer etc.: succeed, no-op */
