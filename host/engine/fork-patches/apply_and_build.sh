@@ -32,8 +32,5 @@ if ! ninja 2>build.err; then echo "BUILD FAILED:"; grep -E "error:|FAILED:" buil
 rm -f "$FORK/build/libunicorn.a"; ninja >/dev/null 2>&1     # custom bundle step lacks a dep edge
 ls -la "$FORK/build/libunicorn.a"
 
-echo "== relink bin/me_unicorn against the fork =="
-cc -O2 -Wall -o "$REPO/bin/me_unicorn" "$REPO/host/unicorn/me_unicorn.c" \
-  -I "$FORK/include" -I "$REPO/guest/src" \
-  "$FORK/build/libunicorn.a" -lpthread -lm -lrt 2>/dev/null
-echo "OK: $REPO/bin/me_unicorn"
+echo "== rebuild bin/me_unicorn (engine modules) against the fork =="
+ME_UNICORN_FORK="$FORK" "$REPO/host/engine/build_engine.sh"

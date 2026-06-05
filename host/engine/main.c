@@ -1,44 +1,13 @@
-/* magiceyes Unicorn backend (WIP) — a portable ARM-Linux userland engine.
- *
- * Loads a (static, for now) ARM ELF into a Unicorn CPU, sets up the SysV stack
- * (argv/envp/auxv), and emulates the Linux-ARM (EABI) syscall ABI by trapping
- * SVC. Unknown syscalls are logged so we can grow the table by running real
- * binaries. Later increments add: mmap-backed file maps, the GP2X/Wiz hardware
- * devices (/dev/fb0, /dev/mem, gpio, dsp -> shm+viewer), in-process un-GPEComp,
- * and a dynamic-linker path. Cross-platform: only depends on Unicorn + libc.
- *
- * Build: host/unicorn/build.sh   Run: me_unicorn <static-arm.elf> [args...]
- */
-#include <unicorn/unicorn.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <sys/time.h>
-#include <time.h>
-#include <pthread.h>
-#include <elf.h>
-#include "gp2xshm.h"
+/* magiceyes Unicorn engine — main(), run loop, and core CPU/engine state.
+ * Split into focused modules under host/engine/ (elf, mem, devices, syscalls,
+ * threads, cpu); the shared contract is engine.h. */
+#include "engine.h"
 
-/* ---- guest virtual memory layout ---- */
-#define STACK_TOP   0x80000000u
-#define STACK_SIZE  (8u * 1024 * 1024)
-#define MMAP_BASE   0x40000000u
-#define MMAP_END    0x70000000u
-#define PAGE        0x1000u
-#define ALIGN_DN(x) ((x) & ~(PAGE - 1))
-#define ALIGN_UP(x) (((x) + PAGE - 1) & ~(PAGE - 1))
-
-static uc_engine *g_uc;
-static uint32_t g_brk, g_brk_start;
-static uint32_t g_mmap_next = MMAP_BASE;
-static int g_exit = 0, g_exit_code = 0;
-static int g_trace = 0;
+uc_engine *g_uc;
+uint32_t g_brk, g_brk_start;
+uint32_t g_mmap_next = MMAP_BASE;
+int g_exit = 0, g_exit_code = 0;
+int g_trace = 0;
 
 /* Synchronous fork: snapshot the process, let the child run in-line until it
    exits (its pipe writes are captured along the way), then restore the parent
@@ -102,99 +71,21 @@ static unsigned long g_n_rd = 0, g_n_wr = 0, g_n_fault = 0;  /* hook-call profil
 #define ME_CLONE_CHILD_SETTID  0x01000000
 #define ME_CLONE_SETTLS        0x00080000
 
-static void die(const char *m, uc_err e) {
+void die(const char *m, uc_err e) {
     fprintf(stderr, "me_unicorn: %s: %s\n", m, e ? uc_strerror(e) : "");
     exit(1);
 }
 
 /* map [addr,addr+size) page-aligned (idempotent-ish; ignores already-mapped). */
-static void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
+void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
     uint32_t a = ALIGN_DN(addr), end = ALIGN_UP(addr + size);
     uc_err e = uc_mem_map(g_uc, a, end - a, perms);
     if (e && e != UC_ERR_MAP) die("uc_mem_map", e);
 }
 
-/* ---- ELF loader (static EXEC) ---- */
-static uint32_t load_elf(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { perror("open elf"); exit(1); }
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t *buf = malloc(sz);
-    if (fread(buf, 1, sz, f) != (size_t)sz) { perror("read elf"); exit(1); }
-    fclose(f);
-
-    Elf32_Ehdr *eh = (Elf32_Ehdr *)buf;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS32)
-        { fprintf(stderr, "not a 32-bit ELF\n"); exit(1); }
-    if (eh->e_machine != EM_ARM) { fprintf(stderr, "not ARM\n"); exit(1); }
-    if (eh->e_type != ET_EXEC) { fprintf(stderr, "only static ET_EXEC for now\n"); exit(1); }
-
-    uint32_t max_end = 0;
-    Elf32_Phdr *ph = (Elf32_Phdr *)(buf + eh->e_phoff);
-    for (int i = 0; i < eh->e_phnum; i++) {
-        if (ph[i].p_type != PT_LOAD) continue;
-        uint32_t va = ph[i].p_vaddr, fsz = ph[i].p_filesz, msz = ph[i].p_memsz;
-        uint32_t perms = UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC; /* relax for now */
-        map_region(va, msz, perms);
-        if (fsz) {
-            uc_err e = uc_mem_write(g_uc, va, buf + ph[i].p_offset, fsz);
-            if (e) die("uc_mem_write seg", e);
-        }
-        if (va + msz > max_end) max_end = va + msz;
-        if (g_trace) fprintf(stderr, "  PT_LOAD va=%08x filesz=%u memsz=%u\n", va, fsz, msz);
-    }
-    g_brk_start = g_brk = ALIGN_UP(max_end);
-    map_region(g_brk, PAGE, UC_PROT_READ | UC_PROT_WRITE); /* initial brk page */
-    uint32_t entry = eh->e_entry;
-    free(buf);
-    return entry;
-}
-
-/* ---- stack: argc, argv[], NULL, envp[], NULL, auxv[], NULL ---- */
-static uint32_t setup_stack(int argc, char **argv) {
-    map_region(STACK_TOP - STACK_SIZE, STACK_SIZE, UC_PROT_READ | UC_PROT_WRITE);
-    uint32_t sp = STACK_TOP;
-
-    /* push strings, collect guest pointers */
-    uint32_t argp[64]; int n = argc < 63 ? argc : 63;
-    for (int i = n - 1; i >= 0; i--) {
-        size_t l = strlen(argv[i]) + 1;
-        sp -= l; sp &= ~3u;
-        uc_mem_write(g_uc, sp, argv[i], l);
-        argp[i] = sp;
-    }
-    /* 16 random bytes for AT_RANDOM */
-    sp -= 16; sp &= ~15u; uint32_t at_random = sp;
-    uint8_t rnd[16] = {0x4d,0x61,0x67,0x69,0x63,0x45,0x79,0x65,0x73,1,2,3,4,5,6,7};
-    uc_mem_write(g_uc, sp, rnd, 16);
-
-    /* build the initial stack block; align so final sp is 8-aligned */
-    uint32_t aux[][2] = {
-        {6 /*AT_PAGESZ*/, PAGE},
-        {25/*AT_RANDOM*/, at_random},
-        {0 /*AT_NULL*/, 0},
-    };
-    int naux = sizeof(aux) / sizeof(aux[0]);
-    /* total words: argc(1) + argv(n) + null(1) + envp null(1) + aux(2*naux) */
-    int words = 1 + n + 1 + 1 + 2 * naux;
-    uint32_t block = sp - words * 4;
-    block &= ~7u;
-    uint32_t p = block;
-    uint32_t w;
-    w = n;        uc_mem_write(g_uc, p, &w, 4); p += 4;
-    for (int i = 0; i < n; i++) { uc_mem_write(g_uc, p, &argp[i], 4); p += 4; }
-    w = 0;        uc_mem_write(g_uc, p, &w, 4); p += 4;   /* argv NULL */
-    w = 0;        uc_mem_write(g_uc, p, &w, 4); p += 4;   /* envp NULL */
-    for (int i = 0; i < naux; i++) {
-        uc_mem_write(g_uc, p, &aux[i][0], 4); p += 4;
-        uc_mem_write(g_uc, p, &aux[i][1], 4); p += 4;
-    }
-    return block;
-}
-
 /* ---- syscalls (ARM EABI numbers) ---- */
-static uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }
-static void gwrite(uint32_t reg, uint32_t v) { uc_reg_write(g_uc, reg, &v); }
+uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }
+void gwrite(uint32_t reg, uint32_t v) { uc_reg_write(g_uc, reg, &v); }
 
 static void deliver_signals(void);  /* defined below; runs a pending handler */
 
