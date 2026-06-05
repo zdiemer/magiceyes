@@ -53,7 +53,40 @@ struct gp2x_dev {
     uint8_t     pal_phase;        /* 0 = expect GB halfword, 1 = expect R halfword */
     uint16_t    pal_gb;           /* the GB halfword pending its R partner */
     int         pal_have;         /* a palette has been uploaded (else fall back to RGB332) */
+
+    /* MMSP2 2D "MESG" blitter shadow registers (the 0xE0020000 window). A write to
+       MESGSTATUS=BUSY triggers the blit using these; we execute it host-side. */
+    uint32_t    blt_dstctrl, blt_dstaddr, blt_dststride;
+    uint32_t    blt_srcctrl, blt_srcaddr, blt_srcstride;
+    uint32_t    blt_patctrl, blt_forcolor, blt_backcolor;
+    uint32_t    blt_size, blt_ctrl;
+    int         blt_dbg;          /* ME_GP2X_BLITLOG: log each blit op */
 };
+
+/* MESG blitter register byte offsets + control bits (paeryn mmsp2_regs.h). */
+#define MESG_DSTCTRL   0x00
+#define MESG_DSTADDR   0x04
+#define MESG_DSTSTRIDE 0x08
+#define MESG_SRCCTRL   0x0c
+#define MESG_SRCADDR   0x10
+#define MESG_SRCSTRIDE 0x14
+#define MESG_PATCTRL   0x20
+#define MESG_FORCOLOR  0x24
+#define MESG_BACKCOLOR 0x28
+#define MESG_SIZE      0x2c
+#define MESG_CTRL      0x30
+#define MESG_STATUS    0x34
+#define MESG_B_DSTBPP16 (1u<<5)   /* DSTCTRL bit5: 16bpp dest (else 8bpp) */
+#define MESG_B_SRCENB   (1u<<7)   /* SRCCTRL bit7: source enabled (copy blit) */
+#define MESG_B_INVIDEO  (1u<<8)   /* SRCCTRL bit8: source in video RAM (else FIFO) */
+#define MESG_B_SRCBPP16 (1u<<5)
+#define MESG_B_SRCBPP1  (1u<<6)
+#define MESG_B_PATENB   (1u<<5)   /* PATCTRL bit5: pattern enabled (fill) */
+#define MESG_B_XDIR_POS (1u<<8)   /* CTRL bit8 */
+#define MESG_B_YDIR_POS (1u<<9)   /* CTRL bit9 */
+#define MESG_B_TRANSPEN (1u<<11)  /* CTRL bit11: transparency enable */
+#define MESG_B_TRANSP_SHIFT 16    /* CTRL>>16 = transparent colour */
+#define MESG_BUSY       (1u<<0)
 
 /* ---- time ---- */
 static double host_now(void) {
@@ -69,6 +102,7 @@ gp2x_dev_t *gp2x_open(void) {
     d->aud_freq = 44100; d->aud_ch = 2; d->aud_bits = 16; d->aud_fmt = 0x8010; /* S16LSB */
     d->t0 = host_now();
     d->debug = getenv("ME_GP2X_DEBUG") != NULL;
+    d->blt_dbg = getenv("ME_GP2X_BLITLOG") != NULL;
 
     int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
     if (fd < 0) { free(d); return NULL; }
@@ -193,11 +227,90 @@ void gp2x_mmsp2_write(gp2x_dev_t *d, uint32_t off, uint32_t val, int size) {
     }
 }
 
-/* 2D blitter register write (the 0xE0020000 window). Implemented in phase 2 —
-   currently the registers are stored to RAM by the caller and the run-trigger is a
-   no-op (so blitter-only games render nothing rather than crashing). */
+/* Execute a queued MESG blit using the shadow registers. Handles the two ops GP2X
+   games use: a solid rectangle fill (pattern enabled, no source) and a video->video
+   copy blit (source in video RAM) with optional colour-key transparency, for 8- and
+   16-bpp surfaces. FIFO (system-memory) sources and 1-bpp expansion are not handled
+   (logged and skipped). Directions are treated as positive (sprites don't overlap). */
+static void gp2x_blit_exec(gp2x_dev_t *d) {
+    uint32_t w = d->blt_size & 0xffff;
+    uint32_t h = (d->blt_size >> 16) & 0xffff;
+    if (!w || !h) return;
+    uint32_t ctrl = d->blt_ctrl;
+    int transp = (ctrl & MESG_B_TRANSPEN) != 0;
+    uint32_t transpc = ctrl >> MESG_B_TRANSP_SHIFT;
+    int dbpp = (d->blt_dstctrl & MESG_B_DSTBPP16) ? 16 : 8;
+    int dbytes = dbpp / 8;
+    uint32_t dpixoff = (dbpp == 16) ? ((d->blt_dstctrl >> 4) & 1) : ((d->blt_dstctrl >> 3) & 3);
+    uint8_t *dst = phys_to_host(d, d->blt_dstaddr & ~3u);
+    uint32_t dstride = d->blt_dststride;
+    const char *why = "ok";
+
+    if (!dst) { why = "dst-unmapped"; goto done; }
+    dst += dpixoff * dbytes;
+
+    if (d->blt_srcctrl & MESG_B_SRCENB) {                /* copy blit */
+        if (!(d->blt_srcctrl & MESG_B_INVIDEO)) { why = "fifo-src"; goto done; }
+        int sbpp = (d->blt_srcctrl & MESG_B_SRCBPP16) ? 16
+                 : (d->blt_srcctrl & MESG_B_SRCBPP1)  ? 1 : 8;
+        if (sbpp != dbpp) { why = "bpp-mismatch"; goto done; }
+        uint32_t spixoff = (sbpp == 16) ? ((d->blt_srcctrl >> 4) & 1) : ((d->blt_srcctrl >> 3) & 3);
+        uint8_t *src = phys_to_host(d, d->blt_srcaddr & ~3u);
+        if (!src) { why = "src-unmapped"; goto done; }
+        src += spixoff * dbytes;
+        uint32_t sstride = d->blt_srcstride;
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *drow = dst + (size_t)y * dstride;
+            const uint8_t *srow = src + (size_t)y * sstride;
+            if (dbpp == 16) {
+                uint16_t *dp = (uint16_t *)drow; const uint16_t *sp = (const uint16_t *)srow;
+                for (uint32_t x = 0; x < w; x++) {
+                    uint16_t p = sp[x];
+                    if (!(transp && p == (uint16_t)transpc)) dp[x] = p;
+                }
+            } else {
+                for (uint32_t x = 0; x < w; x++) {
+                    uint8_t p = srow[x];
+                    if (!(transp && p == (uint8_t)transpc)) drow[x] = p;
+                }
+            }
+        }
+    } else {                                             /* solid fill (forcolor) */
+        uint32_t fc = d->blt_forcolor;
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *drow = dst + (size_t)y * dstride;
+            if (dbpp == 16) { uint16_t *dp = (uint16_t *)drow;
+                              for (uint32_t x = 0; x < w; x++) dp[x] = (uint16_t)fc; }
+            else            { memset(drow, (int)(fc & 0xff), w); }
+        }
+    }
+done:
+    if (d->blt_dbg)
+        fprintf(stderr, "[gp2x] blit %s: dst=%08x(+%u) %ux%u dbpp=%d src=%08x sctrl=%08x "
+                "pat=%08x ctrl=%08x fc=%08x\n", why, d->blt_dstaddr, dpixoff, w, h, dbpp,
+                d->blt_srcaddr, d->blt_srcctrl, d->blt_patctrl, ctrl, d->blt_forcolor);
+}
+
+/* 2D blitter register write (the 0xE0020000 window): shadow the registers and run
+   the blit when MESGSTATUS is written with BUSY (the hardware run-trigger). */
 void gp2x_blitter_write(gp2x_dev_t *d, uint32_t off, uint32_t val, int size) {
-    (void)d; (void)off; (void)val; (void)size;
+    (void)size;
+    if (!d) return;
+    switch (off) {
+    case MESG_DSTCTRL:   d->blt_dstctrl   = val; break;
+    case MESG_DSTADDR:   d->blt_dstaddr   = val; break;
+    case MESG_DSTSTRIDE: d->blt_dststride = val; break;
+    case MESG_SRCCTRL:   d->blt_srcctrl   = val; break;
+    case MESG_SRCADDR:   d->blt_srcaddr   = val; break;
+    case MESG_SRCSTRIDE: d->blt_srcstride = val; break;
+    case MESG_PATCTRL:   d->blt_patctrl   = val; break;
+    case MESG_FORCOLOR:  d->blt_forcolor  = val; break;
+    case MESG_BACKCOLOR: d->blt_backcolor = val; break;
+    case MESG_SIZE:      d->blt_size      = val; break;
+    case MESG_CTRL:      d->blt_ctrl      = val; break;
+    case MESG_STATUS:    if (val & MESG_BUSY) gp2x_blit_exec(d); break;
+    default: break;
+    }
 }
 
 /* Present an 8-bit indexed framebuffer. If the game has uploaded a palette (captured

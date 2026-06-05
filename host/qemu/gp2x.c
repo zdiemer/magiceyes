@@ -229,6 +229,15 @@ bool gp2x_mmio_fault(CPUState *cs, target_ulong gaddr, uintptr_t host_pc) {
     }
 
     uint32_t v0 = (rt == 15) ? (uint32_t)(pc + 8) : env->regs[rt];
+    uint32_t off = (uint32_t)(gaddr - g_traps[ti].gbase) +
+                   (g_traps[ti].kind == TRAP_MMSP2
+                        ? (GP2X_REG_PALLT_A & ~(uint32_t)(TARGET_PAGE_SIZE - 1)) : 0);
+
+    /* Value to leave in the register RAM. The blitter run-trigger (MESGSTATUS=BUSY)
+       executes synchronously here, so store it BUSY-cleared — otherwise the game's
+       `while (STATUS & BUSY)` completion poll would read RAM and spin forever. */
+    uint32_t store = v0;
+    if (g_traps[ti].kind == TRAP_BLIT && off == 0x34) store = v0 & ~1u;
 
     /* Apply the store to the register RAM. The page is host-PROT_READ (that's what
        trapped us), so briefly flip the host protection to writable, store, restore.
@@ -239,17 +248,14 @@ bool gp2x_mmio_fault(CPUState *cs, target_ulong gaddr, uintptr_t host_pc) {
     size_t plen = (size_t)(g_traps[ti].gend - g_traps[ti].gbase);
     mprotect(hbase, plen, PROT_READ | PROT_WRITE);
     switch (size) {
-    case 1: *(uint8_t *)h = (uint8_t)v0; break;
-    case 2: stw_le_p(h, v0); break;
-    case 4: stl_le_p(h, v0); break;
+    case 1: *(uint8_t *)h = (uint8_t)store; break;
+    case 2: stw_le_p(h, store); break;
+    case 4: stl_le_p(h, store); break;
     case 8: stl_le_p(h, env->regs[rt]);
             stl_le_p((uint8_t *)h + 4, env->regs[rt + 1]); break;
     }
     mprotect(hbase, plen, PROT_READ);
 
-    uint32_t off = (uint32_t)(gaddr - g_traps[ti].gbase) +
-                   (g_traps[ti].kind == TRAP_MMSP2
-                        ? (GP2X_REG_PALLT_A & ~(uint32_t)(TARGET_PAGE_SIZE - 1)) : 0);
     if (g_traps[ti].kind == TRAP_MMSP2) {
         if (size == 8) { gp2x_mmsp2_write(g_dev, off, env->regs[rt], 4);
                          gp2x_mmsp2_write(g_dev, off + 4, env->regs[rt + 1], 4); }
