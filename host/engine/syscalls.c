@@ -54,9 +54,30 @@ void fill_stat64(uint32_t gbuf, struct stat *hs) {
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 
+/* Translate guest (Linux/ARM) open() flags to the host's. On Linux the guest IS the host, so
+   it's identity. On Windows (MinGW) the flag BIT VALUES differ (e.g. Linux O_CREAT=0100 vs
+   MinGW 0x100) AND a file MUST be opened O_BINARY or msvcrt opens it in text mode — translating
+   CRLF and ending binary reads at the first 0x1A — which silently corrupts GP2X binary assets.
+   That was the native-Windows black screen: assets "load" but the pixel data is garbage, so the
+   game draws nothing into the framebuffer while its loop runs on. */
+static int host_open_flags(int gf) {
+#ifdef _WIN32
+    enum { LO_WRONLY = 01, LO_RDWR = 02, LO_CREAT = 0100, LO_EXCL = 0200,
+           LO_NOCTTY = 0400, LO_TRUNC = 01000, LO_APPEND = 02000 };
+    int hf = gf & 03;                       /* access mode (0/1/2) is the same on both */
+    if (gf & LO_CREAT)  hf |= O_CREAT;
+    if (gf & LO_EXCL)   hf |= O_EXCL;
+    if (gf & LO_TRUNC)  hf |= O_TRUNC;
+    if (gf & LO_APPEND) hf |= O_APPEND;
+    return hf | O_BINARY;                   /* GP2X files are all binary */
+#else
+    return gf;
+#endif
+}
+
 long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
-    (void)a3; (void)a4; (void)a5;
+    (void)a4; (void)a5;
     if (g_trace)
         fprintf(stderr, "  [t%d] sc %u (%08x,%08x,%08x,%08x)\n",
                 g_self ? g_self->tid : -1, nr, a0, a1, a2, a3);
@@ -255,7 +276,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 0xf0005: { /* __ARM_NR_set_tls -> kuser TLS slot */
         uc_mem_write(g_uc, 0xffff0ff0u, &a0, 4); return 0;
     }
-    case 0xf0002: return 0; /* __ARM_NR_cacheflush */
+    case 0xf0002: /* __ARM_NR_cacheflush(start, end, flags); r3 = base of the buffer the game
+                     just rendered. Double-buffered titles (Payback) flip via this, not OADR. */
+        gp2x_cacheflush(a3);
+        return 0;
     case 5: {  /* open(path, flags, mode) */
         char p[1024]; read_cstr(a0, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
@@ -280,7 +304,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             lseek(fd, 0, SEEK_SET);
             return fd;
         }
-        long r = open(p, (int)a1, a2); int e2 = errno;
+        long r = open(p, host_open_flags((int)a1), a2); int e2 = errno;
         if (r >= 0) { g_self->enoent_streak = 0; return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
@@ -295,7 +319,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 322: { /* openat(dirfd, path, flags, mode) */
         char p[1024]; read_cstr(a1, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
-        long r = open(p, (int)a2, a3); return r < 0 ? -errno : r;
+        long r = open(p, host_open_flags((int)a2), a3); return r < 0 ? -errno : r;
     }
     case 6:    /* close */
         if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W) return 0;

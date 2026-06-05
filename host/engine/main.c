@@ -110,6 +110,8 @@ static void *helper_thread(void *arg) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stderr, NULL, _IONBF, 0);   /* diagnostics must survive a kill (msvcrt fully buffers
+                                           a redirected stderr otherwise -> lost logs on Windows) */
     if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
 #ifdef ME_BUNDLED
     /* a trailing all-numeric arg is the viewer scale (magiceyes.exe <binary> [scale]); strip

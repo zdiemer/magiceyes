@@ -85,6 +85,7 @@ void present_fb(uint32_t phys);
 int buf_score(uint32_t g);
 uint32_t buf_hash(uint32_t g);
 void present_active(void);
+void gp2x_cacheflush(uint32_t guest);   /* cacheflush(r3=fb base) -> present that buffer */
 double host_now(void);
 void aud_drain(void);
 uint32_t aud_free(void);

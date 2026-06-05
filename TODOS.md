@@ -294,6 +294,23 @@ binary with no VM. Guest side is untouched (it already owns the SDL/audio/DRM
 surface, so the remaining syscall surface is modest: file I/O, mmap, ioctl, time,
 shm). Lives under `host/` next to the qemu backend.
 
+### Native Windows: black screen (Unicorn engine renders nothing; Linux works)
+The native Windows build (`host/win/`, incl. the single-process `magiceyes.exe` bundle) runs
+Payback's loop + audio but the guest **draws no pixels** (fb stays black), while the *identical*
+engine on **Linux/WSL renders and plays fully** (operator-confirmed). Narrowed to a Windows-only,
+timing-sensitive **thread-sync / memory-ordering race** in the native-threads model (winpthreads
+vs glibc NPTL): two manifestations — reaches the gameplay loop but renders black, or hangs in
+single-threaded init (`nth=1`). Full write-up + diagnostics (`ME_FBWATCH`, `ME_PCHOOK`) and the
+fixes already landed (`__ARM_NR_cacheflush`-driven present, `host_open_flags`/`O_BINARY`,
+unbuffered stderr) in `host/win/WINDOWS_RENDER_DEBUG.md`. Next: diff main's syscall returns
+WSL↔Windows on the single-threaded init path; audit restart-signal/futex delivery under winpthreads.
+
+### Engine headless-blocks without a viewer (make it self-drain)
+The Unicorn engine's audio producer paces against the viewer consuming the shm ring, so a
+**headless** run (no viewer) blocks once the ring fills. The engine should self-drain `a_read` by
+wall clock when no viewer is attached (a `viewer_heartbeat` already exists to tell attached from
+headless). Bug noted by the operator; affects headless testing/CI.
+
 ### Packaging / distribution
 Per-OS bundles: Linux AppImage (qemu-arm-static + rootfs + guest libs + viewer);
 Windows WSL2 installer; macOS via container. Single `magiceyes` entrypoint that

@@ -72,6 +72,16 @@ void uc_map_all(uc_engine *u) {
     pthread_mutex_unlock(&g_reg_lock);
 }
 
+/* TEMP (ME_FBWATCH): count guest writes into the framebuffer to tell whether the render code
+   runs (writes happen) vs a memory-aliasing bug (no writes but present sees content elsewhere). */
+unsigned long g_fbwrites = 0;
+void fbwatch_cb(uc_engine *uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void *user) {
+    (void)uc; (void)type; (void)size; (void)value; (void)user;
+    if (++g_fbwrites <= 3 || (g_fbwrites % 200000) == 0)
+        fprintf(stderr, "FBWRITE #%lu @ %08x = %08x tid=%d pc=%08x\n", g_fbwrites,
+                (uint32_t)addr, (uint32_t)value, g_self ? g_self->tid : -1, gread(UC_ARM_REG_PC));
+}
+
 /* unified mmap for old_mmap(90) and mmap2(192); file-backed reads via pread. */
 long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) {
     uint32_t l = ALIGN_UP(len ? len : 1);
@@ -114,6 +124,11 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
     if (type == DEV_FB) {                                 /* track up to 2 fb buffers */
         if (!g_fb_guest) g_fb_guest = at;
         else if (!g_fb_guest2 && at != g_fb_guest) g_fb_guest2 = at;
+        if (getenv("ME_FBWATCH")) {   /* TEMP: count guest writes into this fb (execution vs aliasing) */
+            extern void fbwatch_cb(uc_engine*, uc_mem_type, uint64_t, int, int64_t, void*);
+            static uc_hook fbh; uc_hook_add(g_uc, &fbh, UC_HOOK_MEM_WRITE, fbwatch_cb, NULL,
+                                            at, at + len - 1);
+        }
     }
     if (type == DEV_MEM) {
         record_memmap(phys, at, len);

@@ -144,6 +144,18 @@ void present_active(void) {
     else present_guest(buf_score(g_fb_guest2) > buf_score(g_fb_guest) ? g_fb_guest2 : g_fb_guest);
 }
 
+/* Payback (a double-buffered title) renders to fb0/fb1 alternately and "flips" by issuing
+   __ARM_NR_cacheflush on the buffer it just finished, with that buffer's base in r3 -- it leaves
+   the MLC OADR register at 0 the whole time, so the OADR write-hook can't tell which buffer is
+   live. The cacheflushed base IS the just-rendered front buffer, so it's the correct present
+   signal: lock the display to it and let the helper thread do the copy (frame-synced). */
+void gp2x_cacheflush(uint32_t guest) {
+    if (guest != g_fb_guest && guest != g_fb_guest2) return;   /* only an fb flush is a flip */
+    g_oadr_driven = 1;                /* stop the async fallback present; we drive it per frame */
+    g_flip_active = 1; g_flip_guest = guest;
+    g_frame_ready = 1;
+}
+
 /* ---- /dev/dsp (OSS) audio -> shm audio ring (consumed by the viewer) ---- */
 uint32_t g_aud_freq = 44100, g_aud_ch = 2, g_aud_bits = 16;
 double g_aud_t0 = 0; int g_aud_on = 0;

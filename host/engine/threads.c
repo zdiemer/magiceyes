@@ -32,10 +32,28 @@ static void watch_cb(uc_engine *uc, uc_mem_type type, uint64_t addr, int size,
             (unsigned long long)value, g_self ? g_self->tid : -1, gread(UC_ARM_REG_PC));
 }
 
+/* ---- temporary: log when any thread first executes ME_PCHOOK=0xADDR ---- */
+static uint32_t g_pchook = 0;
+static void pchook_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)uc; (void)size; (void)user;
+    static unsigned long n = 0;
+    if (++n <= 4) {
+        static const int rr[13] = {UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3,
+            UC_ARM_REG_R4,UC_ARM_REG_R5,UC_ARM_REG_R6,UC_ARM_REG_R7,UC_ARM_REG_R8,
+            UC_ARM_REG_R9,UC_ARM_REG_R10,UC_ARM_REG_R11,UC_ARM_REG_R12};
+        char buf[256]; int o = snprintf(buf, sizeof buf, "PCHOOK %08x #%lu tid=%d lr=%08x sp=%08x",
+            (uint32_t)addr, n, g_self ? g_self->tid : -1, gread(UC_ARM_REG_LR), gread(UC_ARM_REG_SP));
+        for (int i = 0; i < 13; i++) o += snprintf(buf+o, sizeof buf-o, " r%d=%08x", i, gread(rr[i]));
+        fprintf(stderr, "%s\n", buf);   /* single fprintf so threads don't interleave */
+    }
+}
+
 /* ---- per-uc hooks + factory ------------------------------------------------ */
 void uc_hook_std(uc_engine *u) {
     uc_hook h;
     uc_hook_add(u, &h, UC_HOOK_INTR, intr_cb, NULL, 1, 0);
+    if (!g_pchook) { const char *e = getenv("ME_PCHOOK"); if (e) g_pchook = strtoul(e, NULL, 0); }
+    if (g_pchook) uc_hook_add(u, &h, UC_HOOK_CODE, pchook_cb, NULL, g_pchook, g_pchook);
     uc_hook_add(u, &h, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
     if (!g_nwatch) { const char *e = getenv("ME_WATCH");
