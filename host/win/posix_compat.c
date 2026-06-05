@@ -69,9 +69,14 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
         struct shm_ent *e = &g_shm[fd - SHM_FD_BASE];
         HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                                       0, (DWORD)len, e->name);   /* opens existing if present */
+        DWORD le = GetLastError();
+        if (getenv("ME_GP2X_SHMLOG"))
+            fprintf(stderr, "SHM map '%s' h=%p %s len=%zu err=%lu\n", e->name, (void*)h,
+                    le == ERROR_ALREADY_EXISTS ? "OPENED-EXISTING" : "CREATED-NEW", len, le);
         if (!h) return MAP_FAILED;
         void *p = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, len);
-        if (!p) { CloseHandle(h); return MAP_FAILED; }
+        if (!p) { if (getenv("ME_GP2X_SHMLOG")) fprintf(stderr, "SHM MapViewOfFile FAILED err=%lu\n", GetLastError());
+                  CloseHandle(h); return MAP_FAILED; }
         vlock();
         for (int i = 0; i < 64; i++) if (!g_views[i].base) { g_views[i].base = p; g_views[i].h = h; break; }
         vunlock();
