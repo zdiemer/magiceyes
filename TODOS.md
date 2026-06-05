@@ -303,8 +303,8 @@ fakes (glibc init diverged on ENOENT), **O_BINARY** open flags, **cacheflush-dri
 **timer resolution** (`timeBeginPeriod(1)`) — found by diffing main's syscall+return stream
 (`ME_SCRET`) WSL↔Windows. The apparent "~4x slower load" was **Windows 11 EcoQoS background-window
 throttling**, not our code (a focused window loads instantly); `me_platform_init()` opts the process
-out of execution-speed + timer-resolution throttling so backgrounded runs are full-speed too. Full
-write-up: `host/win/WINDOWS_RENDER_DEBUG.md`.
+out of execution-speed + timer-resolution throttling so backgrounded runs are full-speed too. The
+root-cause history is folded into `CLAUDE.md` (WINDOWS NATIVE BUILD).
 
 ### Engine headless-blocks without a viewer (make it self-drain)
 The Unicorn engine's audio producer paces against the viewer consuming the shm ring, so a

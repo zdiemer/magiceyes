@@ -262,11 +262,34 @@ under MinGW (`build_fork_win.sh` → `$FORK/build-win/libunicorn.a`); the **new 
 modules build unchanged** because MinGW's `winpthreads` covers the engine's pthread use. The
 only compat shim is tiny (`host/win/`): `compat/{sys/mman.h,elf.h}` + `posix_compat.c` —
 `mmap`→`VirtualAlloc`, `MAP_SHARED`→a **Win32 named file mapping** (`Local\magiceyes_<name>`) for
-the engine↔viewer shm bridge, plus `pread`/`lstat`/`setenv` (`mprotect` from libgcc). Verified:
-`me_unicorn.exe` loads Payback and runs GP2X ARM through TCG with device interception, no WSL.
-Build: `host/win/{get_sdl2,build_fork_win,build_win,build_viewer_win}.sh`; run on Windows:
-`host\win\run_win.bat <binary> [scale]`. See `host/win/README.md`. This is the native build that
-also settles the audio-stutter question (Windows WASAPI/DirectSound vs WSLg PulseAudio RDP sink).
+the engine↔viewer shm bridge, plus `pread`/`lstat`/`setenv` (`mprotect` from libgcc).
+
+**Payback now runs at FULL PARITY with Linux on native Windows** — renders correctly (pixel-matches
+WSL: headlights intro, PAYBACK title), real-time audio, 25fps, instant load. The black screen was a
+stack of Windows host-portability bugs, found by diffing main's syscall+return stream (`ME_SCRET`) vs
+a working WSL run and removing each divergence (all in `host/engine/`):
+1. **errno** (`linux_errno`/`LERR`): return Linux errno, not MinGW's — 1..34 match but the higher
+   ones differ (ENOSYS is 38 on Linux, 40 on MinGW) → a failed syscall gave the guest's glibc the
+   wrong code → wrong control flow.
+2. **/proc + /etc served host-independently** (`sysfile_open` + an in-memory fake fd): the engine
+   passed guest opens to the host FS, so `/proc/sys/kernel/version` + `/etc/localtime` resolved on
+   WSL's Linux host by accident but ENOENT'd on Windows → glibc init hung. (Also replaced the
+   `/proc/mounts` `mkstemp("/tmp/..")`, which failed on Windows too; `/etc/localtime` = minimal UTC TZif.)
+3. **`O_BINARY`** open flags (`host_open_flags`, `#ifdef _WIN32`) — msvcrt text mode corrupts binary assets.
+4. **cacheflush-driven present** (`gp2x_cacheflush`) — Payback flips via `__ARM_NR_cacheflush` (r3 = the
+   just-drawn buffer), leaving MLC OADR at 0, so the OADR hook can't pick the live buffer.
+5. **timer resolution** `timeBeginPeriod(1)` (`me_platform_init`).
+The apparent "~4x slower load" was **Windows 11 EcoQoS background-window throttling** (reduced CPU
+speed + coarsened timer for an un-focused window); a focused window loads instantly. `me_platform_init()`
+opts out (`SetProcessInformation`/`ProcessPowerThrottling`, execution-speed + timer-resolution) so
+backgrounded runs are full-speed too, matching Linux. Diagnostics added (env-gated): `ME_SCRET`
+(timestamped per-thread syscall+return trace), `ME_FBWATCH`, `ME_PCHOOK`.
+
+**Preferred build: the single-process bundle** (`-DME_BUNDLED` → `bin/magiceyes.exe`; the viewer runs on
+a worker thread sharing the engine's in-process `g_shm` — no cross-process shm). Build:
+`host/win/{get_sdl2,build_fork_win,build_bundle_win}.sh`; run on Windows: `bin\magiceyes.exe <binary>
+[scale]` (two-process `me_unicorn.exe`+`viewer.exe` via `host\win\run_win.bat` still works). See
+`host/win/README.md`. Also settles the audio-stutter question (Windows WASAPI vs WSLg PulseAudio RDP sink).
 
 **Fork:** `~/me-unicorn-fork` (Unicorn 2.0.1, ARM-only static, branch `magiceyes`). GitHub
 fork `github.com/zdiemer/unicorn` created; push pending a one-time `gh auth refresh -s workflow`
@@ -299,8 +322,8 @@ runs a live multi-threaded frame loop. The Unicorn **TCOUNT now ticks at 7.3728 
 hardware crystal, was 1 MHz slow-motion; env `ME_GP2X_TIMESCALE=N` MHz, matches the qemu knob),
 and **`gettimeofday` returns real wall-clock** (was 0, which freezes elapsed-time deltas).
 
-**Remaining blocker — Payback hangs on the loading screen (LinuxThreads deadlock, NOT audio).**
-Full write-up: `host/engine/LOADING_DEADLOCK.md`. **Corrected** (the earlier "MMSP2 audio-DMA"
+**Loading-screen hang (LinuxThreads deadlock, NOT audio) — RESOLVED** (Payback is playable; the
+native-threads model + the Windows-parity fixes above closed it). **Corrected** (the earlier "MMSP2 audio-DMA"
 theory was wrong): Payback uses **`/dev/dsp` (OSS)** like the qemu backend — a qemu strace shows
 its main thread reaching the run loop and streaming 16KB PCM buffers to `/dev/dsp`, while our
 main makes **0** dsp writes. Ours hangs earlier in **`__pthread_lock`** (`0x1321c0`, the ARMv5

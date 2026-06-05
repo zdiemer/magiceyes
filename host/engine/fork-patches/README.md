@@ -37,8 +37,8 @@ host/engine/fork-patches/apply_and_build.sh        # ME_UNICORN_FORK overrides ~
   set and TCG emitted **non-atomic** `swp`/ldrex — the basis of every LinuxThreads lock/CAS on
   ARMv5. Setting it makes `op_swp`'s `tcg_gen_atomic_xchg_i32` emit a real host atomic on the
   shared backing. (Correctness fix for the native-threads model; the kuser-cmpxchg path is
-  already host-atomic. NB: did NOT resolve the deterministic Payback loading deadlock — see
-  `host/engine/LOADING_DEADLOCK.md`.)
+  already host-atomic. NB: this was not itself the Payback loading-deadlock fix — that was resolved
+  separately in the native-threads model.)
 
 ## Licensing
 Unicorn/qemu are GPLv2; binaries linking the fork make magiceyes GPLv2-compatible.

@@ -44,7 +44,7 @@ The bundle (`-DME_BUNDLED`) collapses the engine↔viewer shm bridge into one pr
 on a worker thread sharing the engine's in-process `g_shm`). Payback runs at **full parity with
 Linux** — renders correctly, real-time audio, 25fps, instant load (focused window). The root-cause
 history (host errno/`/proc`+`/etc`/`O_BINARY`/timer fixes + EcoQoS background-throttling) is in
-`WINDOWS_RENDER_DEBUG.md`.
+`CLAUDE.md` (WINDOWS NATIVE BUILD).
 
 ## The compat layer (`host/win/`)
 MinGW provides pthreads (winpthreads), gettimeofday, usleep, nanosleep, sched_yield, fcntl/stdio.
