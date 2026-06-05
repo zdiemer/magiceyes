@@ -157,21 +157,21 @@ void gp2x_present_rgb565(gp2x_dev_t *d, const void *src, uint32_t w, uint32_t h)
     d->shm->frame_seq++;
 }
 
-/* sparse FNV hash of a 320x240 RGB565 surface (change detection). */
-static uint32_t surf_hash(const void *host) {
-    if (!host) return 0;
+/* sparse FNV hash of a surface (change detection). `len` bounds the reads: the
+   game's fb may be smaller than 320x240x2 (e.g. 8-bit palettised = 76800 bytes),
+   and reading past it segfaults our helper thread. */
+static uint32_t surf_hash(const void *host, uint32_t len) {
+    if (!host || !len) return 0;
     const uint8_t *p = host; uint32_t h = 2166136261u;
-    for (int y = 0; y < 240; y += 12)
-        for (int x = 0; x < 320 * 2; x += 5)
-            h = (h ^ p[(size_t)y * 640 + x]) * 16777619u;
+    for (size_t i = 0; i < len; i += 60)        /* sparse sample, in-bounds */
+        h = (h ^ p[i]) * 16777619u;
     return h;
 }
-static int surf_nonblank(const void *host) {
-    if (!host) return -1;
+static int surf_nonblank(const void *host, uint32_t len) {
+    if (!host || !len) return -1;
     const uint8_t *p = host; int nz = 0;
-    for (int y = 8; y < 240; y += 24)
-        for (int x = 0; x < 320 * 2; x++)
-            if (p[(size_t)y * 640 + x]) { nz++; break; }
+    for (size_t i = 0; i < len; i += 997)
+        if (p[i]) nz++;
     return nz;
 }
 
@@ -194,7 +194,7 @@ static void present_active(gp2x_dev_t *d) {
         oadr_phys = ((uint32_t)hi << 16) | lo;
         oadr = oadr_phys ? phys_to_host(d, oadr_phys) : NULL;
     }
-    uint32_t n0 = surf_hash(a), n1 = surf_hash(b);
+    uint32_t n0 = surf_hash(a, d->fb_len[0]), n1 = surf_hash(b, d->fb_len[1]);
     int c0 = (n0 != d->hash[0]), c1 = (n1 != d->hash[1]);
     if (d->debug) {
         static int n = 0;
@@ -203,11 +203,20 @@ static void present_active(gp2x_dev_t *d) {
                     oadr_phys, oadr, c0 ? "*" : " ", c1 ? "*" : " ");
     }
     d->hash[0] = n0; d->hash[1] = n1;
+    /* Only present a buffer big enough for a 320x240 RGB565 frame; an 8-bit fb
+       (76800 bytes) would overread in gp2x_present_rgb565. Such games drive the
+       display via the SDL shim (which writes the shm directly) or the MLC, so
+       skipping the raw fb here is correct, not a regression. */
     if (oadr) { gp2x_present_rgb565(d, oadr, 320, 240); return; }
     if (!a && !b) return;
-    if (c1 && b)      gp2x_present_rgb565(d, b, 320, 240);
-    else if (c0 && a) gp2x_present_rgb565(d, a, 320, 240);
-    else gp2x_present_rgb565(d, surf_nonblank(b) > surf_nonblank(a) ? b : a, 320, 240);
+    int big0 = d->fb_len[0] >= 320u * 240u * 2, big1 = d->fb_len[1] >= 320u * 240u * 2;
+    if (c1 && b && big1)      gp2x_present_rgb565(d, b, 320, 240);
+    else if (c0 && a && big0) gp2x_present_rgb565(d, a, 320, 240);
+    else if (big0 || big1) {
+        void *pa = big0 ? a : NULL, *pb = big1 ? b : NULL;
+        gp2x_present_rgb565(d, surf_nonblank(pb, d->fb_len[1]) >
+                               surf_nonblank(pa, d->fb_len[0]) ? pb : pa, 320, 240);
+    }
 }
 
 /* Count real game frames by watching the MLC scanout address (OADR) flip. Called
