@@ -245,6 +245,42 @@ then works natively. Also: the decompressed binary **must be `chmod +x`** (qemu'
 contract, decomp tooling. Native Win/macOS is gone (qemu-user is Linux — GP2X was always WSL;
 this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
 
+## Cross-platform via a forked Unicorn — IN PROGRESS (2026-06)
+
+To ship **native self-contained binaries** (Windows .exe, macOS .dmg, Linux x86_64/ARM) with
+**no WSL/VM**, the decided direction is to **fork Unicorn** (= qemu's TCG as a portable
+library; builds native on all three) and bring the Unicorn engine (`host/unicorn/me_unicorn.c`)
+to **parity with the QEMU backend**, reusing the device model + viewer. Plan:
+`C:\Users\zachd\.claude\plans\currently-we-have-some-lazy-cook.md`. Approach: fork Unicorn
+(not qemu-user — its linux-user layer can't compile to native Win/macOS), port our qemu fixes
+into its tree, collapse engine+viewer into one process, add a dynamic-ELF loader for Wiz.
+
+**Fork:** `~/me-unicorn-fork` (Unicorn 2.0.1, ARM-only static, branch `magiceyes`). GitHub
+fork `github.com/zdiemer/unicorn` created; push pending a one-time `gh auth refresh -s workflow`
+(see `host/engine/fork-patches/push_fork.sh`). Patches authored via `host/engine/fork-patches/`,
+committed into the fork.
+
+**Done & verified:**
+- **SMC-freeze ported to Unicorn's softmmu** (`cputlb.c` notdirty/TLB path; the user-exec
+  page_protect analog) — confirmed freezing the `.iwram` thrash pages. Env: `ME_GP2X_NOSMCFREEZE`,
+  `ME_GP2X_SMCLOG`.
+- **`me_unicorn.c` fixes** (the Payback music-load chain): correct EABI **`fill_stat64`**
+  (st_size@48/104B — was the "Can't stat file" hang); safe **`read_cstr`** path reads;
+  **`_llseek`(140)**; **`execve`(11)** as `gp2x_execve_noop` (forked-child sh/insmod → exit 0);
+  **`exit_group` worker fix** (non-main thread's exit_group ends just that thread — ported from
+  `apply_gp2x.py`); fps readout in `ME_PROF`; `ME_THREADDUMP` thread-state dump.
+
+**Remaining blocker (Payback → menu):** the cooperative scheduler + synchronous-fork model
+deadlocks/crashes where QEMU uses native threads. Diagnosed precisely: after the game's
+`system("exit 0")`, main null-derefs via an **indirect call through an uninitialised
+function-pointer table** on an audio/stream object (`ldr pc,[r3,#56]` at `0x14b95c`), and a
+second thread busy-spins a userspace lock main can no longer release. Root cause is upstream
+object-init, and the synchronous-fork model leaks engine state (signals/fds) the QEMU native
+fork doesn't. **Conclusion: full parity needs native host threads** (each guest thread = host
+thread over shared `uc_mem_map_ptr` RAM), the real next step — best validated interactively
+(the menu needs input; can't be reached headless). Still-to-port from `gp2x.c` for *other*
+titles: the MLC-palette/blitter MMIO trap (`gp2x_mmio_fault`) and `/dev/i2c-0` serial.
+
 **Two fixes that made it playable (both reproduced by `apply_gp2x.py`):**
 - **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* CPU-cost fix that lets rendering reach the
   timer's frame cap: with it gameplay hits the full **30fps**; without it the re-translation
@@ -340,9 +376,12 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
 - `/dev/dsp` OSS: SNDCTL_DSP_{SPEED,STEREO,CHANNELS,SETFMT,GETBLKSIZE,SETFRAGMENT,GETFMTS,
   GETOSPACE,GETODELAY,RESET,SYNC,POST}; **GETOSPACE must report real free space** (0 ⇒ the
   game thinks the buffer is always full); writes → shm audio ring.
-- `stat64`: ARM EABI is st_mode@16/st_size@40/sizeof 112, BUT glibc 2.3.6's buffer is
-  smaller — writing 112B **overflowed + crashed** at startup; we reverted to the 88B
-  old-stat fill. Get the exact glibc-2.3.6 size from GPH SDK headers before redoing it.
+- `stat64`: the correct ARM-EABI `struct stat64` is **st_mode@16, st_size@48, st_blocks@64,
+  st_ino@96, sizeof 104** (the earlier "st_size@40/sizeof 112" was wrong on both counts —
+  the `__pad3[4]`+alignment after the 8-byte `st_rdev` puts st_size at 48, and 112 overflowed
+  the 104-byte buffer → the documented crash). The **Unicorn** engine (`me_unicorn.c`
+  `fill_stat64`) now fills this correctly; filling the 88B OABI layout for stat64 made the
+  game read st_size=0 → "Can't stat file" on every asset (the Payback music-load hang).
 - GPEComp games decompress to `/mnt/tmp/<name>_tmp` (static) via `tools/gp2x/decomp_*.sh`
   (inode-pin trick). Test binary: `~/pbtest/Payback_tmp` (10MB static), run from `~/pbtest`
   (needs `Data/`). The freeware copy lacked `Data/Music/*.ama`; the **full set (21 `.ama`,
