@@ -32,12 +32,32 @@ draws"; `ME_SCRET` (per-thread syscall+return trace) + an index-diff of main's s
 run found each divergence in turn. Ground-truth render comparison: dump `/dev/shm/gp2x_fb` on WSL
 to PNG vs screenshot the Windows window — both show the same intro + title.
 
-## Remaining (not correctness — a one-time speed delta)
-- **Load is ~3–4x slower than WSL** (~16–34s to first frame vs ~4s), CPU-bound parallel TCG warmup
-  (~4 cores busy; SMC-freeze works, only 1 page frozen; the mmap free-list is used). Steady-state
-  **gameplay fps is at parity (25fps both)** — only the initial decode/JIT warmup is slower, and it
-  varies run-to-run. Likely winpthreads lock/scheduling or MinGW-TCG JIT throughput; not yet root-caused.
-- Diagnostics retained (env-gated): `ME_FBWATCH`, `ME_PCHOOK`, `ME_SCRET`.
+## Remaining: slow + variable initial load (NOT a correctness issue)
+Steady-state **gameplay is at parity (25fps both)**; only reaching the first frame is slow on
+Windows (~16–34s vs WSL ~4s) and **varies run-to-run** (sometimes near-hangs in init). NOT yet
+root-caused, but extensively narrowed — evidence for the next session:
+- **Wait-bound, not CPU-bound:** during the slow load the process uses only ~9% of ONE core
+  (per-thread `ProcessThread.TotalProcessorTime`). (An earlier "400% CPU" reading was a different
+  transient phase.) So threads are *blocked*, not computing.
+- **Single-threaded during init:** `ME_THREADDUMP` shows `nth=1` for much of the load — the
+  LinuxThreads workers spawn only after. So it's main, blocked, alone.
+- **Not code-cache thrash:** instrumented `tb_flush` in the fork → **0 flushes** during load (1GB
+  per-uc code buffer; `VirtualAlloc MEM_COMMIT`). SMC-freeze works (1 page frozen).
+- **Not the sleep granularity:** `ME_SCRET` (timestamped per-thread syscall trace) shows main's
+  nanosleep histogram is wildly different — WSL: ~132k sleeps <0.5ms; Windows: ~2,335 sleeps of
+  ~9ms (similar *total* ~13–17s). A high-resolution `CreateWaitableTimerEx` `me_usleep` sped up the
+  game-loop spin (mmsp2_rd 1385→4042/s) but did **NOT** reduce load time → reverted (it only adds
+  CPU). A sub-ms busy-wait **regressed** (saturates cores via the idle pollers, starves the render
+  thread).
+- **Not audio:** `SDL_AUDIODRIVER=dummy` didn't help.
+- **Lock contention is the prime remaining suspect:** the helper thread is *starved* during load
+  (PROF prints every ~4s instead of 2s) — it blocks in `present_active`→`guest_to_host`→`g_reg_lock`,
+  which main holds heavily in the mmap-churn path (`ensure_mapped`). winpthreads mutexes are far
+  slower under contention than glibc futexes. **Next: measure `g_biglock`/`g_reg_lock` wait time**
+  (carefully — adding `gettimeofday` to the hot nanosleep path itself perturbed/hung it), and try a
+  faster lock (Win32 `SRWLOCK`/`CRITICAL_SECTION`) or shrinking the lock hold time in `mem.c`.
+- Diagnosed with `ME_SCRET` (now includes a wall-clock timestamp per line); also `ME_FBWATCH`,
+  `ME_PCHOOK`, `ME_THREADDUMP`.
 
 ## Capture gotchas on Windows
 - `Start-Process -NoNewWindow` for stderr redirect (else a separate console = empty file).

@@ -85,9 +85,9 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
                           gread(UC_ARM_REG_R3), gread(UC_ARM_REG_R4), gread(UC_ARM_REG_R5));
     if (!g_setpc && !g_exit) gwrite(UC_ARM_REG_R0, (uint32_t)r);
     if (g_scret) {   /* deterministic per-thread syscall+return trace (single fprintf, no interleave) */
-        char b[160];
-        snprintf(b, sizeof b, "SC t%d pc=%08x nr=%u(%08x,%08x,%08x)=%08lx\n",
-                 g_self ? g_self->tid : -1, pc, nr, a0, a1, a2, (unsigned long)(uint32_t)r);
+        char b[180];
+        snprintf(b, sizeof b, "SC %.3f t%d pc=%08x nr=%u(%08x,%08x,%08x)=%08lx\n",
+                 host_now(), g_self ? g_self->tid : -1, pc, nr, a0, a1, a2, (unsigned long)(uint32_t)r);
         fputs(b, stderr);
     }
     pthread_mutex_unlock(&g_biglock);
