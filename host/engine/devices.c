@@ -205,11 +205,19 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (!g_mmsp2_guest) return;
     g_n_rd++;
     uint32_t off = (uint32_t)addr - g_mmsp2_guest;
-    if (off == 0x0a00) {           /* TCOUNT: 1us free-running counter */
-        static double t0 = 0; struct timeval tv; gettimeofday(&tv, NULL);
+    if (off == 0x0a00) {           /* TCOUNT: free-running counter, 7.3728 MHz reference crystal */
+        /* The game derives BOTH frame pacing AND simulation dt from TCOUNT, so the tick rate
+           sets frame rate and game speed together. The GP2X reference crystal is 7.3728 MHz
+           (fps ~= 4.15*MHz -> ~30fps at intended speed); 1 MHz was the slow-motion bug.
+           ME_GP2X_TIMESCALE = N sets the rate to N MHz (matches the qemu backend's knob). */
+        static double t0 = 0, hz = 0;
+        if (hz == 0) { const char *e = getenv("ME_GP2X_TIMESCALE");
+                       double mhz = e ? atof(e) : 7.3728; if (mhz <= 0) mhz = 7.3728;
+                       hz = mhz * 1e6; }
+        struct timeval tv; gettimeofday(&tv, NULL);
         double now = tv.tv_sec + tv.tv_usec * 1e-6;
         if (t0 == 0) t0 = now;
-        uint32_t us = (uint32_t)((now - t0) * 1e6);
+        uint32_t us = (uint32_t)((now - t0) * hz);
         uc_mem_write(uc, g_mmsp2_guest + 0x0a00, &us, 4);
         return;
     }

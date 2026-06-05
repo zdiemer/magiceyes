@@ -23,12 +23,24 @@ const int g_sregs[17] = {
     UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11,
     UC_ARM_REG_R12, UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_CPSR };
 
+/* ---- temporary: watch writes to a guest address (ME_WATCH=0xADDR) ---------- */
+static uint32_t g_watch = 0;
+static void watch_cb(uc_engine *uc, uc_mem_type type, uint64_t addr, int size,
+                     int64_t value, void *user) {
+    (void)uc; (void)type; (void)size; (void)user;
+    fprintf(stderr, "WATCH %08x <- %08llx tid=%d pc=%08x\n", (uint32_t)addr,
+            (unsigned long long)value, g_self ? g_self->tid : -1, gread(UC_ARM_REG_PC));
+}
+
 /* ---- per-uc hooks + factory ------------------------------------------------ */
 void uc_hook_std(uc_engine *u) {
     uc_hook h;
     uc_hook_add(u, &h, UC_HOOK_INTR, intr_cb, NULL, 1, 0);
     uc_hook_add(u, &h, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
+    if (!g_watch) { const char *e = getenv("ME_WATCH"); if (e) g_watch = strtoul(e, NULL, 0); }
+    if (g_watch)
+        uc_hook_add(u, &h, UC_HOOK_MEM_WRITE, watch_cb, NULL, g_watch, g_watch + 3);
 }
 
 uc_engine *uc_new_thread(void) {
@@ -152,8 +164,10 @@ void dump_threads(const char *why) {
     fprintf(stderr, "== threads (%s) nth=%d ==\n", why, g_nth);
     for (int i = 0; i < g_nth; i++) {
         struct thread *t = &g_th[i];
-        fprintf(stderr, "  [%d] tid=%d %-8s pc~=%08x sigP=%llx sigB=%llx\n",
-                i, t->tid, sn[t->state & 7], t->last_pc,
+        uint32_t pc = 0, lr = 0;
+        if (t->uc) { uc_reg_read(t->uc, UC_ARM_REG_PC, &pc); uc_reg_read(t->uc, UC_ARM_REG_LR, &lr); }
+        fprintf(stderr, "  [%d] tid=%d %-8s livePC=%08x lr=%08x lastSC=%08x sigP=%llx sigB=%llx\n",
+                i, t->tid, sn[t->state & 7], pc, lr, t->last_pc,
                 (unsigned long long)t->sig_pending, (unsigned long long)t->sig_blocked);
     }
 }

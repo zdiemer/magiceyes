@@ -393,8 +393,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                        pthread_mutex_lock(&g_biglock); }
         return 0;
     }
-    case 78: {  /* gettimeofday(tv, tz) */
-        if (a0) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a0, z, 8); } return 0;
+    case 78: {  /* gettimeofday(tv, tz): real wall-clock — games drive loading/animation
+                   timing off this; returning 0 froze the elapsed-time delta (stuck screens). */
+        if (a0) { struct timeval tv; gettimeofday(&tv, NULL);
+                  uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec };
+                  uc_mem_write(g_uc, a0, t, 8); }
+        return 0;
     }
     case 191: { /* ugetrlimit(res, rlim) -> cur=8MB max=inf */
         uint32_t rl[2] = {0x00800000u, 0xffffffffu};

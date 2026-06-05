@@ -46,6 +46,7 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     uint32_t imm = insn & 0x00ffffffu;
     uint32_t nr = (imm == 0) ? gread(UC_ARM_REG_R7)
                 : (imm >= 0x900000u) ? (imm - 0x900000u) : imm;
+    if (g_self) g_self->last_pc = pc;   /* diagnostics: where this thread last syscalled */
     pthread_mutex_lock(&g_biglock);
     g_setpc = 0;
     long r = sys_dispatch(nr, gread(UC_ARM_REG_R0), gread(UC_ARM_REG_R1),
@@ -61,9 +62,13 @@ static void *helper_thread(void *arg) {
     (void)arg;
     int prof = getenv("ME_PROF") ? 1 : 0;
     double prof_t = 0, tdp = 0; uint32_t prof_fs = 0;
+    const char *ac = getenv("ME_AUDIOCLEAR");   /* TEMP: simulate audio-DMA completion by
+                                                   periodically clearing a guest "DMA busy" flag */
+    uint32_t acaddr = ac ? (uint32_t)strtoul(ac, NULL, 0) : 0;
     while (!g_exit) {
         usleep(16000);
         if (g_fb_guest) present_active();    /* reads the fb via host backing (guest_to_host) */
+        if (acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
         double now = host_now();
         if (prof && now - prof_t >= 2.0) {
             double dt = now - prof_t; uint32_t fs = g_shm ? g_shm->frame_seq : 0;

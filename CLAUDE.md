@@ -282,11 +282,22 @@ overflow**: this OABI glibc's `struct stat64` is **96 bytes**, but we wrote **10
 saved `r5` (the `FILE*`) with 0 → underflow got a null stream during the first `getmntent`
 read. Fixing the struct to 96 bytes (`host/engine/syscalls.c`) clears it: Payback now passes
 the mount check, opens `/etc/localtime`, stat's all maps, spawns its LinuxThreads workers, and
-runs a live multi-threaded frame loop (main paces on `nanosleep`+TCOUNT; manager polls
-`getppid`). Reaching the actual menu is best validated **interactively** (it waits for input;
-headless it idles at the first screen). Still-to-port from `gp2x.c` for *other* titles: the
-MLC-palette/blitter MMIO trap (`gp2x_mmio_fault`) and `/dev/i2c-0` serial; and the Unicorn
-TCOUNT still ticks at **1 MHz wall-clock** (the slow-motion rate) vs qemu's 7.3728 MHz.
+runs a live multi-threaded frame loop. The Unicorn **TCOUNT now ticks at 7.3728 MHz** (the
+hardware crystal, was 1 MHz slow-motion; env `ME_GP2X_TIMESCALE=N` MHz, matches the qemu knob),
+and **`gettimeofday` returns real wall-clock** (was 0, which freezes elapsed-time deltas).
+
+**Remaining blocker — Payback hangs on the loading screen (two stacked deadlocks).** Full
+write-up: `host/engine/LOADING_DEADLOCK.md`. (1) **MMSP2 audio-DMA completion isn't emulated**:
+main's audio-init sets a "DMA busy" flag `*(0xe9eae8)=1` and spawns the mixer thread, which then
+**busy-spins forever** waiting for it to clear — Payback drives audio via the memory-mapped
+MMSP2 DMA, NOT `/dev/dsp` (which it never opens), and we don't advance the play position to
+clear the flag. Confirmed by `ME_AUDIOCLEAR=0xe9eae8` (host-side periodic clear) unblocking the
+mixer. (2) Underneath: a **LinuxThreads `sigsuspend`/restart-signal** coordination where main +
+mixer both park in `rt_sigsuspend` waiting for `kill(·,32)` restarts no thread sends (likely a
+lost-wakeup in `sigsuspend_wait`). New env-gated diagnostics: `ME_THREADDUMP` now prints
+per-thread livePC/lr/lastSC; `ME_WATCH=0xADDR` logs guest writes to a word. Still-to-port from
+`gp2x.c` for *other* titles: the MLC-palette/blitter MMIO trap (`gp2x_mmio_fault`) and
+`/dev/i2c-0` serial.
 
 **Two fixes that made it playable (both reproduced by `apply_gp2x.py`):**
 - **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* CPU-cost fix that lets rendering reach the
