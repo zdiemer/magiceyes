@@ -31,7 +31,9 @@ for f in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do
 done
 rm -f /dev/shm/gp2x_fb
 
-"$QEMU" -L "$ROOTFS" \
+STRACE=""
+[ -n "${MAGICEYES_STRACE:-}" ] && STRACE="-strace -D /tmp/magiceyes.strace"
+"$QEMU" $STRACE -L "$ROOTFS" \
   -E LD_LIBRARY_PATH=/opt/shim:/lib:/usr/lib -E HOME=/tmp \
   -E "FAKESDL_FPS=${MAGICEYES_FPS:-60}" \
   "./$GNAME" "$@" >/tmp/magiceyes_game.log 2>&1 &
