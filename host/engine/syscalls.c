@@ -58,7 +58,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
     (void)a3; (void)a4; (void)a5;
     if (g_trace)
-        fprintf(stderr, "  sc %u (%08x,%08x,%08x,%08x)\n", nr, a0, a1, a2, a3);
+        fprintf(stderr, "  [t%d] sc %u (%08x,%08x,%08x,%08x)\n",
+                g_self ? g_self->tid : -1, nr, a0, a1, a2, a3);
     /* single-buffered titles never "flip"; refresh the live fb0 periodically */
     { static unsigned c = 0; if (g_fb_guest && (++c & 63) == 0) present_active(); }
     switch (nr) {
@@ -73,6 +74,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             uc_context_restore(g_uc, g_fork_ctx);
             uc_context_free(g_fork_ctx); g_fork_ctx = NULL;
             g_forked = 0;
+            memcpy(g_sigact, g_sigact_fork, sizeof g_sigact);   /* undo the child's handler resets */
+            g_self->sig_blocked = g_fork_sigblocked;
             if (g_trace) fprintf(stderr, "  [fork] child exited(%u) -> resume parent\n", a0);
             return g_child_pid;  /* parent's fork() now returns the child pid */
         }
@@ -151,6 +154,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             }
             uc_free(regs);
         }
+        memcpy(g_sigact_fork, g_sigact, sizeof g_sigact);   /* child resets handlers pre-exec */
+        g_fork_sigblocked = g_self->sig_blocked;
+        g_fork_thread = g_self;
         g_forked = 1;
         if (g_trace) fprintf(stderr, "  [fork] snapshot %d regions; child runs first\n", g_nsnap);
         return 0;  /* child sees fork()==0 */
@@ -181,6 +187,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             uc_context_restore(g_uc, g_fork_ctx);
             uc_context_free(g_fork_ctx); g_fork_ctx = NULL;
             g_forked = 0;
+            memcpy(g_sigact, g_sigact_fork, sizeof g_sigact);   /* undo the child's handler resets */
+            g_self->sig_blocked = g_fork_sigblocked;
             if (g_trace) fprintf(stderr, "  [fork] child execve %s -> exit(0)\n", base);
             return g_child_pid;
         }
@@ -286,10 +294,18 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                                        g_sigact[sig].restorer};
                       uc_mem_write(g_uc, a2, o, 12);
                       uc_mem_write(g_uc, a2 + 12, &g_sigact[sig].mask, 8); }
+            /* The inline fork child resets handlers to SIG_DFL pre-exec; since it shares the
+               process-wide table with the still-running parent threads, applying that would
+               (transiently) wipe e.g. the LinuxThreads restart handler and drop a concurrent
+               thread's restart. The child only execs our exit-stub, so ignore its changes. */
+            if (g_forked && g_self == g_fork_thread) return 0;
             if (a1) { uint32_t h[3]; uc_mem_read(g_uc, a1, h, 12);
                       uint64_t m = 0; uc_mem_read(g_uc, a1 + 12, &m, 8);
                       g_sigact[sig].handler = h[0]; g_sigact[sig].flags = h[1];
-                      g_sigact[sig].restorer = h[2]; g_sigact[sig].mask = m; }
+                      g_sigact[sig].restorer = h[2]; g_sigact[sig].mask = m;
+                      if (getenv("ME_SIGLOG") && sig >= 32 && sig <= 34)
+                          fprintf(stderr, "SIG t%d sigaction(%d) handler=%08x flags=%08x\n",
+                                  g_self ? g_self->tid : -1, sig, h[0], h[1]); }
         }
         return 0;
     }

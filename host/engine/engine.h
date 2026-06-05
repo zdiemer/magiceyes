@@ -146,6 +146,9 @@ extern uc_context *g_fork_ctx;
 extern struct snap g_snap[2048];
 extern int g_nsnap, g_forked;
 extern uint32_t g_child_pid;
+extern struct sigact g_sigact_fork[65];   /* sig dispositions saved across a synchronous fork */
+extern uint64_t g_fork_sigblocked;
+extern struct thread *g_fork_thread;      /* thread running the inline fork child */
 extern uint8_t *g_pipebuf;
 extern uint32_t g_pipe_cap, g_pipe_w, g_pipe_r;
 void pipe_put(const uint8_t *p, uint32_t n);

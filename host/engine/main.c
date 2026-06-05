@@ -15,6 +15,16 @@ uc_context *g_fork_ctx = NULL;
 struct snap g_snap[2048];
 int g_nsnap = 0, g_forked = 0;
 uint32_t g_child_pid = 0x1234;
+/* The synchronous-fork child runs inline in the parent's engine, so host-side engine
+   state it mutates (NOT covered by the guest-memory/uc-context snapshot) leaks into the
+   parent. The big one: a fork child resets signal handlers to SIG_DFL before exec, which
+   wiped the parent's LinuxThreads restart-signal (32) handler -> every later pthread
+   restart was dropped -> deadlock. Save/restore the signal dispositions + the running
+   thread's mask across the fork. */
+struct sigact g_sigact_fork[65];
+uint64_t g_fork_sigblocked;
+struct thread *g_fork_thread;   /* the thread running the inline fork child (its sigaction
+                                   resets must not leak into the shared signal table) */
 
 /* in-engine pipe (parent <-> forked child) */
 uint8_t *g_pipebuf = NULL;
