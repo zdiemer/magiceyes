@@ -27,6 +27,13 @@ and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too
   (the QEMU pivot, below). (Gotcha: the game needs `Data/Config/*.ini` readable+writable —
   mode-000 ini files caused EACCES and stuck the menu; `chmod -R u+rwX Data/`.) The
   **Unicorn backend** (`host/unicorn/`) is kept as a fallback.
+- **More GP2X titles now render** (qemu backend): **Odonata** (dynamic, 8-bit MLC framebuffer)
+  in **true colour** via the new MLC-palette write-trap; **Vektar** (minlib, draws via the
+  MMSP2 2D blitter) via the new MESG blitter emulation; **Wind & Water** (dynamic libSDL) via
+  the fake-SDL shim + rootfs. Run any of them with `tools/gp2x/play.sh <game.gpe|.zip>` (it
+  auto-routes static-vs-dynamic and decompresses GPEComp). The palette + blitter are the two
+  device features added for these (see the hardware-contract section); both reuse one
+  register-page write-trap (`gp2x_mmio_fault`).
 
 ## Two backends (this is the core design)
 
@@ -313,6 +320,23 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
   lo = VOL, all active-low; MLC `OADRL/OADRH` @0x290e/0x2910. Input =
   `~((m[0x1198]&0xff)|(m[0x1184]&0xff00)|(m[0x1186]<<16))` w/ diagonal fixups
   (`gp2x_joystick_read`); button bits match `gp2xshm.h` (A=12,B=13,X=14,Y=15,START=8,…).
+- **MLC 8-bit palette** (`PALLT_A`@0x2958 index + `PALLT_D`@0x295a data, **write-only port**,
+  2 halfwords/entry: `(G<<8)|B` then `R`): the value never survives in RAM, so 8-bit games
+  could only be shown as RGB332. We now **write-trap** the palette/OADR register page
+  (`target_mprotect` PROT_READ) and forward the faulting guest store to `gp2x_mmio_fault`
+  (decodes the ARM store, captures the value, re-applies via a brief host-mprotect window,
+  advances PC). Reconstructs the 256-entry palette → **Odonata renders in true colour**.
+  Hook is at the top of qemu `handle_sigsegv_accerr_write` (`apply_gp2x.py:patch_userexec_mmio`),
+  which `cpu_loop_exit_noexc`s on success. Opt out: `ME_GP2X_NOPALTRAP`.
+- **MMSP2 2D "MESG" blitter** (`/dev/mem` mmap @ phys **0xE0020000**, 256B): minlib-style
+  games (**Vektar**) draw entirely through it — the CPU never touches fb0/fb1 (they stay
+  black). Same write-trap mechanism shadows the MESG regs (`host/common/gp2x_device.c`
+  `gp2x_blitter_write`) and **executes the blit when `MESGSTATUS`@0x34 is written with BUSY**
+  (the hw run-trigger): solid fill (forecolor) + video→video copy with colour-key
+  transparency, 8/16bpp. The trigger store is left BUSY-cleared in RAM so the game's
+  `while(STATUS&BUSY)` completion poll exits. Not yet emulated: FIFO (system-mem) sources,
+  1-bpp expand, blend ROPs (`ME_GP2X_BLITLOG` logs+skips them). Reg map = paeryn
+  `mmsp2_regs.h` (`MESG*`); dst/src phys resolve via `phys_to_host`.
 - `/dev/dsp` OSS: SNDCTL_DSP_{SPEED,STEREO,CHANNELS,SETFMT,GETBLKSIZE,SETFRAGMENT,GETFMTS,
   GETOSPACE,GETODELAY,RESET,SYNC,POST}; **GETOSPACE must report real free space** (0 ⇒ the
   game thinks the buffer is always full); writes → shm audio ring.
