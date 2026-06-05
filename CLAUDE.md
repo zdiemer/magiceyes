@@ -409,6 +409,14 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
 ## Conventions
 
 - Commit straight to `main`, **no `Co-Authored-By` trailer**.
+- **Multi-line commit messages — don't paste a here-string into the Bash tool.** The agent
+  has two shell tools: a **Bash** tool and a **PowerShell** tool. PowerShell's `@'...'@`
+  here-string is **PowerShell-only**; pasting `git commit -m @'...'@` into the *Bash* tool is a
+  bash syntax error (it chokes on the first unquoted `(` — e.g. `(0x17c168)` or `(the FILE*)`
+  in a message). Likewise bash here-docs don't work in the PowerShell tool. Either way, the
+  safe path is to **write the message to a file and `git commit -F <file>`** (then delete it).
+  Watch for a stray leading `@`/quote leaking into the subject from a failed here-string
+  attempt — verify with `git log -1 --format=%s` and `--amend -F` if needed.
 - `.gitattributes` forces LF on scripts/sources so they run under Linux/WSL regardless
   of the host's `core.autocrlf`.
 - Don't commit firmware libs, game data, the rootfs, or `bin/` (see `.gitignore`).
