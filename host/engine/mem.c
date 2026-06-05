@@ -4,6 +4,53 @@
 
 struct freereg g_mfree[256]; int g_nmfree = 0;
 
+/* ---- host-backed guest memory ----------------------------------------------
+ * Every guest region is backed by a host allocation and mapped via uc_mem_map_ptr,
+ * so additional uc instances (one per native guest thread, the native-threads model)
+ * can share the SAME memory by mapping the same host pointers. The registry records
+ * each region for that factory (uc_map_all). */
+struct gregion { uint32_t addr, len; int perms; void *host; };
+static struct gregion g_reg[2048];
+static int g_nreg = 0;
+static pthread_mutex_t g_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int page_backed(uint32_t pg) {
+    for (int i = 0; i < g_nreg; i++)
+        if (pg >= g_reg[i].addr && pg < g_reg[i].addr + g_reg[i].len) return 1;
+    return 0;
+}
+
+/* Map [addr,size) page-aligned into g_uc, backed by host RAM; idempotent over pages
+   already backed (the old uc_mem_map tolerated re-maps). Each contiguous unbacked run
+   gets one host allocation + one uc_mem_map_ptr, recorded for uc_map_all(). */
+void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
+    uint32_t end = ALIGN_UP(addr + size), p = ALIGN_DN(addr);
+    pthread_mutex_lock(&g_reg_lock);
+    while (p < end) {
+        if (page_backed(p)) { p += PAGE; continue; }
+        uint32_t run = p;
+        while (run < end && !page_backed(run)) run += PAGE;
+        uint32_t len = run - p;
+        void *host = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (host == MAP_FAILED) die("host mmap", UC_ERR_OK);
+        uc_err e = uc_mem_map_ptr(g_uc, p, len, perms, host);
+        if (e && e != UC_ERR_MAP) die("uc_mem_map_ptr", e);
+        if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
+            g_reg[g_nreg++] = (struct gregion){p, len, perms, host};
+        p = run;
+    }
+    pthread_mutex_unlock(&g_reg_lock);
+}
+
+/* Map every recorded region into a fresh uc — the native-thread factory (Increment 2). */
+void uc_map_all(uc_engine *u) {
+    pthread_mutex_lock(&g_reg_lock);
+    for (int i = 0; i < g_nreg; i++)
+        uc_mem_map_ptr(u, g_reg[i].addr, g_reg[i].len, g_reg[i].perms, g_reg[i].host);
+    pthread_mutex_unlock(&g_reg_lock);
+}
+
 /* unified mmap for old_mmap(90) and mmap2(192); file-backed reads via pread. */
 long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) {
     uint32_t l = ALIGN_UP(len ? len : 1);
@@ -84,7 +131,7 @@ bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         for (int i = 0; i < 13; i++) fprintf(stderr, " r%d=%08x", i, gread(rr[i]));
         fprintf(stderr, "\n");
     }
-    uc_mem_map(uc, ALIGN_DN(a), PAGE, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+    map_region(ALIGN_DN(a), PAGE, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
     return true;  /* retry the faulting access */
 }
 

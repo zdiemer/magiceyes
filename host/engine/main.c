@@ -48,12 +48,7 @@ void die(const char *m, uc_err e) {
     exit(1);
 }
 
-/* map [addr,addr+size) page-aligned (idempotent-ish; ignores already-mapped). */
-void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
-    uint32_t a = ALIGN_DN(addr), end = ALIGN_UP(addr + size);
-    uc_err e = uc_mem_map(g_uc, a, end - a, perms);
-    if (e && e != UC_ERR_MAP) die("uc_mem_map", e);
-}
+/* map_region is now host-backed in mem.c (so native-thread ucs can share guest RAM). */
 
 /* ---- syscalls (ARM EABI numbers) ---- */
 uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }

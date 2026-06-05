@@ -45,7 +45,8 @@ extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 #define GMAP_ANON  0x20u
 
 void die(const char *m, uc_err e);
-void map_region(uint32_t addr, uint32_t size, uint32_t perms);
+void map_region(uint32_t addr, uint32_t size, uint32_t perms);   /* host-backed (mem.c) */
+void uc_map_all(uc_engine *u);   /* map all guest regions into a fresh uc (thread factory) */
 uint32_t gread(uint32_t reg);
 void gwrite(uint32_t reg, uint32_t v);
 
