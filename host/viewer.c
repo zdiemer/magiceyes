@@ -314,6 +314,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         w * scale, h * scale, wflags);
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);   /* black clear/letterbox (avoid an unpainted strip) */
     SDL_RenderSetLogicalSize(ren, w, h);
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB565,
         SDL_TEXTUREACCESS_STREAMING, w, h);
@@ -402,6 +403,12 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, tex, NULL, NULL);
             SDL_RenderPresent(ren);
+        } else if (shm->frame_seq == 0) {
+            /* no game has presented yet -> paint black so the window doesn't show its
+               uninitialised backbuffer (the white strip); stop once a game renders. */
+            SDL_RenderClear(ren);
+            SDL_RenderPresent(ren);
+            SDL_Delay(16);
         } else {
             SDL_Delay(5);
         }

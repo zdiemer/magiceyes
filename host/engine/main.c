@@ -148,7 +148,8 @@ static void *helper_thread(void *arg) {
 static void print_usage(const char *p0) {
     fprintf(stderr,
         "magiceyes - run GP2X/Wiz games on a PC\n"
-        "usage: %s [options] <game.gpe | folder | game.zip>\n\n"
+        "usage: %s [options] [game.gpe | folder | game.zip]\n"
+        "       (with no game, the window opens empty -- use File > Open)\n\n"
         "  -s, --scale N      window scale factor (default 3)\n"
         "  -f, --fullscreen   start fullscreen (toggle in-app with F11)\n"
         "      --mute         start muted\n"
@@ -261,18 +262,25 @@ int main(int argc, char **argv) {
     }
     if (g_view_scale < 1) g_view_scale = 1;
     if (g_volume < 0) g_volume = 0; else if (g_volume > 100) g_volume = 100;
-    if (!input) { fprintf(stderr, "magiceyes: no game specified\n"); print_usage(argv[0]); return 2; }
 
-    /* ---- resolve folder/.zip/.gpe -> a runnable binary; reject dynamic-linked titles ---- */
-    char binbuf[PATH_MAX];
-    const char *bin = resolve_input(input, binbuf, sizeof binbuf);
-    if (!bin) return 2;
-    int cls = classify_elf(bin);
-    if (cls < 0) return 2;
-    if (cls == 1) {
-        fprintf(stderr, "magiceyes: '%s' is dynamically linked -- native dynamic-linked titles "
-                        "aren't supported yet (Wiz/qemu path only).\n", bin);
-        return 3;
+    /* ---- resolve folder/.zip/.gpe -> a runnable binary; reject dynamic-linked titles. With no
+       game given, the bundle opens an empty window (File->Open loads one); the standalone engine
+       still requires a game on the command line. ---- */
+    char binbuf[PATH_MAX]; const char *bin = NULL;
+    if (input) {
+        bin = resolve_input(input, binbuf, sizeof binbuf);
+        if (!bin) return 2;
+        int cls = classify_elf(bin);
+        if (cls < 0) return 2;
+        if (cls == 1) {
+            fprintf(stderr, "magiceyes: '%s' is dynamically linked -- native dynamic-linked titles "
+                            "aren't supported yet (Wiz/qemu path only).\n", bin);
+            return 3;
+        }
+    } else {
+#ifndef ME_BUNDLED
+        fprintf(stderr, "magiceyes: no game specified\n"); print_usage(argv[0]); return 2;
+#endif
     }
 
     if (getenv("ME_TRACE")) g_trace = 1;
@@ -281,28 +289,41 @@ int main(int argc, char **argv) {
     threads_init();
     shm_setup();
 
-    chdir_to_dir_of(bin);   /* run from the game's dir so its Data/ resolves */
-    uint32_t entry = engine_load_game(bin);
-    if (g_trace) fprintf(stderr, "entry=%08x brk=%08x\n", entry, g_brk);
+    uint32_t entry = 0;
+    if (bin) {
+        chdir_to_dir_of(bin);                 /* run from the game's dir so its Data/ resolves */
+        entry = engine_load_game(bin);
+        if (g_trace) fprintf(stderr, "entry=%08x brk=%08x\n", entry, g_brk);
+    }
 
-    /* helper + viewer threads are created ONCE and outlive every reload */
+    /* helper + viewer threads are created ONCE and outlive every reload / idle period */
     pthread_t helper; pthread_create(&helper, NULL, helper_thread, NULL);
 #ifdef ME_BUNDLED
     pthread_t vth; pthread_create(&vth, NULL, viewer_thread, NULL);
 #endif
 
-    for (;;) {
-        uc_err e = uc_emu_start(g_th[0].uc, entry, 0, 0, 0);   /* run the main guest thread */
-        if (g_reload_path[0] && !g_shutdown) {                 /* GPEComp re-exec or File->Open */
+    while (!g_shutdown) {
+        if (entry) {
+            uc_err e = uc_emu_start(g_th[0].uc, entry, 0, 0, 0);   /* run the main guest thread */
+            entry = 0;
+            if (!g_reload_path[0]) {           /* game ended on its own (exit/return/error) */
+                if (e != UC_ERR_OK && !g_exit)
+                    fprintf(stderr, "me_unicorn: main emu err %s pc=%08x\n", uc_strerror(e), gread(UC_ARM_REG_PC));
+#ifdef ME_BUNDLED
+                engine_stop_all_threads();     /* halt lingering workers; keep last frame + window */
+                g_exit = 0; g_exit_code = 0;   /* return to an idle window (menu still open) */
+#else
+                break;                         /* standalone: a finished game ends the process */
+#endif
+            }
+        }
+        if (g_reload_path[0]) {                /* GPEComp re-exec or File->Open */
             char path[PATH_MAX]; snprintf(path, sizeof path, "%s", g_reload_path); g_reload_path[0] = 0;
             entry = engine_reset_and_load(path);
-            if (entry) continue;
-            fprintf(stderr, "magiceyes: reload of '%s' failed\n", path);
-            break;
+            if (!entry) fprintf(stderr, "magiceyes: reload of '%s' failed\n", path);
+            continue;
         }
-        if (e != UC_ERR_OK && !g_exit)
-            fprintf(stderr, "me_unicorn: main emu err %s pc=%08x\n", uc_strerror(e), gread(UC_ARM_REG_PC));
-        break;
+        if (!entry) me_usleep(16000);          /* idle: wait for File->Open or the window to close */
     }
     g_shutdown = 1; g_exit = 1;
 #ifdef ME_BUNDLED
