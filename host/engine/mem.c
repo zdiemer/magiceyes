@@ -156,6 +156,13 @@ bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
             uint32_t w = 0; uc_mem_read(g_uc, sp + k * 4, &w, 4);
             if (w >= 0x8100 && w < 0x19bc00) fprintf(stderr, " %08x", w);  /* .text range */
         }
+        uint32_t obj = gread(UC_ARM_REG_R4), vt = 0, da = 0;
+        uc_mem_read(g_uc, obj + 0x94, &vt, 4);
+        if (vt) uc_mem_read(g_uc, vt + 0x38, &da, 4);
+        fprintf(stderr, "\n   FILE r4=%08x  vtable(+0x94)=%08x  __doallocate(vt+0x38)=%08x\n   r4[0..0x20]:",
+                obj, vt, da);
+        for (int k = 0; k < 8; k++) { uint32_t w = 0; uc_mem_read(g_uc, obj + k * 4, &w, 4);
+                                      fprintf(stderr, " %08x", w); }
         fprintf(stderr, "\n");
     }
     map_region(ALIGN_DN(a), PAGE, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
