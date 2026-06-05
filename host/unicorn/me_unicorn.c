@@ -88,6 +88,7 @@ struct thread {
     uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
     double wake_deadline;   /* TH_SLEEPING: host time at which to wake (nanosleep) */
     int enoent_streak;      /* consecutive failed opens -> back off (music worker) */
+    uint32_t last_pc;       /* PC when last switched out (diagnostics) */
 };
 static struct thread g_th[MAXTH];
 static int g_nth = 0, g_cur = 0, g_next_tid = 100;  /* main != pid 1 (LinuxThreads orphan check) */
@@ -231,6 +232,7 @@ static int sched_pick(void) {
 /* switch the live CPU to thread j (saving the current one). Sets g_switched. */
 static void sched_switch_to(int j) {
     if (j == g_cur) return;
+    g_th[g_cur].last_pc = gread(UC_ARM_REG_PC);
     uc_context_save(g_uc, g_th[g_cur].ctx);
     uc_mem_read(g_uc, 0xffff0ff0u, &g_th[g_cur].tls, 4);
     g_cur = j;
@@ -244,12 +246,30 @@ static void block_current(int reason) {
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  [block tid=%d reason=%d]\n", g_th[g_cur].tid, reason); }
     g_th[g_cur].state = TH_BLOCKED; g_th[g_cur].block = reason;
+    g_th[g_cur].last_pc = gread(UC_ARM_REG_PC);
     int j = sched_pick();
     if (j < 0) {
         fprintf(stderr, "me_unicorn: all %d threads blocked (deadlock)\n", g_nth);
         g_exit = 1; uc_emu_stop(g_uc); return;
     }
     sched_switch_to(j);
+}
+
+/* Diagnostics: dump every thread's state/block/PC (ME_THREADDUMP). */
+static int g_threaddump = 0;
+static void dump_threads(const char *why) {
+    static const char *sn[] = {"FREE","RUN","BLOCKED","SLEEPING","DEAD"};
+    static const char *bn[] = {"-","FUTEX","SIG"};
+    double now = host_now();
+    fprintf(stderr, "== threads (%s) cur=%d nth=%d ==\n", why, g_cur, g_nth);
+    for (int i = 0; i < g_nth; i++) {
+        struct thread *t = &g_th[i];
+        uint32_t pc = (i == g_cur) ? gread(UC_ARM_REG_PC) : t->last_pc;
+        fprintf(stderr, "  [%d] tid=%d %-8s blk=%-5s pc=%08x futex=%08x sigP=%llx sigB=%llx wake=%+.2f\n",
+                i, t->tid, sn[t->state & 7], bn[t->block % 3], pc, t->futex_addr,
+                (unsigned long long)t->sig_pending, (unsigned long long)t->sig_blocked,
+                t->state == TH_SLEEPING ? t->wake_deadline - now : 0.0);
+    }
 }
 
 /* ---- signals (enough for the glibc LinuxThreads restart/cancel handshake) ---- */
@@ -591,6 +611,22 @@ static long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint
 }
 
 /* fill an OABI `struct stat` (ARM: st_mode@8, st_size@20) — enough for size. */
+/* Read a NUL-terminated guest string safely. A fixed-size uc_mem_read can over-read
+ * past the end of the mapped region and fail, leaving the buffer garbage -> spurious
+ * ENOENT / "can't stat" on files that exist (intermittent, depending on where the game
+ * allocated the path). Read bounded, stopping at the NUL or first unreadable byte. */
+static void read_cstr(uint32_t gaddr, char *out, size_t cap) {
+    size_t i;
+    if (cap == 0) return;
+    for (i = 0; i < cap - 1; i++) {
+        uint8_t c;
+        if (uc_mem_read(g_uc, gaddr + i, &c, 1) != UC_ERR_OK) break;
+        out[i] = (char)c;
+        if (c == 0) return;
+    }
+    out[i] = 0;
+}
+
 static void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
     uint8_t b[88]; memset(b, 0, sizeof b);
     *(uint32_t *)(b + 0)  = (uint32_t)hs->st_dev;
@@ -604,22 +640,25 @@ static void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 
-/* fill the ARM EABI `struct stat64` — offsets verified empirically (sizeof 112):
-   st_dev@0 st_ino@8 st_mode@16 st_nlink@20 st_uid@24 st_gid@28 st_rdev@32
-   st_size@40 st_blksize@48 st_blocks@56. (Payback is EABI structs + OABI syscalls;
-   my earlier packed @44 guess gave a garbage size and crashed the game.) */
+/* Fill the ARM EABI `struct stat64` (sizeof 104). The 8-byte st_rdev is followed by
+   __pad3[4] + 4 alignment padding, so st_size lands at 48 (NOT 40 -- that earlier guess
+   gave a garbage size) and the struct is 104 bytes (NOT 112 -- writing 112 overflowed
+   the game's buffer and crashed). Kernel layout:
+     st_dev@0(8) __st_ino@12(4) st_mode@16 st_nlink@20 st_uid@24 st_gid@28
+     st_rdev@32(8) st_size@48(8) st_blksize@56 st_blocks@64(8) st_ino@96(8). */
 static void fill_stat64(uint32_t gbuf, struct stat *hs) {
-    uint8_t b[112]; memset(b, 0, sizeof b);
+    uint8_t b[104]; memset(b, 0, sizeof b);
     *(uint64_t *)(b + 0)  = (uint64_t)hs->st_dev;
-    *(uint64_t *)(b + 8)  = (uint64_t)hs->st_ino;
+    *(uint32_t *)(b + 12) = (uint32_t)hs->st_ino;          /* legacy 32-bit __st_ino */
     *(uint32_t *)(b + 16) = (uint32_t)hs->st_mode;
     *(uint32_t *)(b + 20) = (uint32_t)(hs->st_nlink ? hs->st_nlink : 1);
     *(uint32_t *)(b + 24) = (uint32_t)hs->st_uid;
     *(uint32_t *)(b + 28) = (uint32_t)hs->st_gid;
     *(uint64_t *)(b + 32) = (uint64_t)hs->st_rdev;
-    *(uint64_t *)(b + 40) = (uint64_t)hs->st_size;
-    *(uint32_t *)(b + 48) = 4096;                          /* st_blksize */
-    *(uint64_t *)(b + 56) = (uint64_t)((hs->st_size + 511) / 512); /* st_blocks */
+    *(uint64_t *)(b + 48) = (uint64_t)hs->st_size;         /* 64-bit st_size @48 */
+    *(uint32_t *)(b + 56) = 4096;                          /* st_blksize */
+    *(uint64_t *)(b + 64) = (uint64_t)((hs->st_size + 511) / 512); /* st_blocks */
+    *(uint64_t *)(b + 96) = (uint64_t)hs->st_ino;          /* 64-bit st_ino */
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 
@@ -645,7 +684,14 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (g_trace) fprintf(stderr, "  [fork] child exited(%u) -> resume parent\n", a0);
             return g_child_pid;  /* parent's fork() now returns the child pid */
         }
-        if (nr == 1) {   /* exit(): this thread only — keep the process alive */
+        /* exit() ends just this thread. So does a NON-main thread's exit_group: glibc
+           2.3.6 _exit() issues exit_group FIRST (falling back to NR_exit only on error),
+           and on real GP2X each LinuxThreads thread is its own thread group, so a worker's
+           _exit ends only that thread while the game runs on. Without this, the AMA audio
+           worker finishing a song (exit_group) would kill the whole emulator. Only the
+           MAIN thread (slot 0) exit_group quits the process. (Ported from the qemu backend's
+           apply_gp2x.py exit_group fix.) */
+        if (nr == 1 || g_cur != 0) {
             if (g_th[g_cur].ctid) {     /* CLONE_CHILD_CLEARTID: clear + futex-wake */
                 uint32_t z = 0; uc_mem_write(g_uc, g_th[g_cur].ctid, &z, 4);
                 for (int i = 0; i < g_nth; i++)
@@ -734,6 +780,37 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 7: case 114: /* waitpid/wait4: the synchronous child already exited */
         if (a1) { uint32_t z = 0; uc_mem_write(g_uc, a1, &z, 4); }
         return g_child_pid;
+    case 11: { /* execve(path, argv, envp). Matches the qemu backend's gp2x_execve_noop:
+                  GP2X games shell out (/bin/sh) for best-effort device tweaks and insmod
+                  kernel modules that don't exist on PC. Letting the exec fail (-ENOSYS) ran
+                  glibc's exec-failed cleanup + _exit(127) inside our snapshot/restore fork
+                  and left the parent inconsistent -> a later null-deref. So a forked child
+                  exec'ing sh/insmod just exits(0) cleanly (system() then returns 0). Real
+                  ELF chain-loads are unsupported here. */
+        char ep[1024]; read_cstr(a0, ep, sizeof ep);
+        const char *base = strrchr(ep, '/'); base = base ? base + 1 : ep;
+        if (g_forked && (!strcmp(base, "sh") || !strcmp(base, "insmod"))) {
+            for (int i = 0; i < g_nsnap; i++) {
+                uc_mem_write(g_uc, g_snap[i].begin, g_snap[i].data, g_snap[i].len);
+                free(g_snap[i].data);
+            }
+            g_nsnap = 0;
+            uc_context_restore(g_uc, g_fork_ctx);
+            uc_context_free(g_fork_ctx); g_fork_ctx = NULL;
+            g_forked = 0;
+            if (g_trace) fprintf(stderr, "  [fork] child execve %s -> exit(0)\n", base);
+            return g_child_pid;
+        }
+        return -ENOSYS;
+    }
+    case 140: { /* _llseek(fd, off_hi, off_lo, result64*, whence) */
+        int64_t off = ((int64_t)(uint32_t)a1 << 32) | (uint32_t)a2;
+        off_t r = lseek((int)a0, (off_t)off, (int)a4);
+        if (r == (off_t)-1) return -errno;
+        uint64_t ru = (uint64_t)r;
+        if (a3) uc_mem_write(g_uc, a3, &ru, 8);
+        return 0;
+    }
     case 13: { /* time(t) */
         uint32_t t = (uint32_t)time(NULL);
         if (a0) uc_mem_write(g_uc, a0, &t, 4); return t;
@@ -768,7 +845,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 0xf0002: return 0; /* __ARM_NR_cacheflush */
     case 5: {  /* open(path, flags, mode) */
-        char p[1024]; uc_mem_read(g_uc, a0, p, sizeof p); p[sizeof p - 1] = 0;
+        char p[1024]; read_cstr(a0, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         long r = open(p, (int)a1, a2); int e2 = errno;
         if (r >= 0) { g_th[g_cur].enoent_streak = 0; return r; }
@@ -786,7 +863,7 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return -e2;
     }
     case 322: { /* openat(dirfd, path, flags, mode) */
-        char p[1024]; uc_mem_read(g_uc, a1, p, sizeof p); p[sizeof p - 1] = 0;
+        char p[1024]; read_cstr(a1, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         long r = open(p, (int)a2, a3); return r < 0 ? -errno : r;
     }
@@ -944,18 +1021,19 @@ static long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 369:  return 0;  /* prlimit64 */
     case 106: { /* stat(path, buf) */
-        char p[1024]; uc_mem_read(g_uc, a0, p, sizeof p); p[1023] = 0;
+        char p[1024]; read_cstr(a0, p, sizeof p);
         struct stat s; if (stat(p, &s)) return -errno; fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
         struct stat s; if (fstat((int)a0, &s)) return -errno; fill_oabi_stat(a1, &s); return 0;
     }
     case 195: case 196: case 197: { /* stat64 / lstat64 / fstat64 */
-        struct stat s; int ok;
+        struct stat s; int ok; char p[1024] = {0};
         if (nr == 197) ok = fstat((int)a0, &s);
-        else { char p[1024]; uc_mem_read(g_uc, a0, p, sizeof p); p[1023] = 0;
+        else { read_cstr(a0, p, sizeof p);
                ok = (nr == 196) ? lstat(p, &s) : stat(p, &s); }
-        if (ok) return -errno; fill_oabi_stat(a1, &s); return 0;  /* 88B: fits the game's buf */
+        if (ok) return -errno;
+        fill_stat64(a1, &s); return 0;  /* EABI struct stat64 (st_size@48, 104B) */
     }
     case 146: { /* writev(fd, iov, cnt) */
         long tot = 0;
@@ -1035,6 +1113,7 @@ static void *timer_thread(void *arg) {
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
     if (getenv("ME_TRACE")) g_trace = 1;
+    if (getenv("ME_THREADDUMP")) g_threaddump = 1;
 
     uc_err e = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &g_uc);
     if (e) die("uc_open", e);
@@ -1084,15 +1163,19 @@ int main(int argc, char **argv) {
        ~6fps for this heavy animated menu — Unicorn speed is the ceiling here). */
     const uint64_t SLICE = getenv("ME_SLICE") ? strtoull(getenv("ME_SLICE"), 0, 0) : 2000000;
     const uint64_t TMO = 0; (void)g_slice_us; (void)timer_thread;
-    int prof = getenv("ME_PROF") ? 1 : 0; double prof_t = 0; unsigned prof_s = 0;
+    int prof = getenv("ME_PROF") ? 1 : 0; double prof_t = 0; unsigned prof_s = 0; uint32_t prof_fs = 0;
     while (!g_exit) {
         e = uc_emu_start(g_uc, pc, 0, TMO, SLICE);
         if (g_exit) break;
         if (prof) { double now = host_now(); if (!prof_t) prof_t = now; prof_s++;
             if (now - prof_t >= 2.0) { double dt = now - prof_t;
-                fprintf(stderr, "PROF: %.0f slices/s  mmsp2_rd=%.0f/s wr=%.0f/s fault=%.0f/s\n",
-                    prof_s / dt, g_n_rd / dt, g_n_wr / dt, g_n_fault / dt);
+                uint32_t fs = g_shm ? g_shm->frame_seq : 0;
+                fprintf(stderr, "PROF: %.1f fps  %.0f slices/s  mmsp2_rd=%.0f/s wr=%.0f/s fault=%.0f/s\n",
+                    (fs - prof_fs) / dt, prof_s / dt, g_n_rd / dt, g_n_wr / dt, g_n_fault / dt);
+                prof_fs = fs;
                 prof_t = now; prof_s = 0; g_n_rd = g_n_wr = g_n_fault = 0; } }
+        if (g_threaddump) { static double tdp = 0; double tn = host_now();
+            if (tn - tdp >= 2.0) { tdp = tn; dump_threads("periodic"); } }
         if (e != UC_ERR_OK) {
             if (errs < 30) fprintf(stderr, "me_unicorn: emu err %s pc=%08x\n",
                                    uc_strerror(e), gread(UC_ARM_REG_PC));
