@@ -148,7 +148,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (uc_context_alloc(g_uc, &g_fork_ctx) != UC_ERR_OK) return -ENOMEM;
         uc_context_save(g_uc, g_fork_ctx);
         uc_mem_region *regs = NULL; uint32_t cnt = 0; g_nsnap = 0;
-        if (uc_mem_regions(g_uc, &regs, &cnt) == UC_ERR_OK) {
+        /* ME_GP2X_FORKNOMEM: skip the guest-memory snapshot/restore. The full-memory restore
+           clobbers writes that PARENT threads made while the inline child ran (they keep
+           executing) -> can wipe a mutex/wait-queue a parent thread acquired -> main waits
+           forever. The child only execs our exit-stub, so its memory changes are ~negligible. */
+        if (!getenv("ME_GP2X_FORKNOMEM") && uc_mem_regions(g_uc, &regs, &cnt) == UC_ERR_OK) {
             for (uint32_t i = 0; i < cnt && g_nsnap < 2048; i++) {
                 uint64_t b = regs[i].begin;
                 uint32_t l = (uint32_t)(regs[i].end - regs[i].begin + 1);
