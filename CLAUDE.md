@@ -286,18 +286,21 @@ runs a live multi-threaded frame loop. The Unicorn **TCOUNT now ticks at 7.3728 
 hardware crystal, was 1 MHz slow-motion; env `ME_GP2X_TIMESCALE=N` MHz, matches the qemu knob),
 and **`gettimeofday` returns real wall-clock** (was 0, which freezes elapsed-time deltas).
 
-**Remaining blocker — Payback hangs on the loading screen (two stacked deadlocks).** Full
-write-up: `host/engine/LOADING_DEADLOCK.md`. (1) **MMSP2 audio-DMA completion isn't emulated**:
-main's audio-init sets a "DMA busy" flag `*(0xe9eae8)=1` and spawns the mixer thread, which then
-**busy-spins forever** waiting for it to clear — Payback drives audio via the memory-mapped
-MMSP2 DMA, NOT `/dev/dsp` (which it never opens), and we don't advance the play position to
-clear the flag. Confirmed by `ME_AUDIOCLEAR=0xe9eae8` (host-side periodic clear) unblocking the
-mixer. (2) Underneath: a **LinuxThreads `sigsuspend`/restart-signal** coordination where main +
-mixer both park in `rt_sigsuspend` waiting for `kill(·,32)` restarts no thread sends (likely a
-lost-wakeup in `sigsuspend_wait`). New env-gated diagnostics: `ME_THREADDUMP` now prints
-per-thread livePC/lr/lastSC; `ME_WATCH=0xADDR` logs guest writes to a word. Still-to-port from
-`gp2x.c` for *other* titles: the MLC-palette/blitter MMIO trap (`gp2x_mmio_fault`) and
-`/dev/i2c-0` serial.
+**Remaining blocker — Payback hangs on the loading screen (LinuxThreads deadlock, NOT audio).**
+Full write-up: `host/engine/LOADING_DEADLOCK.md`. **Corrected** (the earlier "MMSP2 audio-DMA"
+theory was wrong): Payback uses **`/dev/dsp` (OSS)** like the qemu backend — a qemu strace shows
+its main thread reaching the run loop and streaming 16KB PCM buffers to `/dev/dsp`, while our
+main makes **0** dsp writes. Ours hangs earlier in **`__pthread_lock`** (`0x1321c0`, the ARMv5
+`swp`-based LinuxThreads lock): main blocks acquiring a lock and never gets restarted; the audio
+mixer thread's busy-spin on `*(0xe9eae8)` is a downstream symptom. It's **deterministic** (same
+PCs every run), so it's a logical circular-wait / lost-restart, not an atomicity race — verified:
+forcing real host-atomic `swp` (`fork-patches/parallel_cflags.py`, `CF_PARALLEL`; a genuine
+correctness fix for the shared-memory native-threads model) did **not** change the hang. Next
+step: instrument which lock main waits on + who holds it (the lock ptr is `r0` into `0x1324a0`),
+and check `sigsuspend_wait`/case-179 for a dropped restart. Diagnostics (env-gated):
+`ME_THREADDUMP` (per-thread livePC/lr/lastSC), `ME_WATCH=0xADDR`, `ME_AUDIOCLEAR=0xADDR`.
+Still-to-port from `gp2x.c` for *other* titles: the MLC-palette/blitter MMIO trap
+(`gp2x_mmio_fault`) and `/dev/i2c-0` serial.
 
 **Two fixes that made it playable (both reproduced by `apply_gp2x.py`):**
 - **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* CPU-cost fix that lets rendering reach the

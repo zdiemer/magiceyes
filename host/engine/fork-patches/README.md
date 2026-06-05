@@ -31,6 +31,14 @@ host/engine/fork-patches/apply_and_build.sh        # ME_UNICORN_FORK overrides ~
   and stop re-arming `TLB_NOTDIRTY`). Env: `ME_GP2X_NOSMCFREEZE` disables, `ME_GP2X_SMCLOG`
   logs. (Bucketed by a fixed 4KB granularity, **not** `TARGET_PAGE_BITS` — in Unicorn that
   macro is a per-instance runtime value that reads `uc`, unusable at file scope.)
+- **`parallel_cflags.py`** — `curr_cflags()` → `CF_PARALLEL` in `qemu/include/exec/exec-all.h`.
+  The native-threads engine runs one `uc`/CPU per host thread over one shared host RAM backing,
+  so guest atomics must be real host atomics. With `curr_cflags()==0`, `CF_PARALLEL` was never
+  set and TCG emitted **non-atomic** `swp`/ldrex — the basis of every LinuxThreads lock/CAS on
+  ARMv5. Setting it makes `op_swp`'s `tcg_gen_atomic_xchg_i32` emit a real host atomic on the
+  shared backing. (Correctness fix for the native-threads model; the kuser-cmpxchg path is
+  already host-atomic. NB: did NOT resolve the deterministic Payback loading deadlock — see
+  `host/engine/LOADING_DEADLOCK.md`.)
 
 ## Licensing
 Unicorn/qemu are GPLv2; binaries linking the fork make magiceyes GPLv2-compatible.

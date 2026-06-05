@@ -26,6 +26,10 @@ python3 "$HERE/smc_freeze.py" "$FORK"
 git add -A
 git commit -q -m "gp2x: SMC-freeze in softmmu notdirty/TLB path" && echo "  committed SMC-freeze" || true
 
+python3 "$HERE/parallel_cflags.py" "$FORK"
+git add -A
+git commit -q -m "gp2x: CF_PARALLEL for real host atomics (native-threads swp)" && echo "  committed CF_PARALLEL" || true
+
 echo "== build fork (force re-bundle) =="
 cd "$FORK/build"
 if ! ninja 2>build.err; then echo "BUILD FAILED:"; grep -E "error:|FAILED:" build.err | head; exit 1; fi

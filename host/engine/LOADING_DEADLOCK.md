@@ -1,70 +1,81 @@
-# Handoff: Payback loading-screen deadlock (post load-crash)
+# Handoff: Payback loading-screen deadlock (LinuxThreads, NOT audio DMA)
 
-The load-crash is fixed (see CRASH_HANDOFF.md). Payback now boots, spawns its LinuxThreads
-workers, and renders a few frames — but **hangs on the loading screen** and never reaches the
-menu. This is two **stacked deadlocks**, both diagnosed precisely below. (Unicorn engine,
-`host/engine/`; the qemu backend reaches gameplay, so diffing against it is the recommended
-way in.)
+The load-crash is fixed (CRASH_HANDOFF.md). Payback now boots, spawns its LinuxThreads
+workers, renders a few frames — then **hangs on the loading screen**. This session corrected
+the earlier "audio DMA" theory and pinned the real cause via a qemu diff. (Unicorn engine,
+`host/engine/`; the qemu backend reaches gameplay, so it's the reference.)
 
-## The stuck state (from `ME_THREADDUMP=1`, stable across all dumps = hard hang)
+## CORRECTION: it is NOT MMSP2 audio DMA
+Payback uses **`/dev/dsp` (OSS)** for audio — it `DEV open /dev/dsp` and writes 16 KB PCM
+buffers, exactly like the qemu backend (which only models `/dev/dsp`, no MMSP2 audio DMA). The
+earlier "audio-DMA flag `*(0xe9eae8)` never clears" was a *symptom*, not the cause. (`dev_open`
+logs as `DEV open …`, not `open '…'` — that's why an earlier grep missed the `/dev/dsp` open.)
+
+## The qemu diff (the key evidence)
+Run headless with a syscall trace:
+`QEMU_STRACE=1 ~/src/qemu/build/qemu-arm ./Payback_tmp` (cd ~/pbtest).
+- **qemu**: the main thread reaches the game's run loop — a steady stream of
+  `write(8,…,16384)` to `/dev/dsp` interleaved with frame `nanosleep`, plus
+  `ioctl(9, SOUND_MIXER_WRITE_PCM,…)`. The audio engine RUNS.
+- **us**: main makes **0** `/dev/dsp` writes — it never reaches the run loop. It's stuck
+  earlier, in a LinuxThreads lock.
+
+Both engines: 3 clones, 3 manager-pipe writes (148-byte requests), 2 `kill(100,32)` restarts.
+So our manager/restart protocol works for the 2 thread-creates; main hangs *after*, before the
+audio loop.
+
+## Where main is stuck (precise)
+`ME_THREADDUMP=1` — stable across all dumps (hard hang):
 ```
-tid=100 (main)    livePC=0x13309c  ← rt_sigsuspend (LinuxThreads restart-wait), in loop 0x1321c0
-tid=101 (manager) livePC=0x15944c  ← getppid/poll orphan-check loop (normal)
-tid=102 (mixer)   livePC=0x0ae168  ← BUSY-SPIN on audio flag *(0xe9eae8)
-tid=103           livePC=0x135440  ← nanosleep loop
+tid=100 (main)  livePC=0x13309c lr=0x132200  ← __pthread_lock suspend, waiting for a lock
+tid=101 (mgr)   livePC=0x15944c              ← manager poll() on the request pipe (idle/normal)
+tid=102 (mixer) livePC=0x0ae168              ← audio mixer busy-spin on *(0xe9eae8)
+tid=103         livePC=0x135440              ← nanosleep loop
 ```
+- `0x1321c0` (where main suspends, lr=0x132200) is **`__pthread_lock`**: caller `0x1324a0`
+  does the CAS-decrement / on-contention queue-self-and-suspend pattern. So **main is blocked
+  acquiring a pthread lock** and won't wake until the holder unlocks + restarts it.
+- The lock primitive bottoms out in the ARMv5 **`swp`** instruction (`__pthread_acquire`
+  `0x134b1c`: `swp r3,r3,[r6]`), the basis of every LinuxThreads lock/CAS.
+- This is a **deterministic** deadlock (identical every run) — so it's a logical circular
+  wait / lost-restart, NOT an atomicity race.
 
-## Deadlock #1 — MMSP2 audio-DMA completion is not emulated (the first blocker)
-- Main's audio-init `0x0afd50` sets **`*(0xe9eae8) = 1`** ("DMA buffer busy") **and spawns the
-  mixer thread** (`bl 0x2f663c` at `0x0afdac`). Verified with `ME_WATCH=0xe9eae8`: exactly one
-  write in the whole run — `=1` by tid 100 — and it is **never cleared**.
-- The mixer (tid 102) busy-waits at `0x0ae154–0x0ae174`: loop while `*(0xe9ead0)==0` (quit flag,
-  bss=0) **and `*(0xe9eae8)!=0`** (DMA busy). So it spins forever.
-- The flag is meant to clear when the audio buffer finishes playing (MMSP2 audio DMA completion).
-  We emulate `/dev/dsp` (OSS) but **Payback never opens `/dev/dsp`** — it drives audio through the
-  **memory-mapped MMSP2 audio DMA** directly, which we don't emulate. So nothing advances the
-  play position / clears the busy flag.
-- **Validated:** `ME_AUDIOCLEAR=0xe9eae8` (a temp knob in `helper_thread`, main.c — periodically
-  writes 0 to that guest word) **unblocks tid 102**: it leaves the spin, does its work, and
-  proceeds. That confirms the audio-DMA flag is the first blocker. Proper fix = emulate the
-  MMSP2 audio DMA enough that the game's own code clears `*(0xe9eae8)` (find the DMA
-  position/status register the driver polls; the writer of 0 is `set_flag` at `0x0ae02c`, called
-  from `0x929e4`/`0x92dd4`/… — the track-end/buffer-done paths that never run).
+## swp atomicity — checked, fixed for correctness, but NOT the cause
+Our native-threads model = one `uc`/CPU per host thread sharing one host RAM backing. The fork's
+`curr_cflags()` returned 0, so `CF_PARALLEL` was never set and TCG emitted **non-atomic** `swp`
+(load+store). That's a real latent bug for shared-memory threads, fixed by
+`fork-patches/parallel_cflags.py` (`curr_cflags()` → `CF_PARALLEL`, so `op_swp`'s
+`tcg_gen_atomic_xchg_i32` emits a real host atomic on the shared backing). **But it did not
+change the hang** (same PCs, 0 dsp writes) — consistent with the deadlock being deterministic,
+not a race. Kept as a correctness fix; not the fix for this hang.
 
-## Deadlock #2 — LinuxThreads sigsuspend/restart coordination (revealed after #1)
-- With #1 bypassed, tid 102 advances but then **also** parks in `rt_sigsuspend` at `0x13309c`
-  (same primitive as main, `0x133080`). Now main AND the mixer both wait for a LinuxThreads
-  **restart signal** (`kill(pid, 32)`, SIGRTMIN) that no running thread sends.
-- Signal delivery itself works (earlier in the run tid 102 sent `kill(100,32)` twice and main
-  woke + ran its handler). The hang is that the coordination converges on "everyone waiting":
-  main's loop `0x1321c0` waits for `[obj+0x60] == [0x9f1edc]`, incremented per restart. Likely a
-  lost-wakeup / barrier-ordering issue in how our native threads + `sigsuspend_wait`
-  (threads.c) interact, or a missing periodic event. The game uses **no setitimer/alarm** (0
-  timer syscalls), so restarts come only from `kill()` between threads.
+## Most likely next step
+Find **which lock** main is blocked on and **who holds it**, then why the holder never releases.
+- The lock pointer is `r0` into `0x1324a0` (stored at its `[sp+4]`). Instrument the engine to
+  log it when main enters the `__pthread_lock` suspend, then scan the other threads / the lock
+  word to find the holder.
+- Hypothesis: a circular wait our cooperative-ish model creates that qemu's real preemptive
+  scheduling avoids — e.g. the holder is tid 102 (mixer) or tid 103, itself blocked on something
+  main provides. Or a **lost restart**: the holder unlocks and `kill(main,32)`s, but main's
+  `sigsuspend`/`__pthread_lock` re-check misses it (check `sigsuspend_wait` + case 179 in
+  threads.c/syscalls.c for a window where a restart set between the lock re-test and the suspend
+  is dropped).
+- Cross-check against qemu at the instruction level around `0x1324a0`/`0x133080`: see which
+  thread releases the lock there and how main gets restarted.
 
-## Where to look (files)
-- `host/engine/threads.c`: `send_sig`, `deliver_signals`, `sigsuspend_wait`, futex — the
-  signal/restart machinery. Suspect lost-wakeup between "decide to wait" and entering
-  `sigsuspend_wait`.
-- `host/engine/devices.c`: `mmsp2_read_cb`/`mmsp2_write_cb` — add MMSP2 audio DMA regs +
-  completion so the guest clears `*(0xe9eae8)` itself (vs the host hack).
-- Disasm refs: mixer spin `0x0ae138–0x0ae1f4`; audio-init `0x0afd50`; suspend primitive
-  `0x133080`; main wait-loop `0x1321c0`; `set_flag` (writes the busy flag) `0x0ae02c`.
-
-## Diagnostics added this session (all env-gated, zero-cost off)
-- `ME_THREADDUMP=1` — now prints **livePC/lr/lastSC** per thread (threads.c `dump_threads`;
-  `last_pc` is set per-syscall in `intr_cb`). This is how the hang was localized.
-- `ME_WATCH=0xADDR` — log every guest write to a word (threads.c `watch_cb`). Found the single
-  `*(0xe9eae8)=1` write.
-- `ME_AUDIOCLEAR=0xADDR` — helper thread periodically zeros a guest word (main.c). Use
-  `=0xe9eae8` to bypass deadlock #1 and work on #2 / reach the menu.
+## Diagnostics (env-gated, zero-cost off)
+- `ME_THREADDUMP=1` — per-thread livePC/lr/lastSC (threads.c `dump_threads`; `last_pc` set in
+  `intr_cb`). How the hang was localized.
+- `ME_WATCH=0xADDR` — log every guest write to a word (found the single `*(0xe9eae8)=1`).
+- `ME_AUDIOCLEAR=0xADDR` — helper thread periodically zeros a guest word. `=0xe9eae8` frees the
+  mixer's spin, but main then *also* blocks in `__pthread_lock` — i.e. clearing the symptom
+  doesn't fix the underlying lock hang.
 
 ## Repro
 ```sh
-bash host/engine/build_engine.sh
+host/engine/fork-patches/apply_and_build.sh     # build fork (SMC-freeze + CF_PARALLEL) + engine
 cd ~/pbtest
-ME_TRACE=1 ME_THREADDUMP=1 timeout 25 .../bin/me_unicorn ~/pbtest/Payback_tmp 2>/tmp/d.log
-# bypass deadlock #1 to study #2:
-ME_THREADDUMP=1 ME_AUDIOCLEAR=0xe9eae8 timeout 25 .../bin/me_unicorn ~/pbtest/Payback_tmp 2>&1
+ME_TRACE=1 ME_THREADDUMP=1 timeout 20 .../bin/me_unicorn ~/pbtest/Payback_tmp 2>/tmp/d.log
+QEMU_STRACE=1 timeout 12 ~/src/qemu/build/qemu-arm ./Payback_tmp 2>/tmp/q.log   # working reference
 ```
 Interactive (viewer): `host/engine/run.sh ~/pbtest/Payback_tmp` (needs WSLg + input).
