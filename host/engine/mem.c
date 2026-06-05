@@ -143,7 +143,7 @@ bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (n++ < 60)
         fprintf(stderr, "  mem-fault type=%d @ %08x size=%d pc=%08x lr=%08x sp=%08x tid=%d\n",
                 type, a, size, gread(UC_ARM_REG_PC), gread(UC_ARM_REG_LR),
-                gread(UC_ARM_REG_SP), g_th[g_cur].tid);
+                gread(UC_ARM_REG_SP), g_self ? g_self->tid : -1);
     if (a < 0x10000 && n < 62) {   /* likely a bad pointer: dump regs to find its source */
         static const int rr[13] = {UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3,
             UC_ARM_REG_R4,UC_ARM_REG_R5,UC_ARM_REG_R6,UC_ARM_REG_R7,UC_ARM_REG_R8,

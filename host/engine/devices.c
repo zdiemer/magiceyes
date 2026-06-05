@@ -57,7 +57,8 @@ void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
     uint8_t row[320 * 2];
     for (int y = 0; y < 240; y++) {
-        if (uc_mem_read(g_uc, g + (uint32_t)y * 640, row, sizeof row)) break;
+        { uint8_t *src = guest_to_host(g + (uint32_t)y * 640); if (!src) break;
+          memcpy(row, src, sizeof row); }
         memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, sizeof row);
     }
     g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
@@ -70,7 +71,8 @@ int buf_score(uint32_t g) {
     if (!g) return -1;
     uint8_t row[320 * 2]; int nz = 0;
     for (int y = 8; y < 240; y += 24) {
-        if (uc_mem_read(g_uc, g + (uint32_t)y * 640, row, sizeof row)) break;
+        { uint8_t *src = guest_to_host(g + (uint32_t)y * 640); if (!src) break;
+          memcpy(row, src, sizeof row); }
         for (unsigned i = 0; i < sizeof row; i++) if (row[i]) { nz++; break; }
     }
     return nz;
@@ -79,7 +81,8 @@ uint32_t buf_hash(uint32_t g) {
     if (!g) return 0;
     uint8_t row[320 * 2]; uint32_t h = 2166136261u;
     for (int y = 0; y < 240; y += 12) {
-        if (uc_mem_read(g_uc, g + (uint32_t)y * 640, row, sizeof row)) break;
+        { uint8_t *src = guest_to_host(g + (uint32_t)y * 640); if (!src) break;
+          memcpy(row, src, sizeof row); }
         for (unsigned i = 0; i < sizeof row; i += 5) h = (h ^ row[i]) * 16777619u;
     }
     return h;

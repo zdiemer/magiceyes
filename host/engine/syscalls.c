@@ -71,28 +71,19 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (g_trace) fprintf(stderr, "  [fork] child exited(%u) -> resume parent\n", a0);
             return g_child_pid;  /* parent's fork() now returns the child pid */
         }
-        /* exit() ends just this thread. So does a NON-main thread's exit_group: glibc
-           2.3.6 _exit() issues exit_group FIRST (falling back to NR_exit only on error),
-           and on real GP2X each LinuxThreads thread is its own thread group, so a worker's
-           _exit ends only that thread while the game runs on. Without this, the AMA audio
-           worker finishing a song (exit_group) would kill the whole emulator. Only the
-           MAIN thread (slot 0) exit_group quits the process. (Ported from the qemu backend's
-           apply_gp2x.py exit_group fix.) */
-        if (nr == 1 || g_cur != 0) {
-            if (g_th[g_cur].ctid) {     /* CLONE_CHILD_CLEARTID: clear + futex-wake */
-                uint32_t z = 0; uc_mem_write(g_uc, g_th[g_cur].ctid, &z, 4);
-                for (int i = 0; i < g_nth; i++)
-                    if (g_th[i].state == TH_BLOCKED && g_th[i].block == BLK_FUTEX
-                        && g_th[i].futex_addr == g_th[g_cur].ctid)
-                        g_th[i].state = TH_RUN;
-            }
-            g_th[g_cur].state = TH_DEAD;
-            int j = sched_pick();
-            if (g_trace) fprintf(stderr, "  [thread %d exit] -> next slot %d\n", g_th[g_cur].tid, j);
-            if (j >= 0) { sched_switch_to(j); return 0; }
+        /* A NON-main thread terminating (exit, or glibc 2.3.6's exit_group-first _exit)
+           ends only that host thread — on real GP2X each LinuxThreads thread is its own
+           group, so a worker's _exit (e.g. the AMA audio worker finishing a song) must not
+           kill the game. uc_emu_stop returns from uc_emu_start -> thread_entry tears down
+           (clears ctid, futex-wakes joiners). The MAIN thread's exit/exit_group quits. */
+        if (g_self != &g_th[0]) {
+            if (g_trace) fprintf(stderr, "  [thread %d exit]\n", g_self->tid);
+            g_self->state = TH_DEAD;
+            uc_emu_stop(g_uc);
+            g_setpc = 1;
+            return 0;
         }
-        fprintf(stderr, "  [REAL EXIT] code=%u nr=%u tid=%d forked=%d nth=%d nsnap=%d\n",
-                a0, nr, g_th[g_cur].tid, g_forked, g_nth, g_nsnap);
+        if (g_trace) fprintf(stderr, "  [REAL EXIT] code=%u nr=%u\n", a0, nr);
         g_exit = 1; g_exit_code = a0; uc_emu_stop(g_uc); return 0;
     case 4: {  /* write(fd, buf, count) */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
@@ -235,17 +226,14 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a0, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         long r = open(p, (int)a1, a2); int e2 = errno;
-        if (r >= 0) { g_th[g_cur].enoent_streak = 0; return r; }
-        /* a thread tight-looping on missing files (the music worker on the absent
-           Data/Music/*.ama) burns the single-threaded emulator's throughput and starves
-           the game; back it off after a streak of failures so the menu/game gets CPU. */
-        if (e2 == ENOENT && ++g_th[g_cur].enoent_streak > 3) {
-            g_th[g_cur].enoent_streak = 0;
-            gwrite(UC_ARM_REG_R0, (uint32_t)-e2);
-            g_th[g_cur].wake_deadline = host_now() + 0.25;
-            g_th[g_cur].state = TH_SLEEPING;
-            int j = sched_pick();
-            if (j >= 0 && j != g_cur) sched_switch_to(j);
+        if (r >= 0) { g_self->enoent_streak = 0; return r; }
+        /* a worker tight-looping on missing files (the music worker on absent *.ama):
+           back it off with a real sleep so it doesn't spin hot. */
+        if (e2 == ENOENT && ++g_self->enoent_streak > 3) {
+            g_self->enoent_streak = 0;
+            pthread_mutex_unlock(&g_biglock);
+            usleep(50000);
+            pthread_mutex_lock(&g_biglock);
         }
         return -e2;
     }
@@ -260,9 +248,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return close((int)a0) < 0 ? -errno : 0;
     case 19: { long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? -errno : r; } /* lseek */
     case 125:  return 0;  /* mprotect (we map RWX) */
-    case 20:   return g_th[g_cur].tid;  /* getpid (LinuxThreads: 1 pid per thread) */
-    case 224:  return g_th[g_cur].tid;  /* gettid */
-    case 64:   return g_th[g_cur].ppid;  /* getppid (LinuxThreads orphan check) */
+    case 20:   return g_self->tid;  /* getpid (LinuxThreads: 1 pid per thread) */
+    case 224:  return g_self->tid;  /* gettid */
+    case 64:   return g_self->ppid;  /* getppid (LinuxThreads orphan check) */
     case 256:  return 1;  /* set_tid_address */
     case 338:  return 0;  /* set_robust_list */
     case 174: { /* rt_sigaction(signum, act, oldact, sigsetsize) */
@@ -280,7 +268,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return 0;
     }
     case 175: { /* rt_sigprocmask(how, set, oldset, size) */
-        struct thread *t = &g_th[g_cur];
+        struct thread *t = g_self;
         if (a2) uc_mem_write(g_uc, a2, &t->sig_blocked, 8);
         if (a1) { uint64_t set = 0; uc_mem_read(g_uc, a1, &set, 8);
                   if (a0 == 0) t->sig_blocked |= set;
@@ -293,14 +281,14 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 268:  return send_sig((int)a1, (int)a2);  /* tgkill(tgid, tid, sig) */
     case 119:  /* sigreturn */
     case 173: { /* rt_sigreturn: restore the pre-handler register state */
-        struct thread *t = &g_th[g_cur];
+        struct thread *t = g_self;
         if (t->has_sigsave) { for (int i = 0; i < 17; i++) gwrite(g_sregs[i], t->sigsave[i]);
                               t->has_sigsave = 0; }
         if (t->susp_active) { t->sig_blocked = t->susp_oldmask; t->susp_active = 0; }
-        g_switched = 1;   /* PC/regs restored; don't let intr_cb clobber R0 */
+        g_setpc = 1;   /* PC/regs restored; don't let intr_cb clobber R0 */
         return 0;
     }
-    case 168: { /* poll(fds, nfds, timeout) */
+    case 168: { /* poll(fds, nfds, timeout): pipe check, else a real (lock-free) sleep */
         int ready = 0;
         for (uint32_t i = 0; i < a1; i++) {
             uint32_t fd = 0; uint16_t ev = 0, rev = 0;
@@ -313,90 +301,70 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         }
         if (ready) return ready;
         int tmo = (int)a2;
-        if (tmo == 0) return 0;            /* non-blocking poll */
-        /* nothing ready: sleep on the timeout (capped) so a polling idle thread (e.g.
-           the LinuxThreads manager's 2s poll) doesn't spin and starve everyone. */
-        double dur = (tmo < 0) ? 0.1 : (double)tmo / 1000.0;
-        if (dur > 0.1) dur = 0.1;
-        gwrite(UC_ARM_REG_R0, 0);
-        g_th[g_cur].wake_deadline = host_now() + dur;
-        g_th[g_cur].state = TH_SLEEPING;
-        int j = sched_pick();
-        if (j >= 0 && j != g_cur) sched_switch_to(j);
+        if (tmo == 0) return 0;            /* non-blocking */
+        double dur = (tmo < 0 || tmo > 100) ? 0.1 : (double)tmo / 1000.0;
+        pthread_mutex_unlock(&g_biglock);
+        usleep((useconds_t)(dur * 1e6));
+        pthread_mutex_lock(&g_biglock);
         return 0;
     }
     case 240: { /* futex(uaddr, op, val, ...) */
         int op = (int)(a1 & 0x7f);
-        if (op == 0) {            /* FUTEX_WAIT: block iff *uaddr == val */
-            uint32_t cur; uc_mem_read(g_uc, a0, &cur, 4);
-            if (cur != a2) return -11 /*EAGAIN*/;
-            gwrite(UC_ARM_REG_R0, 0);          /* wake returns 0 */
-            g_th[g_cur].futex_addr = a0;
-            block_current(BLK_FUTEX);
-            return 0;                          /* ignored (g_switched) */
-        }
-        if (op == 1) {            /* FUTEX_WAKE: wake up to `val` waiters */
-            int woke = 0;
-            for (int i = 0; i < g_nth; i++)
-                if (g_th[i].state == TH_BLOCKED && g_th[i].block == BLK_FUTEX
-                    && g_th[i].futex_addr == a0 && woke < (int)a2) {
-                    g_th[i].state = TH_RUN; woke++;
-                }
-            return woke;
-        }
+        if (op == 0) return futex_wait(a0, a2);          /* FUTEX_WAIT */
+        if (op == 1) return futex_wake(a0, (int)a2);     /* FUTEX_WAKE */
         return 0;
     }
-    case 120: { /* clone(flags, child_stack, ptid, tls, ctid) — CLONE_VM thread */
-        if (g_nth >= MAXTH) return -11 /*EAGAIN*/;
-        int slot = g_nth++;
-        if (!g_th[slot].ctx) uc_context_alloc(g_uc, &g_th[slot].ctx);
-        g_th[slot].tid = g_next_tid++;
-        g_th[slot].ppid = g_th[g_cur].tid;
-        g_th[slot].state = TH_RUN; g_th[slot].block = BLK_NONE;
-        g_th[slot].tls = (a0 & ME_CLONE_SETTLS) ? a3 : g_th[g_cur].tls;
-        g_th[slot].ctid = (a0 & ME_CLONE_CHILD_CLEARTID) ? a4 : 0;
-        g_th[slot].sig_blocked = g_th[g_cur].sig_blocked; g_th[slot].sig_pending = 0;
-        /* child ctx = parent's regs, but sp=child_stack, r0=0, same PC (post-svc) */
-        uint32_t s_sp = gread(UC_ARM_REG_SP), s_r0 = gread(UC_ARM_REG_R0);
-        gwrite(UC_ARM_REG_SP, a1); gwrite(UC_ARM_REG_R0, 0);
-        uc_context_save(g_uc, g_th[slot].ctx);
-        gwrite(UC_ARM_REG_SP, s_sp); gwrite(UC_ARM_REG_R0, s_r0);
-        if ((a0 & ME_CLONE_PARENT_SETTID) && a2) { uint32_t t = g_th[slot].tid; uc_mem_write(g_uc, a2, &t, 4); }
-        if ((a0 & ME_CLONE_CHILD_SETTID) && a4) { uint32_t t = g_th[slot].tid; uc_mem_write(g_uc, a4, &t, 4); }
+    case 120: { /* clone(flags, child_stack, ptid, tls, ctid) -> a native host thread */
+        int slot = thread_alloc();
+        if (slot < 0) return -11 /*EAGAIN*/;
+        struct thread *c = &g_th[slot];
+        memset(c, 0, sizeof *c);
+        c->tid = g_next_tid++;
+        c->ppid = g_self->tid;
+        c->state = TH_RUN;
+        c->tls = (a0 & ME_CLONE_SETTLS) ? a3 : g_self->tls;
+        c->ctid = (a0 & ME_CLONE_CHILD_CLEARTID) ? a4 : 0;
+        c->sig_blocked = g_self->sig_blocked;
+        c->sp = a1;
+        c->entry_pc = gread(UC_ARM_REG_PC);     /* child resumes after the svc, like the parent */
+        c->uc = uc_new_thread();
+        for (int i = 0; i < 15; i++) {          /* seed child regs = parent's (R0..R12,SP,LR) */
+            uint32_t v; uc_reg_read(g_uc, g_sregs[i], &v); uc_reg_write(c->uc, g_sregs[i], &v);
+        }
+        uint32_t cpsr; uc_reg_read(g_uc, UC_ARM_REG_CPSR, &cpsr);
+        uc_reg_write(c->uc, UC_ARM_REG_CPSR, &cpsr);
+        uc_reg_write(c->uc, UC_ARM_REG_SP, &c->sp);
+        uint32_t zero = 0; uc_reg_write(c->uc, UC_ARM_REG_R0, &zero);   /* child fork()==0 */
+        if ((a0 & ME_CLONE_PARENT_SETTID) && a2) { uint32_t t = c->tid; uc_mem_write(g_uc, a2, &t, 4); }
+        if ((a0 & ME_CLONE_CHILD_SETTID) && a4) { uint32_t t = c->tid; uc_mem_write(g_uc, a4, &t, 4); }
         if (g_trace) fprintf(stderr, "  [clone] tid=%d stack=%08x flags=%08x (nth=%d)\n",
-                             g_th[slot].tid, a1, a0, g_nth);
-        return g_th[slot].tid;     /* parent gets the new tid */
+                             c->tid, a1, a0, g_nth);
+        pthread_create(&c->th, NULL, thread_entry, c);
+        return c->tid;     /* parent gets the new tid */
     }
-    case 158: { /* sched_yield */
-        int j = sched_pick();
-        if (j != g_cur && j >= 0) { gwrite(UC_ARM_REG_R0, 0); sched_switch_to(j); }
+    case 158:   /* sched_yield */
+        pthread_mutex_unlock(&g_biglock); sched_yield(); pthread_mutex_lock(&g_biglock);
         return 0;
-    }
     case 29:    /* pause */
     case 72:    /* sigsuspend (old) */
-    case 179: { /* rt_sigsuspend(mask, size) — block until a signal arrives (-> EINTR) */
-        struct thread *t = &g_th[g_cur];
+    case 179: { /* rt_sigsuspend(mask, size) — block until a deliverable signal arrives */
+        struct thread *t = g_self;
         t->susp_oldmask = t->sig_blocked; t->susp_active = 1;
         if (nr == 179 && a0) { uint64_t m = 0; uc_mem_read(g_uc, a0, &m, 8); t->sig_blocked = m; }
-        else if (nr == 72) t->sig_blocked = a0;   /* old ABI: mask passed by value */
-        /* if a deliverable signal is already pending, take it without blocking */
+        else if (nr == 72) t->sig_blocked = a0;
+        if (!(t->sig_pending & ~t->sig_blocked)) sigsuspend_wait();
         gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
-        if (t->sig_pending & ~t->sig_blocked) { deliver_signals(); g_switched = 1; return 0; }
-        block_current(BLK_SIG);
+        deliver_signals(); g_setpc = 1;
         return 0;
     }
-    case 162: { /* nanosleep(req, rem) — yield to other threads (else a sleeping
-                  main starves a loader worker); only really sleep if alone */
-        if (g_fb_guest) present_active();  /* frame boundary: refresh screen */
+    case 162: { /* nanosleep(req, rem): a real sleep, releasing the engine lock */
         if (a1) { uint32_t z[2] = {0, 0}; uc_mem_write(g_uc, a1, z, 8); }
-        gwrite(UC_ARM_REG_R0, 0);
         uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
         double dur = (double)ts[0] + (double)ts[1] * 1e-9;
-        if (dur > 0.1) dur = 0.1;          /* cap a single sleep */
-        g_th[g_cur].wake_deadline = host_now() + dur;
-        g_th[g_cur].state = TH_SLEEPING;   /* sched_pick runs others / real-sleeps to deadline */
-        int j = sched_pick();
-        if (j >= 0 && j != g_cur) sched_switch_to(j);
+        if (dur > 0.1) dur = 0.1;
+        if (dur > 0) { pthread_mutex_unlock(&g_biglock);
+                       usleep((useconds_t)(dur * 1e6));
+                       pthread_mutex_lock(&g_biglock); }
         return 0;
     }
     case 78: {  /* gettimeofday(tv, tz) */
@@ -432,6 +400,18 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (w > 0) tot += w;
         }
         return tot;
+    }
+    case 0xfff0: {  /* kuser_cmpxchg, host-atomic (r0=oldval, r1=newval, r2=ptr).
+                       Atomic vs other threads' raw guest stores because it CASes the same
+                       host memory the guest's stores hit. Success: r0=0 + CPSR C set. */
+        uint32_t *hp = (uint32_t *)guest_to_host(a2);
+        uint32_t expected = a0;
+        int ok = hp && __atomic_compare_exchange_n(hp, &expected, a1, 0,
+                                                   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        uint32_t cpsr = gread(UC_ARM_REG_CPSR);
+        if (ok) cpsr |= 0x20000000u; else cpsr &= ~0x20000000u;
+        gwrite(UC_ARM_REG_CPSR, cpsr);
+        return ok ? 0 : ~0u;
     }
     default:
         fprintf(stderr, "me_unicorn: UNIMPLEMENTED syscall %u (r0=%08x r1=%08x r2=%08x)\n",

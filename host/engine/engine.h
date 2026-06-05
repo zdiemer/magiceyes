@@ -22,6 +22,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
+#include <limits.h>
 #include <elf.h>
 #include "gp2xshm.h"
 
@@ -34,10 +35,11 @@
 #define ALIGN_DN(x) ((x) & ~(PAGE - 1))
 #define ALIGN_UP(x) (((x) + PAGE - 1) & ~(PAGE - 1))
 
-/* ---- core CPU/engine state (defined in main.c; moves to cpu.c later) ---- */
-extern uc_engine *g_uc;
+/* ---- core CPU/engine state ---- */
+extern __thread uc_engine *g_uc;   /* per host thread: the calling guest thread's uc */
 extern uint32_t g_brk, g_brk_start, g_mmap_next;
 extern int g_exit, g_exit_code, g_trace;
+extern __thread int g_setpc;   /* a syscall set PC (signal entry/sigreturn): skip R0 write */
 extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 
 /* guest mmap() flag bits used by do_mmap */
@@ -105,34 +107,36 @@ enum { BLK_NONE = 0, BLK_FUTEX, BLK_SIG };
 #define PIPEFD_W 0x10000101
 
 struct thread {
-    uc_context *ctx;
-    int state, block, tid, ppid;
-    uint32_t tls;
-    uint32_t futex_addr;
-    uint32_t ctid;
-    uint64_t sig_pending, sig_blocked;
-    uint64_t susp_oldmask;
-    int susp_active;
-    int has_sigsave;
-    uint32_t sigsave[17];
-    double wake_deadline;
-    int enoent_streak;
-    uint32_t last_pc;
+    uc_engine *uc;          /* this guest thread's CPU */
+    pthread_t th;           /* host thread (0 for the main thread) */
+    int state, tid, ppid;
+    uint32_t entry_pc, sp, tls, ctid;
+    uint64_t sig_pending, sig_blocked, susp_oldmask;
+    int susp_active, has_sigsave;
+    uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
+    int enoent_streak;      /* consecutive failed opens -> back off (music worker) */
+    uint32_t last_pc;       /* diagnostics */
 };
 struct sigact { uint32_t handler, flags, restorer; uint64_t mask; };
 struct snap { uint64_t begin; uint32_t len; uint8_t *data; };
 struct freereg { uint32_t addr, len; };
 
-/* ---- threads.c (cooperative scheduler — to be rewritten for native threads) ---- */
+/* ---- threads.c (native host threads) ---- */
+extern pthread_mutex_t g_biglock;   /* serialises the syscall + device layer */
+extern __thread struct thread *g_self;   /* the calling host thread's guest-thread record */
 extern struct thread g_th[MAXTH];
-extern int g_nth, g_cur, g_next_tid, g_switched;
+extern int g_nth, g_next_tid;
 extern struct sigact g_sigact[65];
 extern const int g_sregs[17];
 extern int g_threaddump;
-void wake_sleepers(void);
-int sched_pick(void);
-void sched_switch_to(int j);
-void block_current(int reason);
+void uc_hook_std(uc_engine *u);
+uc_engine *uc_new_thread(void);
+void *thread_entry(void *arg);
+int futex_wait(uint32_t uaddr, uint32_t val);
+int futex_wake(uint32_t uaddr, int n);
+void sigsuspend_wait(void);
+void threads_init(void);
+int thread_alloc(void);
 void dump_threads(const char *why);
 void deliver_signals(void);
 long send_sig(int pid, int sig);
