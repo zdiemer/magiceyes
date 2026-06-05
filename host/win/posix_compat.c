@@ -1,0 +1,88 @@
+/* magiceyes Windows compat: the few POSIX VM/IPC calls the engine + viewer use, over Win32.
+ * MinGW (winpthreads) already provides pthreads, gettimeofday, usleep, nanosleep, etc., so
+ * this only covers: anonymous host allocations (mmap MAP_ANONYMOUS -> VirtualAlloc) and the
+ * /dev/shm framebuffer/audio bridge between engine.exe and viewer.exe (mmap MAP_SHARED on a
+ * shm_open'd object -> a Win32 named file mapping). */
+#include <windows.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <io.h>
+#include "sys/mman.h"
+
+/* MinGW lacks pread/lstat. The engine's file access is single-threaded, so seek+read is fine;
+   GP2X assets have no symlinks, so lstat == stat. */
+ssize_t pread(int fd, void *buf, size_t count, off_t off) {
+    if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
+    return _read(fd, buf, (unsigned)count);
+}
+int lstat(const char *path, struct stat *st) { return stat(path, st); }
+
+/* ---- shm objects: a fake fd -> a Win32 named-mapping name ---- */
+#define SHM_FD_BASE 0x40000000
+struct shm_ent { int used; char name[256]; };
+static struct shm_ent g_shm[16];
+
+static void win_name(char *dst, size_t cap, const char *posix) {
+    while (*posix == '/') posix++;                 /* POSIX "/foo" -> a bare Win32 object name */
+    snprintf(dst, cap, "Local\\magiceyes_%s", posix);
+}
+int shm_open(const char *name, int oflag, int mode) {
+    (void)oflag; (void)mode;
+    for (int i = 0; i < 16; i++) if (!g_shm[i].used) {
+        g_shm[i].used = 1; win_name(g_shm[i].name, sizeof g_shm[i].name, name);
+        return SHM_FD_BASE + i;
+    }
+    return -1;
+}
+int shm_unlink(const char *name) { (void)name; return 0; }  /* Win32 reclaims on last handle */
+
+/* ---- mapped-view registry so munmap knows VirtualFree vs UnmapViewOfFile ---- */
+struct view { void *base; HANDLE h; };
+static struct view g_views[64];
+static CRITICAL_SECTION g_vlock; static int g_vinit;
+static void vlock(void){ if(!g_vinit){ InitializeCriticalSection(&g_vlock); g_vinit=1; } EnterCriticalSection(&g_vlock); }
+static void vunlock(void){ LeaveCriticalSection(&g_vlock); }
+
+static DWORD prot_page(int prot) {
+    if (prot & PROT_EXEC)  return (prot & PROT_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+    if (prot & PROT_WRITE) return PAGE_READWRITE;
+    if (prot & PROT_READ)  return PAGE_READONLY;
+    return PAGE_NOACCESS;
+}
+
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+    (void)addr; (void)off;
+    if (flags & MAP_ANONYMOUS) {
+        void *p = VirtualAlloc(NULL, len, MEM_COMMIT | MEM_RESERVE, prot_page(prot));
+        return p ? p : MAP_FAILED;
+    }
+    /* MAP_SHARED on a shm_open'd fd -> named file mapping (the viewer bridge) */
+    if (fd >= SHM_FD_BASE && fd < SHM_FD_BASE + 16) {
+        struct shm_ent *e = &g_shm[fd - SHM_FD_BASE];
+        HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                      0, (DWORD)len, e->name);   /* opens existing if present */
+        if (!h) return MAP_FAILED;
+        void *p = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, len);
+        if (!p) { CloseHandle(h); return MAP_FAILED; }
+        vlock();
+        for (int i = 0; i < 64; i++) if (!g_views[i].base) { g_views[i].base = p; g_views[i].h = h; break; }
+        vunlock();
+        return p;
+    }
+    return MAP_FAILED;
+}
+
+int munmap(void *addr, size_t len) {
+    (void)len;
+    vlock();
+    for (int i = 0; i < 64; i++) if (g_views[i].base == addr) {
+        HANDLE h = g_views[i].h; g_views[i].base = NULL; g_views[i].h = NULL; vunlock();
+        UnmapViewOfFile(addr); CloseHandle(h); return 0;
+    }
+    vunlock();
+    return VirtualFree(addr, 0, MEM_RELEASE) ? 0 : -1;
+}
+/* mprotect is provided by MinGW's libgcc (Win32 trampoline support) -- don't redefine it. */
