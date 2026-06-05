@@ -228,8 +228,11 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (off == MMSP2_OADRL) { lo = value & 0xffff; if (size == 4) hi = (value >> 16) & 0xffff; }
     else hi = value & 0xffff;
     uint32_t phys = ((uint32_t)hi << 16) | lo;
-    { static int n = 0; if (n++ < 8)
-        fprintf(stderr, "  MMSP2 flip -> phys=%08x\n", phys); }
+    if (getenv("ME_GP2X_FLIPLOG")) {
+        uint32_t g = 0; int ok = phys_to_guest(phys, &g);
+        fprintf(stderr, "FLIP off=%04x phys=%08x -> guest=%08x(%s)  fb0=%08x fb1=%08x flipactive=%d\n",
+                off, phys, g, ok ? "ok" : "UNRESOLVED", g_fb_guest, g_fb_guest2, g_flip_active);
+    } else { static int n = 0; if (n++ < 8) fprintf(stderr, "  MMSP2 flip -> phys=%08x\n", phys); }
     present_fb(phys);
 }
 /* Serve MMSP2 register reads. The free-running microsecond timer (TCOUNT @ 0x0a00)
