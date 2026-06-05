@@ -87,6 +87,7 @@ double host_now(void);
 void aud_drain(void);
 uint32_t aud_free(void);
 long dsp_write(uint32_t gbuf, uint32_t n);
+uint32_t dsp_pace_us(void);
 long dsp_ioctl(uint32_t cmd, uint32_t arg);
 void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                     int size, int64_t value, void *user);

@@ -128,19 +128,42 @@ uint32_t aud_free(void) {
     uint32_t used = g_shm->a_write - g_shm->a_read;
     return used < GP2XSHM_ARING ? GP2XSHM_ARING - used : 0;
 }
+/* writer-pacing state: like a real OSS blocking write, the game's audio thread must be
+   slowed to real time, else it free-runs (~1000x) spinning on a full ring while holding
+   its mixer mutex -> starves other threads waiting on that lock. */
+int g_prod_on = 0; double g_prod_t0 = 0; uint64_t g_prod_bytes = 0;
 long dsp_write(uint32_t gbuf, uint32_t n) {
     if (!g_shm) return n;
-    uint32_t fr = aud_free();
-    if (n > fr) n = fr;
-    if (n) {
-        uint8_t *tmp = malloc(n); uc_mem_read(g_uc, gbuf, tmp, n);
-        uint32_t w = g_shm->a_write % GP2XSHM_ARING, first = GP2XSHM_ARING - w;
-        if (first > n) first = n;
-        memcpy(g_shm->aring + w, tmp, first);
-        if (n > first) memcpy(g_shm->aring, tmp + first, n - first);
-        g_shm->a_write += n; free(tmp);
+    aud_drain();                                   /* advance a_read by wall clock */
+    if (n > GP2XSHM_ARING) n = GP2XSHM_ARING;
+    uint32_t used = g_shm->a_write - g_shm->a_read;
+    uint32_t freeb = used < GP2XSHM_ARING ? GP2XSHM_ARING - used : 0;
+    if (n > freeb) {                               /* consumer stalled: drop oldest, never block */
+        uint32_t frame = g_aud_ch * (g_aud_bits / 8); if (frame < 1) frame = 1;
+        uint32_t drop = ((n - freeb + frame - 1) / frame) * frame;
+        if (drop > used) drop = used;
+        g_shm->a_read += drop;
     }
+    uint8_t *tmp = malloc(n); uc_mem_read(g_uc, gbuf, tmp, n);
+    uint32_t w = g_shm->a_write % GP2XSHM_ARING, first = GP2XSHM_ARING - w;
+    if (first > n) first = n;
+    memcpy(g_shm->aring + w, tmp, first);
+    if (n > first) memcpy(g_shm->aring, tmp + first, n - first);
+    g_shm->a_write += n; g_prod_bytes += n; free(tmp);
     return n;
+}
+/* Microseconds the DSP-write caller should sleep so audio tracks real time (the OSS
+   blocking-write pacing). 0 = on time/behind; rebases on a long idle gap. */
+uint32_t dsp_pace_us(void) {
+    uint32_t bps = g_aud_freq * g_aud_ch * (g_aud_bits / 8);
+    if (!bps) return 0;
+    double now = host_now();
+    if (!g_prod_on) { g_prod_on = 1; g_prod_t0 = now; g_prod_bytes = 0; }
+    double allowed = (now - g_prod_t0) * bps;
+    if ((double)g_prod_bytes > allowed)
+        return (uint32_t)(((double)g_prod_bytes - allowed) / bps * 1e6);
+    if (allowed > (double)g_prod_bytes + bps * 0.25) { g_prod_t0 = now; g_prod_bytes = 0; }
+    return 0;
 }
 /* OSS dsp ioctl (type 'P' == 0x50); arg usually points to an int (in/out). */
 long dsp_ioctl(uint32_t cmd, uint32_t arg) {

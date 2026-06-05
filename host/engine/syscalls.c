@@ -97,7 +97,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         uc_mem_read(g_uc, a1, tmp, a2);
         if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
-        if (dev_type((int)a0) == DEV_DSP) { free(tmp); return dsp_write(a1, a2); }
+        if (dev_type((int)a0) == DEV_DSP) { free(tmp); long r = dsp_write(a1, a2);
+            uint32_t us = dsp_pace_us();   /* pace like a blocking OSS write (frees the mixer
+                                              mutex + CPU; else the audio thread free-runs) */
+            if (us) { if (us > 100000) us = 100000;
+                      pthread_mutex_unlock(&g_biglock); usleep(us); pthread_mutex_lock(&g_biglock); }
+            return r; }
         if (dev_type((int)a0)) { free(tmp); return a2; }  /* other devices: accept + discard */
         long r = write((int)a0, tmp, a2); free(tmp);
         return r < 0 ? -errno : r;
