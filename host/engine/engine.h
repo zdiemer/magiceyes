@@ -38,7 +38,7 @@
 /* ---- core CPU/engine state ---- */
 extern __thread uc_engine *g_uc;   /* per host thread: the calling guest thread's uc */
 extern uint32_t g_brk, g_brk_start, g_mmap_next;
-extern int g_exit, g_exit_code, g_trace;
+extern int g_exit, g_exit_code, g_trace, g_scret;
 extern __thread int g_setpc;   /* a syscall set PC (signal entry/sigreturn): skip R0 write */
 extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 
@@ -47,6 +47,7 @@ extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 #define GMAP_ANON  0x20u
 
 void die(const char *m, uc_err e);
+void me_usleep(unsigned us);   /* high-resolution sleep (Windows usleep is ~15ms-granular) */
 void map_region(uint32_t addr, uint32_t size, uint32_t perms);   /* host-backed (mem.c) */
 void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms);
 void *guest_to_host(uint32_t gaddr);   /* host ptr backing a guest addr (host-atomic ops) */

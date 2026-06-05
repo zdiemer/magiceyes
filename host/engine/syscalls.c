@@ -75,6 +75,75 @@ static int host_open_flags(int gf) {
 #endif
 }
 
+/* Map a host errno to the Linux/ARM errno the guest expects. Values 1..34 are identical on
+   Linux and MinGW; the higher ones differ (e.g. ENOSYS is 38 on Linux but 40 on MinGW), so a
+   failed syscall returns the wrong code to the guest's glibc on Windows -> wrong control flow
+   (e.g. it gives up on a file instead of reading it). Identity on Linux. */
+static int linux_errno(int e) {
+#ifdef _WIN32
+    switch (e) {
+    case EDEADLK:      return 35;
+    case ENAMETOOLONG: return 36;
+    case ENOLCK:       return 37;
+    case ENOSYS:       return 38;
+    case ENOTEMPTY:    return 39;
+#ifdef ELOOP
+    case ELOOP:        return 40;
+#endif
+    case EILSEQ:       return 84;
+    default:           return e;   /* 1..34 + the common file errnos already match */
+    }
+#else
+    return e;
+#endif
+}
+#define LERR(e) (-(long)linux_errno(e))
+
+/* In-memory fake files for the Linux /proc and /etc entries the guest's glibc reads but the
+   host may not provide. On WSL these resolve to the real Linux host by accident; on Windows
+   there is no /proc, so the open fails (-ENOENT) and the guest's init diverges/hangs. Serve
+   canned content from a malloc buffer via a fake fd, host-independently (the old /proc/mounts
+   path used mkstemp("/tmp/..."), which also fails on Windows). */
+#define MEMFD_BASE 0x20000000
+#define MEMFD_MAX  16
+struct memfile { int used; char *data; uint32_t len, pos; };
+static struct memfile g_memf[MEMFD_MAX];
+static struct memfile *memfd_get(int fd) {
+    int i = fd - MEMFD_BASE;
+    return (i >= 0 && i < MEMFD_MAX && g_memf[i].used) ? &g_memf[i] : NULL;
+}
+static int memfd_make_bin(const void *s, uint32_t len) {
+    for (int i = 0; i < MEMFD_MAX; i++) if (!g_memf[i].used) {
+        g_memf[i].used = 1; g_memf[i].data = malloc(len ? len : 1);
+        memcpy(g_memf[i].data, s, len); g_memf[i].len = len; g_memf[i].pos = 0;
+        return MEMFD_BASE + i;
+    }
+    return -1;
+}
+static int memfd_make(const char *s) { return memfd_make_bin(s, (uint32_t)strlen(s)); }
+
+/* Minimal TZif (v1) for UTC — the guest's glibc opens /etc/localtime; a host without it (no
+   /proc/etc on Windows) returns ENOENT and the game's init gets stuck re-polling. */
+static const unsigned char TZ_UTC[] = {
+    'T','Z','i','f', 0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,   /* magic, ver 1, 15 reserved */
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,                  /* isutcnt isstdcnt leapcnt timecnt = 0 */
+    0,0,0,1, 0,0,0,4,                                    /* typecnt=1 charcnt=4 */
+    0,0,0,0, 0, 0,                                       /* ttinfo: utoff=0 isdst=0 abbrind=0 */
+    'U','T','C', 0 };
+/* Return a fake fd for a known Linux system path, or 0 if not one we fake. */
+static int sysfile_open(const char *p) {
+    if (!strcmp(p, "/proc/sys/kernel/version"))
+        return memfd_make("#1 PREEMPT Mon Jan 1 00:00:00 UTC 2008\n");
+    if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))
+        return memfd_make("2.6.24\n");
+    if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab"))
+        return memfd_make("/dev/root / ext2 rw 0 0\nnone /proc proc rw 0 0\n"
+                          "none /tmp tmpfs rw 0 0\n/dev/mmcsd/disc0/part1 /mnt/sd vfat rw 0 0\n");
+    if (!strcmp(p, "/etc/localtime"))
+        return memfd_make_bin(TZ_UTC, sizeof TZ_UTC);
+    return 0;
+}
+
 long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
     (void)a4; (void)a5;
@@ -134,6 +203,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (n) uc_mem_write(g_uc, a1, g_pipebuf + g_pipe_r, n);
             g_pipe_r += n; return n;   /* 0 == EOF (child finished) */
         }
+        struct memfile *mf = memfd_get((int)a0);
+        if (mf) { uint32_t n = mf->len - mf->pos; if (n > a2) n = a2;
+                  if (n) uc_mem_write(g_uc, a1, mf->data + mf->pos, n);
+                  mf->pos += n; return n; }
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         long r = read((int)a0, tmp, a2);
         if (r > 0) uc_mem_write(g_uc, a1, tmp, r);
@@ -234,12 +307,16 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (g_trace) fprintf(stderr, "  [fork] child execve %s -> exit(0)\n", base);
             return g_child_pid;
         }
-        return -ENOSYS;
+        return LERR(ENOSYS);
     }
     case 140: { /* _llseek(fd, off_hi, off_lo, result64*, whence) */
         int64_t off = ((int64_t)(uint32_t)a1 << 32) | (uint32_t)a2;
+        struct memfile *mf = memfd_get((int)a0);
+        if (mf) { uint32_t base = ((int)a4 == 1) ? mf->pos : ((int)a4 == 2) ? mf->len : 0;
+                  mf->pos = base + (uint32_t)off; if (mf->pos > mf->len) mf->pos = mf->len;
+                  uint64_t ru = mf->pos; if (a3) uc_mem_write(g_uc, a3, &ru, 8); return 0; }
         off_t r = lseek((int)a0, (off_t)off, (int)a4);
-        if (r == (off_t)-1) return -errno;
+        if (r == (off_t)-1) return LERR(errno);
         uint64_t ru = (uint64_t)r;
         if (a3) uc_mem_write(g_uc, a3, &ru, 8);
         return 0;
@@ -261,7 +338,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 199: case 200: case 201: case 202:   /* ...32 variants */
         return 0;
     case 75:   return 0;        /* setrlimit */
-    case 149:  return -ENOSYS;  /* _sysctl (glibc tolerates) */
+    case 149:  return LERR(ENOSYS);  /* _sysctl (glibc tolerates) */
     case 122: { /* uname -> minimal Linux/armv5tel 2.6.24 */
         char u[6 * 65]; memset(u, 0, sizeof u);
         strcpy(u + 0 * 65, "Linux"); strcpy(u + 2 * 65, "2.6.24");
@@ -286,25 +363,15 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (g_trace) fprintf(stderr, "  open '%s' flags=%x\n", p, (int)a1);
         if (getenv("ME_NOMOUNTS") && (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab")))
             return -ENOENT;   /* test: make setmntent() fail cleanly instead of feeding getmntent */
-        if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab")) {
-            if (g_trace) fprintf(stderr, "  [fake mounts for %s]\n", p);
-            /* the game runs getmntent(); the HOST mount table (WSL/drvfs, dozens of long
-               entries) overruns its parser and it null-derefs a mnt list node. Hand it a
-               minimal GP2X-like table instead. */
-            static const char MT[] =
-                "/dev/root / ext2 rw 0 0\n"
-                "none /proc proc rw 0 0\n"
-                "none /tmp tmpfs rw 0 0\n"
-                "/dev/mmcsd/disc0/part1 /mnt/sd vfat rw 0 0\n";
-            char tmpl[] = "/tmp/me_mntXXXXXX";
-            int fd = mkstemp(tmpl);
-            if (fd < 0) return -errno;
-            unlink(tmpl);
-            if (write(fd, MT, sizeof MT - 1) < 0) { /* best effort */ }
-            lseek(fd, 0, SEEK_SET);
-            return fd;
-        }
+        /* Linux /proc + /etc files glibc reads: serve canned content host-independently. The
+           game's getmntent() also can't take the HOST mount table (WSL/drvfs has dozens of long
+           entries that overrun its parser -> null-deref); the GP2X-like table in sysfile_open
+           replaces it. */
+        { int mf = sysfile_open(p); if (mf) { if (g_trace) fprintf(stderr, "  [fake %s]\n", p);
+                                              return mf; } }
         long r = open(p, host_open_flags((int)a1), a2); int e2 = errno;
+        if (getenv("ME_OPENLOG")) { char b[1100]; snprintf(b, sizeof b,
+            "OPEN '%s' flags=%x -> %ld%s\n", p, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
         if (r >= 0) { g_self->enoent_streak = 0; return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
@@ -314,18 +381,25 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             usleep(50000);
             pthread_mutex_lock(&g_biglock);
         }
-        return -e2;
+        return LERR(e2);
     }
     case 322: { /* openat(dirfd, path, flags, mode) */
         char p[1024]; read_cstr(a1, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
-        long r = open(p, host_open_flags((int)a2), a3); return r < 0 ? -errno : r;
+        int mf = sysfile_open(p); if (mf) return mf;
+        long r = open(p, host_open_flags((int)a2), a3); return r < 0 ? LERR(errno) : r;
     }
     case 6:    /* close */
         if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W) return 0;
+        { struct memfile *mf = memfd_get((int)a0);
+          if (mf) { free(mf->data); mf->used = 0; mf->data = NULL; return 0; } }
         if (dev_type((int)a0)) { dev_close((int)a0); return 0; }  /* free the device slot */
-        return close((int)a0) < 0 ? -errno : 0;
-    case 19: { long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? -errno : r; } /* lseek */
+        return close((int)a0) < 0 ? LERR(errno) : 0;
+    case 19: { /* lseek */
+        struct memfile *mf = memfd_get((int)a0);
+        if (mf) { uint32_t base = ((int)a2 == 1) ? mf->pos : ((int)a2 == 2) ? mf->len : 0;
+                  mf->pos = base + a1; if (mf->pos > mf->len) mf->pos = mf->len; return mf->pos; }
+        long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? LERR(errno) : r; }
     case 125:  return 0;  /* mprotect (we map RWX) */
     case 20:   return g_self->tid;  /* getpid (LinuxThreads: 1 pid per thread) */
     case 224:  return g_self->tid;  /* gettid */
@@ -391,7 +465,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (tmo == 0) return 0;            /* non-blocking */
         double dur = (tmo < 0 || tmo > 100) ? 0.1 : (double)tmo / 1000.0;
         pthread_mutex_unlock(&g_biglock);
-        usleep((useconds_t)(dur * 1e6));
+        me_usleep((unsigned)(dur * 1e6));
         pthread_mutex_lock(&g_biglock);
         return 0;
     }
@@ -450,7 +524,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         double dur = (double)ts[0] + (double)ts[1] * 1e-9;
         if (dur > 0.1) dur = 0.1;
         if (dur > 0) { pthread_mutex_unlock(&g_biglock);
-                       usleep((useconds_t)(dur * 1e6));
+                       me_usleep((unsigned)(dur * 1e6));
                        pthread_mutex_lock(&g_biglock); }
         return 0;
     }
@@ -468,18 +542,30 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 369:  return 0;  /* prlimit64 */
     case 106: { /* stat(path, buf) */
         char p[1024]; read_cstr(a0, p, sizeof p);
-        struct stat s; if (stat(p, &s)) return -errno; fill_oabi_stat(a1, &s); return 0;
+        struct stat s; if (stat(p, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
-        struct stat s; if (fstat((int)a0, &s)) return -errno; fill_oabi_stat(a1, &s); return 0;
+        struct memfile *mf = memfd_get((int)a0);
+        if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
+                  ms.st_size = mf->len; fill_oabi_stat(a1, &ms); return 0; }
+        struct stat s; if (fstat((int)a0, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 195: case 196: case 197: { /* stat64 / lstat64 / fstat64 */
         struct stat s; int ok; char p[1024] = {0};
-        if (nr == 197) ok = fstat((int)a0, &s);
+        if (nr == 197) {
+            struct memfile *mf = memfd_get((int)a0);
+            if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
+                      ms.st_size = mf->len; fill_stat64(a1, &ms); return 0; }
+            ok = fstat((int)a0, &s);
+        }
         else { read_cstr(a0, p, sizeof p);
+               int mf = sysfile_open(p);   /* a faked path: report it as a regular file */
+               if (mf) { struct memfile *m = memfd_get(mf); struct stat ms; memset(&ms, 0, sizeof ms);
+                         ms.st_mode = S_IFREG | 0644; ms.st_size = m->len; free(m->data); m->used = 0;
+                         fill_stat64(a1, &ms); return 0; }
                ok = (nr == 196) ? lstat(p, &s) : stat(p, &s); }
         if (g_trace && nr != 197) fprintf(stderr, "  stat64 '%s' -> %s\n", p, ok ? "FAIL" : "ok");
-        if (ok) return -errno;
+        if (ok) return LERR(errno);
         fill_stat64(a1, &s); return 0;  /* EABI struct stat64 (st_size@48, 104B) */
     }
     case 146: { /* writev(fd, iov, cnt) */
@@ -508,7 +594,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     default:
         fprintf(stderr, "me_unicorn: UNIMPLEMENTED syscall %u (r0=%08x r1=%08x r2=%08x)\n",
                 nr, a0, a1, a2);
-        return -ENOSYS;
+        return LERR(ENOSYS);
     }
 }
 

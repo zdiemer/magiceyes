@@ -11,6 +11,6 @@ mkdir -p "$REPO/bin"
 $CC -O2 -Wall -o "$REPO/bin/viewer.exe" \
   "$REPO/host/viewer.c" "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/guest/src" -I "$T/include" \
-  -L "$T/lib" -lmingw32 -lSDL2main -lSDL2 -lm
+  -L "$T/lib" -lmingw32 -lSDL2main -lSDL2 -lm -lwinmm
 cp -f "$T/bin/SDL2.dll" "$REPO/bin/"
 echo "built $REPO/bin/viewer.exe (+ SDL2.dll)"

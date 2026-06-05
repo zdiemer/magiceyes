@@ -11,5 +11,5 @@ $CC -O2 -Wall -o "$REPO/bin/me_unicorn.exe" \
   "$REPO"/host/engine/*.c "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/host/engine" -I "$FORK/include" -I "$REPO/guest/src" \
   "$FORK/build-win/libunicorn.a" \
-  -lpthread -lm -lws2_32 -lbcrypt -static
+  -lpthread -lm -lws2_32 -lbcrypt -lwinmm -static
 echo "built $REPO/bin/me_unicorn.exe"

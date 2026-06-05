@@ -8,6 +8,7 @@ uint32_t g_brk, g_brk_start;
 uint32_t g_mmap_next = MMAP_BASE;
 int g_exit = 0, g_exit_code = 0;
 int g_trace = 0;
+int g_scret = 0;   /* ME_SCRET: log every syscall + return value per thread (divergence diff) */
 __thread int g_setpc = 0;   /* a syscall set PC (signal entry / sigreturn): skip R0 write */
 
 /* synchronous fork state (system()/popen child; see syscalls.c) */
@@ -60,6 +61,10 @@ void die(const char *m, uc_err e) {
     exit(1);
 }
 
+#ifndef _WIN32
+void me_usleep(unsigned us) { usleep(us); }   /* Linux usleep is already high-resolution */
+#endif
+
 uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }
 void gwrite(uint32_t reg, uint32_t v) { uc_reg_write(g_uc, reg, &v); }
 
@@ -75,10 +80,16 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     if (g_self) g_self->last_pc = pc;   /* diagnostics: where this thread last syscalled */
     pthread_mutex_lock(&g_biglock);
     g_setpc = 0;
-    long r = sys_dispatch(nr, gread(UC_ARM_REG_R0), gread(UC_ARM_REG_R1),
-                          gread(UC_ARM_REG_R2), gread(UC_ARM_REG_R3),
-                          gread(UC_ARM_REG_R4), gread(UC_ARM_REG_R5));
+    uint32_t a0 = gread(UC_ARM_REG_R0), a1 = gread(UC_ARM_REG_R1), a2 = gread(UC_ARM_REG_R2);
+    long r = sys_dispatch(nr, a0, a1, a2,
+                          gread(UC_ARM_REG_R3), gread(UC_ARM_REG_R4), gread(UC_ARM_REG_R5));
     if (!g_setpc && !g_exit) gwrite(UC_ARM_REG_R0, (uint32_t)r);
+    if (g_scret) {   /* deterministic per-thread syscall+return trace (single fprintf, no interleave) */
+        char b[160];
+        snprintf(b, sizeof b, "SC t%d pc=%08x nr=%u(%08x,%08x,%08x)=%08lx\n",
+                 g_self ? g_self->tid : -1, pc, nr, a0, a1, a2, (unsigned long)(uint32_t)r);
+        fputs(b, stderr);
+    }
     pthread_mutex_unlock(&g_biglock);
     if (g_exit) uc_emu_stop(uc);
 }
@@ -123,6 +134,7 @@ int main(int argc, char **argv) {
     }
 #endif
     if (getenv("ME_TRACE")) g_trace = 1;
+    if (getenv("ME_SCRET")) g_scret = 1;
     if (getenv("ME_THREADDUMP")) g_threaddump = 1;
     threads_init();
 

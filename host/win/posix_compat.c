@@ -12,6 +12,19 @@
 #include <io.h>
 #include "sys/mman.h"
 
+/* High-resolution sleep. MinGW usleep/nanosleep round up to the Windows scheduler tick
+   (~15.6ms by default), so the guest's short polling nanosleeps (the LinuxThreads render/decode
+   workers cycle ~8500x/s on Linux) drop to ~90x/s -> the workers never produce a frame in time
+   and the screen stays black. timeBeginPeriod(1) raises the tick to 1ms; sub-ms waits busy-spin
+   on QueryPerformanceCounter (matches Linux, where the short sleeps are effectively instant). */
+void me_usleep(unsigned us) {
+    static volatile LONG inited = 0;
+    if (!inited && InterlockedExchange(&inited, 1) == 0) timeBeginPeriod(1);
+    if (us == 0) { SwitchToThread(); return; }
+    unsigned ms = us / 1000; if (ms < 1) ms = 1;   /* 1ms floor (timeBeginPeriod set the tick) */
+    Sleep(ms);
+}
+
 /* MinGW lacks pread/lstat. The engine's file access is single-threaded, so seek+read is fine;
    GP2X assets have no symlinks, so lstat == stat. */
 ssize_t pread(int fd, void *buf, size_t count, off_t off) {
