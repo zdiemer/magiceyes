@@ -144,7 +144,19 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                  else uc_mem_unmap(g_uc, a, l); }
         return 0;
     }
-    case 2: { /* fork: snapshot, run the child in-line, restore parent on its exit */
+    case 2: { /* fork.
+        Default: DON'T run the child inline. The inline child shares the engine with the
+        still-running parent threads, so snapshotting guest memory at fork time and restoring
+        it on child exit clobbers a FILE/lock a parent thread initialised in that window ->
+        a zeroed FILE in glibc stdio -> crash entering a level (the documented symptom). The
+        only forks here are system("sh ...") device-setup that no-ops on PC, so just return a
+        child pid: the guest takes the parent path, the child never executes, and waitpid reaps
+        it (status 0). This also makes the old g_sigact-leak machinery moot (no child = no
+        pre-exec handler reset). ME_GP2X_FORKCHILD restores the old inline-child behaviour. */
+        if (!getenv("ME_GP2X_FORKCHILD")) {
+            if (g_trace) fprintf(stderr, "  [fork] no inline child -> return pid %u\n", g_child_pid);
+            return g_child_pid;
+        }
         if (uc_context_alloc(g_uc, &g_fork_ctx) != UC_ERR_OK) return -ENOMEM;
         uc_context_save(g_uc, g_fork_ctx);
         uc_mem_region *regs = NULL; uint32_t cnt = 0; g_nsnap = 0;
