@@ -21,6 +21,7 @@
 #include "qemu.h"
 #include "user-mmap.h"
 #include "exec/cpu_ldst.h"
+#include "qemu/bswap.h"
 
 #include <pthread.h>
 
@@ -28,6 +29,25 @@
 #include "gp2x.h"
 
 enum { K_FB = 1, K_MEM, K_GPIO, K_DSP, K_MIXER, K_I2C };
+
+/* Register pages we protect PROT_READ so guest stores fault into gp2x_mmio_fault
+   (the MLC palette is a write-only port; the blitter draws on a trigger write). */
+enum { TRAP_MMSP2 = 1, TRAP_BLIT };
+#define GP2X_MAXTRAP 4
+static struct trap { abi_ulong gbase, gend; int kind; } g_traps[GP2X_MAXTRAP];
+static int g_ntraps;
+
+static void gp2x_add_trap(abi_ulong gbase, abi_ulong gend, int kind) {
+    if (g_ntraps < GP2X_MAXTRAP) {
+        g_traps[g_ntraps].gbase = gbase;
+        g_traps[g_ntraps].gend  = gend;
+        g_traps[g_ntraps].kind  = kind;
+        g_ntraps++;
+        if (getenv("ME_GP2X_DEBUG"))
+            fprintf(stderr, "[gp2x] add_trap kind=%d gbase=%08x gend=%08x\n",
+                    kind, (uint32_t)gbase, (uint32_t)gend);
+    }
+}
 
 #define GP2X_MAXFD 64
 static struct devfd { int fd; int kind; uint32_t phys; } g_fds[GP2X_MAXFD];
@@ -140,7 +160,113 @@ abi_long gp2x_mmap(abi_ulong addr, abi_ulong len, int prot, int fd, off_t offset
         gp2x_set_fb(g_dev, host, (uint32_t)len);
     }
     pthread_mutex_unlock(&g_lock);
+
+    /* Protect the write-only register pages so stores fault into gp2x_mmio_fault.
+       MMSP2: just the palette/OADR page (0x2000); the hot TCOUNT(0x0a00)/GPIO(0x1184)
+       pages stay writable so polling loops aren't trapped. Blitter: the whole window.
+       Opt out with ME_GP2X_NOPALTRAP (debug). */
+    if (kind == K_MEM && !getenv("ME_GP2X_NOPALTRAP")) {
+        if (phys == GP2X_MMSP2_PHYS && len >= 0x3000) {
+            abi_ulong page = g + (GP2X_REG_PALLT_A & ~(abi_ulong)(TARGET_PAGE_SIZE - 1));
+            int r = target_mprotect(page, TARGET_PAGE_SIZE, PROT_READ);
+            if (getenv("ME_GP2X_DEBUG"))
+                fprintf(stderr, "[gp2x] palette-trap mprotect page=%08x ret=%d\n",
+                        (uint32_t)page, r);
+            if (r == 0)
+                gp2x_add_trap(page, page + TARGET_PAGE_SIZE, TRAP_MMSP2);
+        } else if (phys == GP2X_BLIT_PHYS) {
+            abi_ulong end = (g + len + TARGET_PAGE_SIZE - 1) & ~(abi_ulong)(TARGET_PAGE_SIZE - 1);
+            if (target_mprotect(g, end - g, PROT_READ) == 0)
+                gp2x_add_trap(g, end, TRAP_BLIT);
+        }
+    }
     return g;
+}
+
+/* Decode the faulting ARM store so we can capture its value. Sets *rt (source
+   register), *size (1/2/4/8 bytes), *ilen (instruction length). Returns false for
+   instruction forms we don't emulate (the caller then lets qemu deliver the fault). */
+static bool decode_arm_store(uint32_t insn, int *rt, int *size, int *ilen) {
+    *ilen = 4;
+    if (((insn >> 26) & 3) == 1) {              /* LDR/STR/LDRB/STRB (imm or reg) */
+        if ((insn >> 20) & 1) return false;     /* L=1 -> load */
+        *size = ((insn >> 22) & 1) ? 1 : 4;     /* B bit */
+        *rt = (insn >> 12) & 0xf;
+        return true;
+    }
+    if (((insn >> 25) & 7) == 0 && (insn & 0x90) == 0x90) { /* extra load/store */
+        uint32_t op = (insn >> 5) & 3;          /* 01=H, 10=D-load/SB, 11=D-store/SH */
+        if ((insn >> 20) & 1) return false;     /* load */
+        *rt = (insn >> 12) & 0xf;
+        if (op == 1)      { *size = 2; return true; }   /* STRH */
+        if (op == 3)      { *size = 8; return true; }   /* STRD (Rt, Rt+1) */
+        return false;
+    }
+    return false;                               /* STM / other: not handled */
+}
+
+bool gp2x_mmio_fault(CPUState *cs, target_ulong gaddr, uintptr_t host_pc) {
+    int ti = -1;
+    for (int i = 0; i < g_ntraps; i++)
+        if (gaddr >= g_traps[i].gbase && gaddr < g_traps[i].gend) { ti = i; break; }
+    if (ti < 0) return false;                   /* not our page (e.g. an SMC fault) */
+
+    int dbg = getenv("ME_GP2X_DEBUG") != NULL;
+    cpu_restore_state(cs, host_pc);             /* sync env to the faulting guest insn */
+    CPUARMState *env = cpu_env(cs);
+    target_ulong pc = env->regs[15];
+    if (env->thumb) {
+        if (dbg) fprintf(stderr, "[gp2x] mmio-fault THUMB pc=%08x addr=%08x (unhandled)\n",
+                         (uint32_t)pc, (uint32_t)gaddr);
+        return false;               /* GP2X MMIO is written in ARM mode */
+    }
+    uint32_t insn = ldl_le_p(g2h(cs, pc));
+    int rt = 0, size = 0, ilen = 4;
+    if (!decode_arm_store(insn, &rt, &size, &ilen)) {
+        if (dbg) fprintf(stderr, "[gp2x] mmio-fault UNDECODED insn=%08x pc=%08x addr=%08x\n",
+                         insn, (uint32_t)pc, (uint32_t)gaddr);
+        return false;
+    }
+
+    uint32_t v0 = (rt == 15) ? (uint32_t)(pc + 8) : env->regs[rt];
+
+    /* Apply the store to the register RAM. The page is host-PROT_READ (that's what
+       trapped us), so briefly flip the host protection to writable, store, restore.
+       We use raw mprotect (not target_mprotect) so qemu's pageflags stay PAGE_READ-
+       only and the next guest store keeps faulting here. */
+    void *h = g2h(cs, gaddr);
+    void *hbase = g2h(cs, g_traps[ti].gbase);
+    size_t plen = (size_t)(g_traps[ti].gend - g_traps[ti].gbase);
+    mprotect(hbase, plen, PROT_READ | PROT_WRITE);
+    switch (size) {
+    case 1: *(uint8_t *)h = (uint8_t)v0; break;
+    case 2: stw_le_p(h, v0); break;
+    case 4: stl_le_p(h, v0); break;
+    case 8: stl_le_p(h, env->regs[rt]);
+            stl_le_p((uint8_t *)h + 4, env->regs[rt + 1]); break;
+    }
+    mprotect(hbase, plen, PROT_READ);
+
+    uint32_t off = (uint32_t)(gaddr - g_traps[ti].gbase) +
+                   (g_traps[ti].kind == TRAP_MMSP2
+                        ? (GP2X_REG_PALLT_A & ~(uint32_t)(TARGET_PAGE_SIZE - 1)) : 0);
+    if (g_traps[ti].kind == TRAP_MMSP2) {
+        if (size == 8) { gp2x_mmsp2_write(g_dev, off, env->regs[rt], 4);
+                         gp2x_mmsp2_write(g_dev, off + 4, env->regs[rt + 1], 4); }
+        else           { gp2x_mmsp2_write(g_dev, off, v0, size); }
+    } else {
+        if (size == 8) { gp2x_blitter_write(g_dev, off, env->regs[rt], 4);
+                         gp2x_blitter_write(g_dev, off + 4, env->regs[rt + 1], 4); }
+        else           { gp2x_blitter_write(g_dev, off, v0, size); }
+    }
+    if (getenv("ME_GP2X_DEBUG")) {
+        static unsigned long nfault[GP2X_MAXTRAP];
+        if ((nfault[ti]++ % 64) == 0)
+            fprintf(stderr, "[gp2x] mmio-fault kind=%d off=%05x val=%08x sz=%d (n=%lu)\n",
+                    g_traps[ti].kind, off, v0, size, nfault[ti]);
+    }
+    env->regs[15] = pc + ilen;                  /* skip the emulated store */
+    return true;
 }
 
 abi_long gp2x_ioctl(int fd, abi_long cmd, abi_long arg) {

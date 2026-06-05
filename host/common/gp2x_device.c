@@ -45,6 +45,14 @@ struct gp2x_dev {
     int         debug;            /* ME_GP2X_DEBUG: log regions + present decisions */
     uint32_t    last_oadr;        /* last MLC scanout address (flip detection) */
     uint32_t    flips;            /* count of real game flips (== actual frame rate) */
+
+    /* MLC 8-bit palette, reconstructed from trapped PALLT_A/PALLT_D writes
+       (write-only hardware port). Each entry is RGB888; present converts to 565. */
+    uint8_t     pal[256][3];      /* [i] = {R,G,B} */
+    uint16_t    pal_idx;          /* current auto-incrementing entry index */
+    uint8_t     pal_phase;        /* 0 = expect GB halfword, 1 = expect R halfword */
+    uint16_t    pal_gb;           /* the GB halfword pending its R partner */
+    int         pal_have;         /* a palette has been uploaded (else fall back to RGB332) */
 };
 
 /* ---- time ---- */
@@ -157,22 +165,66 @@ void gp2x_present_rgb565(gp2x_dev_t *d, const void *src, uint32_t w, uint32_t h)
     d->shm->frame_seq++;
 }
 
-/* Present an 8-bit indexed framebuffer. The MMSP2 MLC palette is a write-only port
-   we don't yet capture, so map the index as RGB332 — wrong colours for a custom
-   palette but it shows the game's actual rendering instead of black. */
+/* Reconstruct the MLC 8-bit palette from a trapped write to the write-only palette
+   port. The hardware protocol (paeryn SDL / MMSP2 datasheet): write the start entry
+   index to PALLT_A, then per entry two halfwords to PALLT_D — first (G<<8)|B, then R
+   (low byte) — with the entry index auto-incrementing after the pair. Other offsets
+   on the protected page (e.g. the OADR flip registers) are stored to RAM by the
+   caller and need no capture here. */
+void gp2x_mmsp2_write(gp2x_dev_t *d, uint32_t off, uint32_t val, int size) {
+    (void)size;
+    if (!d) return;
+    if (off == GP2X_REG_PALLT_A) {
+        d->pal_idx = (uint16_t)(val & 0xff);
+        d->pal_phase = 0;
+    } else if (off == GP2X_REG_PALLT_D) {
+        if (d->pal_phase == 0) {
+            d->pal_gb = (uint16_t)val;
+            d->pal_phase = 1;
+        } else {
+            uint8_t i = (uint8_t)(d->pal_idx & 0xff);
+            d->pal[i][0] = (uint8_t)(val & 0xff);          /* R */
+            d->pal[i][1] = (uint8_t)((d->pal_gb >> 8) & 0xff); /* G */
+            d->pal[i][2] = (uint8_t)(d->pal_gb & 0xff);    /* B */
+            d->pal_idx = (uint16_t)((d->pal_idx + 1) & 0xff);
+            d->pal_phase = 0;
+            d->pal_have = 1;
+        }
+    }
+}
+
+/* 2D blitter register write (the 0xE0020000 window). Implemented in phase 2 —
+   currently the registers are stored to RAM by the caller and the run-trigger is a
+   no-op (so blitter-only games render nothing rather than crashing). */
+void gp2x_blitter_write(gp2x_dev_t *d, uint32_t off, uint32_t val, int size) {
+    (void)d; (void)off; (void)val; (void)size;
+}
+
+/* Present an 8-bit indexed framebuffer. If the game has uploaded a palette (captured
+   via the trapped PALLT_D writes) use its true RGB; otherwise fall back to an RGB332
+   approximation so the rendering is at least visible. */
 static void gp2x_present_indexed8(gp2x_dev_t *d, const uint8_t *src, uint32_t w, uint32_t h) {
     if (!d || !d->shm || !src) return;
     if (w == 0 || w > GP2XSHM_MAXW) w = 320;
     if (h == 0 || h > GP2XSHM_MAXH) h = 240;
+    uint16_t lut[256];
+    if (d->pal_have) {
+        for (int i = 0; i < 256; i++)
+            lut[i] = (uint16_t)(((d->pal[i][0] >> 3) << 11) |
+                                ((d->pal[i][1] >> 2) << 5)  |
+                                 (d->pal[i][2] >> 3));
+    } else {
+        for (int i = 0; i < 256; i++) {        /* RGB332 fallback */
+            uint16_t r = (i >> 5) & 7, g = (i >> 2) & 7, b = i & 3;
+            lut[i] = (uint16_t)((r << 13) | (g << 8) | (b << 3));
+        }
+    }
     uint16_t *dst = (uint16_t *)d->shm->pixels;
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *sp = src + (size_t)y * w;
         uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
-        for (uint32_t x = 0; x < w; x++) {
-            uint8_t v = sp[x];
-            uint16_t r = (v >> 5) & 7, g = (v >> 2) & 7, b = v & 3;
-            dp[x] = (uint16_t)((r << 13) | (g << 8) | (b << 3));
-        }
+        for (uint32_t x = 0; x < w; x++)
+            dp[x] = lut[sp[x]];
     }
     d->shm->width = w; d->shm->height = h;
     d->shm->frame_seq++;

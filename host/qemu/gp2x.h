@@ -37,4 +37,13 @@ void gp2x_after_open(abi_long ret);
    that don't exist on PC. The forked child should just exit(0). */
 bool gp2x_execve_noop(const char *path);
 
+/* Write-on-fault handler for the trapped MMSP2 register pages (the MLC palette
+   port and the 2D blitter window). Called from qemu's host SIGSEGV handler when a
+   guest store hits one of those PROT_READ pages: decodes the faulting ARM store,
+   captures the value (palette reconstruction / blitter trigger), applies it to the
+   register RAM, and advances the guest PC past the store. Returns true if it
+   handled the fault (the caller must then cpu_loop_exit_noexc to resume at the new
+   PC); false to let qemu deliver the fault normally. */
+bool gp2x_mmio_fault(CPUState *cpu, target_ulong addr, uintptr_t host_pc);
+
 #endif /* MAGICEYES_GP2X_H */

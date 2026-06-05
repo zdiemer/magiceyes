@@ -375,6 +375,55 @@ def patch_userexec():
     print("  user-exec.c patched (SMC-freeze)")
 
 
+def patch_userexec_mmio():
+    """MMIO write-trap in accel/tcg/user-exec.c.
+
+    The MLC palette is a write-only hardware port and the 2D blitter draws on a
+    trigger write, so the GP2X glue protects those register pages PROT_READ. A guest
+    store then faults into handle_sigsegv_accerr_write; we forward it to
+    gp2x_mmio_fault, which decodes the store, captures the value, applies it to RAM,
+    and advances the guest PC. On success we exit the TB (cpu_loop_exit_noexc) so
+    execution resumes past the store -- it must not retry against the readonly page.
+    Separate from the SMC patch so each is independently idempotent."""
+    path = os.path.join(QEMU, "accel", "tcg", "user-exec.c")
+    with open(path) as f:
+        s = f.read()
+    if "gp2x_mmio_fault" in s:
+        print("  user-exec.c MMIO trap already patched")
+        return
+    # file-scope prototype (nested externs are a -Werror in qemu)
+    proto_anchor = "MMUAccessType adjust_signal_pc(uintptr_t *pc, bool is_write)\n"
+    proto = (
+        "#ifdef CONFIG_GP2X\n"
+        "bool gp2x_mmio_fault(CPUState *cpu, abi_ptr addr, uintptr_t host_pc);\n"
+        "#endif\n"
+        "\n"
+    )
+    if proto_anchor not in s:
+        sys.exit("ERROR: user-exec.c adjust_signal_pc anchor not found")
+    s = s.replace(proto_anchor, proto + proto_anchor, 1)
+
+    old_aw = (
+        "bool handle_sigsegv_accerr_write(CPUState *cpu, sigset_t *old_set,\n"
+        "                                 uintptr_t host_pc, abi_ptr guest_addr)\n"
+        "{\n"
+    )
+    new_aw = old_aw + (
+        "#ifdef CONFIG_GP2X\n"
+        "    if (gp2x_mmio_fault(cpu, guest_addr, host_pc)) {\n"
+        "        sigprocmask(SIG_SETMASK, old_set, NULL);\n"
+        "        cpu_loop_exit_noexc(cpu);\n"
+        "    }\n"
+        "#endif\n"
+    )
+    if s.count(old_aw) != 1:
+        sys.exit("ERROR: user-exec.c handle_sigsegv_accerr_write anchor not unique")
+    s = s.replace(old_aw, new_aw)
+    with open(path, "w") as f:
+        f.write(s)
+    print("  user-exec.c patched (MMIO write-trap)")
+
+
 def patch_tcg():
     """Enlarge the TCG code-gen buffer for GP2X (tcg/region.c). The stock 128MB
     user-mode buffer fills during sustained gameplay and the resulting global
@@ -484,6 +533,7 @@ def main():
     patch_syscall()
     patch_main()
     patch_userexec()
+    patch_userexec_mmio()
     patch_tcg()
     patch_meson()
     print("apply_gp2x: done")
