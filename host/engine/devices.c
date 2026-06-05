@@ -67,6 +67,11 @@ void present_guest(uint32_t g) {
    front buffer: the change-heuristic in present_active() otherwise shows the half-drawn back
    buffer between flips -> sprites/text flicker. Updated on each OADR flip. */
 int g_flip_active = 0; uint32_t g_flip_guest = 0;
+/* The game signals each frame boundary by writing the MLC OADR register (Payback writes 0
+   every frame). Once it does, present in lockstep with that write (one complete frame, synced)
+   and stop the async 16ms helper present -- that async copy was catching mid-draw frames
+   (tearing) at a rate decoupled from the game's (stutter). */
+int g_oadr_driven = 0;
 void present_fb(uint32_t phys) {
     uint32_t g;
     if (phys_to_guest(phys, &g)) {
@@ -102,7 +107,7 @@ void present_active(void) {
                                           this ~2000/s, and hashing+copying every time
                                           (300MB/s) was choking the emulator. */
     double now = host_now();
-    if (now - last < 0.016) return;
+    if (now - last < 0.008) return;  /* dedupe the OADRL+OADRH pair; allow up to ~100fps */
     last = now;
     if (g_flip_active) {              /* double-buffered: show the flipped-to front buffer only */
         if (g_flip_guest) present_guest(g_flip_guest);
@@ -233,7 +238,10 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         fprintf(stderr, "FLIP off=%04x phys=%08x -> guest=%08x(%s)  fb0=%08x fb1=%08x flipactive=%d\n",
                 off, phys, g, ok ? "ok" : "UNRESOLVED", g_fb_guest, g_fb_guest2, g_flip_active);
     } else { static int n = 0; if (n++ < 8) fprintf(stderr, "  MMSP2 flip -> phys=%08x\n", phys); }
-    present_fb(phys);
+    g_oadr_driven = 1;          /* the game drives present via OADR now -> stop async present */
+    present_fb(phys);           /* real-address flip: present + lock to it */
+    if (!g_flip_active) present_active();   /* phys=0/unresolved (Payback): present the
+                                               just-drawn buffer, synced to this frame boundary */
 }
 /* Serve MMSP2 register reads. The free-running microsecond timer (TCOUNT @ 0x0a00)
    must advance or the game's timing/frame loops spin forever. */

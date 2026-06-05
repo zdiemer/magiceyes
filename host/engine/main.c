@@ -77,7 +77,8 @@ static void *helper_thread(void *arg) {
     uint32_t acaddr = ac ? (uint32_t)strtoul(ac, NULL, 0) : 0;
     while (!g_exit) {
         usleep(16000);
-        if (g_fb_guest) present_active();    /* reads the fb via host backing (guest_to_host) */
+        if (g_fb_guest && !g_oadr_driven) present_active();  /* async fallback until the game
+                                              drives present via OADR (then it's frame-synced) */
         if (acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
         double now = host_now();
         if (prof && now - prof_t >= 2.0) {

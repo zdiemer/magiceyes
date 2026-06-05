@@ -68,6 +68,7 @@ extern int g_devtype[64], g_devn;
 extern struct memmap g_mem[64];
 extern int g_nmem;
 extern uint32_t g_mmsp2_guest, g_fb_guest, g_fb_guest2;
+extern int g_oadr_driven;   /* game drives present via OADR writes -> async present off */
 extern uint32_t g_aud_freq, g_aud_ch, g_aud_bits;
 extern double g_aud_t0;
 extern int g_aud_on;

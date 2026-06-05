@@ -60,8 +60,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     if (g_trace)
         fprintf(stderr, "  [t%d] sc %u (%08x,%08x,%08x,%08x)\n",
                 g_self ? g_self->tid : -1, nr, a0, a1, a2, a3);
-    /* single-buffered titles never "flip"; refresh the live fb0 periodically */
-    { static unsigned c = 0; if (g_fb_guest && (++c & 63) == 0) present_active(); }
+    /* refresh fb periodically — only until the game drives present via OADR (frame-synced) */
+    { static unsigned c = 0; if (g_fb_guest && !g_oadr_driven && (++c & 63) == 0) present_active(); }
     switch (nr) {
     case 1:    /* exit */
     case 248:  /* exit_group */
