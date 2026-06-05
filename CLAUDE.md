@@ -255,6 +255,19 @@ to **parity with the QEMU backend**, reusing the device model + viewer. Plan:
 (not qemu-user — its linux-user layer can't compile to native Win/macOS), port our qemu fixes
 into its tree, collapse engine+viewer into one process, add a dynamic-ELF loader for Wiz.
 
+**WINDOWS NATIVE BUILD — DONE (`host/win/`).** Both halves cross-compile to native Windows
+PE32+ binaries via **MinGW-w64 from WSL** (no WSL at *run* time): `bin/me_unicorn.exe` (engine)
++ `bin/viewer.exe` (SDL2) + `SDL2.dll`. The patched fork (SMC-freeze + CF_PARALLEL) builds clean
+under MinGW (`build_fork_win.sh` → `$FORK/build-win/libunicorn.a`); the **new `host/engine/`
+modules build unchanged** because MinGW's `winpthreads` covers the engine's pthread use. The
+only compat shim is tiny (`host/win/`): `compat/{sys/mman.h,elf.h}` + `posix_compat.c` —
+`mmap`→`VirtualAlloc`, `MAP_SHARED`→a **Win32 named file mapping** (`Local\magiceyes_<name>`) for
+the engine↔viewer shm bridge, plus `pread`/`lstat`/`setenv` (`mprotect` from libgcc). Verified:
+`me_unicorn.exe` loads Payback and runs GP2X ARM through TCG with device interception, no WSL.
+Build: `host/win/{get_sdl2,build_fork_win,build_win,build_viewer_win}.sh`; run on Windows:
+`host\win\run_win.bat <binary> [scale]`. See `host/win/README.md`. This is the native build that
+also settles the audio-stutter question (Windows WASAPI/DirectSound vs WSLg PulseAudio RDP sink).
+
 **Fork:** `~/me-unicorn-fork` (Unicorn 2.0.1, ARM-only static, branch `magiceyes`). GitHub
 fork `github.com/zdiemer/unicorn` created; push pending a one-time `gh auth refresh -s workflow`
 (see `host/engine/fork-patches/push_fork.sh`). Patches authored via `host/engine/fork-patches/`,
