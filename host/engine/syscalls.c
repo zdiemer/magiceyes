@@ -225,6 +225,25 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 5: {  /* open(path, flags, mode) */
         char p[1024]; read_cstr(a0, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
+        if (g_trace) fprintf(stderr, "  open '%s' flags=%x\n", p, (int)a1);
+        if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab")) {
+            if (g_trace) fprintf(stderr, "  [fake mounts for %s]\n", p);
+            /* the game runs getmntent(); the HOST mount table (WSL/drvfs, dozens of long
+               entries) overruns its parser and it null-derefs a mnt list node. Hand it a
+               minimal GP2X-like table instead. */
+            static const char MT[] =
+                "/dev/root / ext2 rw 0 0\n"
+                "none /proc proc rw 0 0\n"
+                "none /tmp tmpfs rw 0 0\n"
+                "/dev/mmcsd/disc0/part1 /mnt/sd vfat rw 0 0\n";
+            char tmpl[] = "/tmp/me_mntXXXXXX";
+            int fd = mkstemp(tmpl);
+            if (fd < 0) return -errno;
+            unlink(tmpl);
+            if (write(fd, MT, sizeof MT - 1) < 0) { /* best effort */ }
+            lseek(fd, 0, SEEK_SET);
+            return fd;
+        }
         long r = open(p, (int)a1, a2); int e2 = errno;
         if (r >= 0) { g_self->enoent_streak = 0; return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
@@ -387,6 +406,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (nr == 197) ok = fstat((int)a0, &s);
         else { read_cstr(a0, p, sizeof p);
                ok = (nr == 196) ? lstat(p, &s) : stat(p, &s); }
+        if (g_trace && nr != 197) fprintf(stderr, "  stat64 '%s' -> %s\n", p, ok ? "FAIL" : "ok");
         if (ok) return -errno;
         fill_stat64(a1, &s); return 0;  /* EABI struct stat64 (st_size@48, 104B) */
     }
