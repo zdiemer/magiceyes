@@ -14,36 +14,57 @@ static struct gregion g_reg[2048];
 static int g_nreg = 0;
 static pthread_mutex_t g_reg_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static int page_backed(uint32_t pg) {
+static struct gregion *find_region(uint32_t pg) {   /* registry entry covering guest page pg */
     for (int i = 0; i < g_nreg; i++)
-        if (pg >= g_reg[i].addr && pg < g_reg[i].addr + g_reg[i].len) return 1;
-    return 0;
+        if (pg >= g_reg[i].addr && pg < g_reg[i].addr + g_reg[i].len) return &g_reg[i];
+    return NULL;
 }
 
-/* Map [addr,size) page-aligned into g_uc, backed by host RAM; idempotent over pages
-   already backed (the old uc_mem_map tolerated re-maps). Each contiguous unbacked run
-   gets one host allocation + one uc_mem_map_ptr, recorded for uc_map_all(). */
-void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
+/* Ensure [addr,size) is mapped into uc `u`, SHARING the registry's host backing so every
+   uc (one per native guest thread) sees the same memory. A page already backed anywhere
+   is mapped into u from that same host allocation (dup map -> UC_ERR_MAP, ignored); a new
+   range gets one host allocation + record. This is the correctness crux for native threads:
+   a thread faulting on memory another thread created must get the SAME host backing, not a
+   fresh one. */
+void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms) {
     uint32_t end = ALIGN_UP(addr + size), p = ALIGN_DN(addr);
     pthread_mutex_lock(&g_reg_lock);
     while (p < end) {
-        if (page_backed(p)) { p += PAGE; continue; }
-        uint32_t run = p;
-        while (run < end && !page_backed(run)) run += PAGE;
-        uint32_t len = run - p;
-        void *host = mmap(NULL, len, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (host == MAP_FAILED) die("host mmap", UC_ERR_OK);
-        uc_err e = uc_mem_map_ptr(g_uc, p, len, perms, host);
-        if (e && e != UC_ERR_MAP) die("uc_mem_map_ptr", e);
-        if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
-            g_reg[g_nreg++] = (struct gregion){p, len, perms, host};
-        p = run;
+        struct gregion *r = find_region(p);
+        if (r) {                                  /* existing backing -> map it into u */
+            uc_mem_map_ptr(u, r->addr, r->len, r->perms, r->host);
+            p = r->addr + r->len;
+        } else {                                  /* new range up to the next existing region */
+            uint32_t run = p;
+            while (run < end && !find_region(run)) run += PAGE;
+            uint32_t len = run - p;
+            void *host = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (host == MAP_FAILED) die("host mmap", UC_ERR_OK);
+            uc_err e = uc_mem_map_ptr(u, p, len, perms, host);
+            if (e && e != UC_ERR_MAP) die("uc_mem_map_ptr", e);
+            if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
+                g_reg[g_nreg++] = (struct gregion){p, len, perms, host};
+            p = run;
+        }
     }
     pthread_mutex_unlock(&g_reg_lock);
 }
 
-/* Map every recorded region into a fresh uc — the native-thread factory (Increment 2). */
+void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
+    ensure_mapped(g_uc, addr, size, perms);
+}
+
+/* Host pointer backing guest address gaddr (for host-atomic ops, e.g. kuser cmpxchg). */
+void *guest_to_host(uint32_t gaddr) {
+    pthread_mutex_lock(&g_reg_lock);
+    struct gregion *r = find_region(ALIGN_DN(gaddr));
+    void *h = r ? (uint8_t *)r->host + (gaddr - r->addr) : NULL;
+    pthread_mutex_unlock(&g_reg_lock);
+    return h;
+}
+
+/* Map every recorded region into a fresh uc — the native-thread factory. */
 void uc_map_all(uc_engine *u) {
     pthread_mutex_lock(&g_reg_lock);
     for (int i = 0; i < g_nreg; i++)

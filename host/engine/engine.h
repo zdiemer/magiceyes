@@ -46,6 +46,8 @@ extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 
 void die(const char *m, uc_err e);
 void map_region(uint32_t addr, uint32_t size, uint32_t perms);   /* host-backed (mem.c) */
+void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms);
+void *guest_to_host(uint32_t gaddr);   /* host ptr backing a guest addr (host-atomic ops) */
 void uc_map_all(uc_engine *u);   /* map all guest regions into a fresh uc (thread factory) */
 uint32_t gread(uint32_t reg);
 void gwrite(uint32_t reg, uint32_t v);
