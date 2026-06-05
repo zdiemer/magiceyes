@@ -27,14 +27,19 @@ void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 
-/* Fill the ARM EABI `struct stat64` (sizeof 104). The 8-byte st_rdev is followed by
-   __pad3[4] + 4 alignment padding, so st_size lands at 48 (NOT 40 -- that earlier guess
-   gave a garbage size) and the struct is 104 bytes (NOT 112 -- writing 112 overflowed
-   the game's buffer and crashed). Kernel layout:
+/* Fill the GP2X OABI glibc-2.3.6 `struct stat64` -- sizeof **96**, NOT 104. This glibc
+   was built OABI, where `long long` is 4-byte aligned (no EABI 8-byte alignment), so the
+   struct is packed: st_size lands at 44 (not 48) and st_blksize at 52 (not 56). Proven
+   from `_IO_file_doallocate` (0x17c168): it reserves a 104-byte frame, puts `struct stat64`
+   at sp+8, and reads st_blksize at [sp,#60] = struct+52 -> the struct is exactly the 96
+   bytes sp+8..sp+104. Writing 104 bytes overflowed past sp+104 onto the function's saved
+   {r4,r5} (pushed before the frame), zeroing the saved FILE* in r5 -> the documented
+   "null mntent stream" crash at load. Kernel layout:
      st_dev@0(8) __st_ino@12(4) st_mode@16 st_nlink@20 st_uid@24 st_gid@28
-     st_rdev@32(8) st_size@48(8) st_blksize@56 st_blocks@64(8) st_ino@96(8). */
+     st_rdev@32(8) st_size@44(8,packed) st_blksize@52 st_blocks@56(8) st_ino@88(8). */
 void fill_stat64(uint32_t gbuf, struct stat *hs) {
-    uint8_t b[104]; memset(b, 0, sizeof b);
+    uint8_t b[96]; memset(b, 0, sizeof b);
+    uint64_t sz = (uint64_t)hs->st_size, blk = (uint64_t)((hs->st_size + 511) / 512);
     *(uint64_t *)(b + 0)  = (uint64_t)hs->st_dev;
     *(uint32_t *)(b + 12) = (uint32_t)hs->st_ino;          /* legacy 32-bit __st_ino */
     *(uint32_t *)(b + 16) = (uint32_t)hs->st_mode;
@@ -42,10 +47,10 @@ void fill_stat64(uint32_t gbuf, struct stat *hs) {
     *(uint32_t *)(b + 24) = (uint32_t)hs->st_uid;
     *(uint32_t *)(b + 28) = (uint32_t)hs->st_gid;
     *(uint64_t *)(b + 32) = (uint64_t)hs->st_rdev;
-    *(uint64_t *)(b + 48) = (uint64_t)hs->st_size;         /* 64-bit st_size @48 */
-    *(uint32_t *)(b + 56) = 4096;                          /* st_blksize */
-    *(uint64_t *)(b + 64) = (uint64_t)((hs->st_size + 511) / 512); /* st_blocks */
-    *(uint64_t *)(b + 96) = (uint64_t)hs->st_ino;          /* 64-bit st_ino */
+    memcpy(b + 44, &sz, 8);                                /* st_size @44 (4-byte aligned) */
+    *(uint32_t *)(b + 52) = 4096;                          /* st_blksize @52 */
+    *(uint64_t *)(b + 56) = blk;                           /* st_blocks @56 */
+    *(uint64_t *)(b + 88) = (uint64_t)hs->st_ino;          /* 64-bit st_ino @88 */
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 

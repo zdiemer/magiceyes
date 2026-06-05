@@ -264,22 +264,29 @@ committed into the fork.
 - **SMC-freeze ported to Unicorn's softmmu** (`cputlb.c` notdirty/TLB path; the user-exec
   page_protect analog) — confirmed freezing the `.iwram` thrash pages. Env: `ME_GP2X_NOSMCFREEZE`,
   `ME_GP2X_SMCLOG`.
-- **`me_unicorn.c` fixes** (the Payback music-load chain): correct EABI **`fill_stat64`**
-  (st_size@48/104B — was the "Can't stat file" hang); safe **`read_cstr`** path reads;
-  **`_llseek`(140)**; **`execve`(11)** as `gp2x_execve_noop` (forked-child sh/insmod → exit 0);
-  **`exit_group` worker fix** (non-main thread's exit_group ends just that thread — ported from
-  `apply_gp2x.py`); fps readout in `ME_PROF`; `ME_THREADDUMP` thread-state dump.
+- **`me_unicorn.c`/engine fixes** (the Payback load chain): **`fill_stat64`** — now the correct
+  **96-byte OABI** `struct stat64` (st_size@44, st_blksize@52, st_ino@88); the old 104-byte EABI
+  struct **overflowed `_IO_file_doallocate`'s frame and zeroed a saved register** (see below);
+  safe **`read_cstr`** path reads; **`_llseek`(140)**; **`execve`(11)** as `gp2x_execve_noop`
+  (forked-child sh/insmod → exit 0); **`exit_group` worker fix** (non-main thread's exit_group
+  ends just that thread — ported from `apply_gp2x.py`); fps readout in `ME_PROF`;
+  `ME_THREADDUMP` thread-state dump.
 
-**Remaining blocker (Payback → menu):** the cooperative scheduler + synchronous-fork model
-deadlocks/crashes where QEMU uses native threads. Diagnosed precisely: after the game's
-`system("exit 0")`, main null-derefs via an **indirect call through an uninitialised
-function-pointer table** on an audio/stream object (`ldr pc,[r3,#56]` at `0x14b95c`), and a
-second thread busy-spins a userspace lock main can no longer release. Root cause is upstream
-object-init, and the synchronous-fork model leaks engine state (signals/fds) the QEMU native
-fork doesn't. **Conclusion: full parity needs native host threads** (each guest thread = host
-thread over shared `uc_mem_map_ptr` RAM), the real next step — best validated interactively
-(the menu needs input; can't be reached headless). Still-to-port from `gp2x.c` for *other*
-titles: the MLC-palette/blitter MMIO trap (`gp2x_mmio_fault`) and `/dev/i2c-0` serial.
+**Native host threads — DONE, and the load crash is FIXED (Payback boots to its main loop).**
+The cooperative scheduler is gone (each guest thread = a host thread over shared
+`uc_mem_map_ptr` RAM; see NATIVE_THREADS.md). The last load blocker — a fault that *looked*
+like "main null-derefs an uninitialised function-pointer table" (`ldr pc,[r3,#0x38]` in
+`_IO_file_underflow` after a **null `_IO_FILE`**) — was actually a **`fill_stat64` buffer
+overflow**: this OABI glibc's `struct stat64` is **96 bytes**, but we wrote **104**; the extra
+8 bytes (the 64-bit `st_ino`) overran `_IO_file_doallocate`'s stack frame and overwrote its
+saved `r5` (the `FILE*`) with 0 → underflow got a null stream during the first `getmntent`
+read. Fixing the struct to 96 bytes (`host/engine/syscalls.c`) clears it: Payback now passes
+the mount check, opens `/etc/localtime`, stat's all maps, spawns its LinuxThreads workers, and
+runs a live multi-threaded frame loop (main paces on `nanosleep`+TCOUNT; manager polls
+`getppid`). Reaching the actual menu is best validated **interactively** (it waits for input;
+headless it idles at the first screen). Still-to-port from `gp2x.c` for *other* titles: the
+MLC-palette/blitter MMIO trap (`gp2x_mmio_fault`) and `/dev/i2c-0` serial; and the Unicorn
+TCOUNT still ticks at **1 MHz wall-clock** (the slow-motion rate) vs qemu's 7.3728 MHz.
 
 **Two fixes that made it playable (both reproduced by `apply_gp2x.py`):**
 - **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* CPU-cost fix that lets rendering reach the
@@ -376,12 +383,20 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
 - `/dev/dsp` OSS: SNDCTL_DSP_{SPEED,STEREO,CHANNELS,SETFMT,GETBLKSIZE,SETFRAGMENT,GETFMTS,
   GETOSPACE,GETODELAY,RESET,SYNC,POST}; **GETOSPACE must report real free space** (0 ⇒ the
   game thinks the buffer is always full); writes → shm audio ring.
-- `stat64`: the correct ARM-EABI `struct stat64` is **st_mode@16, st_size@48, st_blocks@64,
-  st_ino@96, sizeof 104** (the earlier "st_size@40/sizeof 112" was wrong on both counts —
-  the `__pad3[4]`+alignment after the 8-byte `st_rdev` puts st_size at 48, and 112 overflowed
-  the 104-byte buffer → the documented crash). The **Unicorn** engine (`me_unicorn.c`
-  `fill_stat64`) now fills this correctly; filling the 88B OABI layout for stat64 made the
-  game read st_size=0 → "Can't stat file" on every asset (the Payback music-load hang).
+- `stat64`: GP2X glibc 2.3.6 is **OABI**, where `long long` is **4-byte aligned** (not EABI's
+  8). So `struct stat64` is **packed to 96 bytes**, NOT the 104-byte EABI struct: **st_mode@16,
+  st_rdev@32(8), st_size@44(8, 4-aligned), st_blksize@52, st_blocks@56(8), st_ino@88(8),
+  sizeof 96**. Proven from `_IO_file_doallocate` (Payback `0x17c168`): it reserves a 104-byte
+  frame, places `struct stat64` at `sp+8`, and reads `st_blksize` at `[sp,#60]` = struct+52 →
+  the struct is exactly the 96 bytes `sp+8..sp+104`. **Writing 104 bytes overflows past
+  `sp+104` onto the function's saved `{r4,r5}` (pushed before the frame)** — the 64-bit
+  `st_ino` at b+96 lands on saved `r5`, and since inodes are 32-bit its high word is 0, so the
+  saved FILE\* (`r5`) returns as 0 → `_IO_file_underflow` derefs a null stream → the
+  "load-screen / null mntent stream" crash. (The earlier "st_size@48/sizeof 104" and "88B
+  OABI" were both wrong: 88B mis-set st_mode/st_size; 104B was the overflow.) The **Unicorn**
+  engine (`host/engine/syscalls.c` `fill_stat64`) now writes the 96-byte OABI layout. The
+  game doesn't read st_size from these calls (it reads files to EOF), so map/asset loading is
+  unaffected by the exact size field; the **struct size** is what mattered.
 - GPEComp games decompress to `/mnt/tmp/<name>_tmp` (static) via `tools/gp2x/decomp_*.sh`
   (inode-pin trick). Test binary: `~/pbtest/Payback_tmp` (10MB static), run from `~/pbtest`
   (needs `Data/`). The freeware copy lacked `Data/Music/*.ama`; the **full set (21 `.ama`,
