@@ -26,6 +26,16 @@ mkdir -p "$HOME/gp2xplay" /mnt/tmp 2>/dev/null
 NAME="$(basename "${IN%.*}")"
 GDIR="$HOME/gp2xplay/$NAME"
 
+# pick the best .gpe under a dir: prefer a real ARM ELF over a launcher script
+pick_gpe() {
+    local f elf="" any=""
+    while IFS= read -r f; do
+        [ -z "$any" ] && any="$f"
+        if file -b "$f" 2>/dev/null | grep -qi "ELF.*ARM"; then echo "$f"; return; fi
+    done < <(find "$1" -maxdepth 4 -iname '*.gpe' | sort)
+    echo "$any"
+}
+
 # --- 1. materialise the game tree on ext4 ---
 shopt -s nocasematch
 if [[ "$IN" == *.zip ]]; then
@@ -34,14 +44,17 @@ if [[ "$IN" == *.zip ]]; then
         mkdir -p "$GDIR"
         unzip -o -q "$IN" -d "$GDIR" || { echo "unzip failed"; exit 2; }
     fi
+    GPE="$(pick_gpe "$GDIR")"
 else
     mkdir -p "$GDIR"
     cp -ru "$(dirname "$IN")"/. "$GDIR"/ 2>/dev/null
+    # honour the exact .gpe the user pointed at (some games ship a start.gpe
+    # launcher script alongside the real binary)
+    if [[ "$IN" == *.gpe || "$IN" == *.GPE ]]; then GPE="$GDIR/$(basename "$IN")"; else GPE="$(pick_gpe "$GDIR")"; fi
 fi
 shopt -u nocasematch
 
-GPE="$(find "$GDIR" -maxdepth 4 -iname '*.gpe' | head -1)"
-[ -n "$GPE" ] || { echo "no .gpe found under $GDIR"; exit 3; }
+[ -n "${GPE:-}" ] && [ -e "$GPE" ] || { echo "no .gpe found under $GDIR"; exit 3; }
 RUNDIR="$(dirname "$GPE")"; GB="$(basename "$GPE")"
 cd "$RUNDIR" || exit 4
 chmod -R u+rwX . 2>/dev/null
@@ -50,9 +63,20 @@ file -b "$GPE"
 
 KIND="$(file -b "$GPE")"
 if echo "$KIND" | grep -qi "dynamically linked"; then
-    echo "!! dynamic ELF (interp $(readelf -l "$GPE" 2>/dev/null | grep -io '/lib/[^]]*' | head -1))."
-    echo "   This needs the Wiz rootfs path (MAGICEYES_ROOTFS + magiceyes.sh), not this launcher."
-    exit 5
+    # Dynamic ELF: needs the device rootfs (ld-linux + libc, and libSDL if it links
+    # it). Route through magiceyes.sh, which stages our fake-SDL shim into the rootfs
+    # (so SDL games render to our shm) and runs under -L rootfs; direct-framebuffer
+    # dynamic games still hit our patched qemu's /dev/fb0 interception. We point it
+    # at OUR patched qemu (not vanilla qemu-arm-static) so device interception works.
+    echo "=== dynamic ELF -> rootfs + fake-SDL shim path (magiceyes.sh) ==="
+    if [ ! -e "$ROOT/lib/ld-linux.so.2" ]; then
+        echo "!! no device rootfs at $ROOT (extract the Wiz/GP2X rootfs there first)"; exit 5
+    fi
+    rm -f /dev/shm/gp2x_fb
+    export MAGICEYES_ROOTFS="$ROOT" MAGICEYES_QEMU="$QEMU" MAGICEYES_SCALE="$SCALE"
+    file -b "$GPE" | head -1
+    echo "=== launching (Esc or close window to quit) ==="
+    exec bash "$ME/magiceyes.sh" "$GPE"
 fi
 
 BIN="$RUNDIR/${GB%.*}_tmp"
