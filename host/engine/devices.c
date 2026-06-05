@@ -55,13 +55,19 @@ int phys_to_guest(uint32_t phys, uint32_t *out) {
 /* GP2X native screen = 320x240 RGB565. Present framebuffer at `phys` to shm. */
 void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
-    uint8_t row[320 * 2];
+    uint8_t row[320 * 2]; int nz = 0;
     for (int y = 0; y < 240; y++) {
         { uint8_t *src = guest_to_host(g + (uint32_t)y * 640); if (!src) break;
           memcpy(row, src, sizeof row); }
         memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, sizeof row);
+        if (!nz) for (int i = 0; i < 640; i++) if (row[i]) { nz = 1; break; }
     }
     g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
+    if (getenv("ME_GP2X_PRESENTLOG")) {   /* diagnose black-screen: black frames vs viewer issue */
+        static int n = 0, nb = 0; n++; if (!nz) nb++;
+        if (n % 60 == 0) fprintf(stderr, "PRESENT %d frames (%d black) guest=%08x seq=%u\n",
+                                 n, nb, g, g_shm->frame_seq);
+    }
 }
 /* Once the game page-flips to a real fb address (double-buffering), lock the display to that
    front buffer: the change-heuristic in present_active() otherwise shows the half-drawn back
