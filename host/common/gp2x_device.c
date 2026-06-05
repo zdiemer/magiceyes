@@ -157,6 +157,27 @@ void gp2x_present_rgb565(gp2x_dev_t *d, const void *src, uint32_t w, uint32_t h)
     d->shm->frame_seq++;
 }
 
+/* Present an 8-bit indexed framebuffer. The MMSP2 MLC palette is a write-only port
+   we don't yet capture, so map the index as RGB332 — wrong colours for a custom
+   palette but it shows the game's actual rendering instead of black. */
+static void gp2x_present_indexed8(gp2x_dev_t *d, const uint8_t *src, uint32_t w, uint32_t h) {
+    if (!d || !d->shm || !src) return;
+    if (w == 0 || w > GP2XSHM_MAXW) w = 320;
+    if (h == 0 || h > GP2XSHM_MAXH) h = 240;
+    uint16_t *dst = (uint16_t *)d->shm->pixels;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *sp = src + (size_t)y * w;
+        uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t v = sp[x];
+            uint16_t r = (v >> 5) & 7, g = (v >> 2) & 7, b = v & 3;
+            dp[x] = (uint16_t)((r << 13) | (g << 8) | (b << 3));
+        }
+    }
+    d->shm->width = w; d->shm->height = h;
+    d->shm->frame_seq++;
+}
+
 /* sparse FNV hash of a surface (change detection). `len` bounds the reads: the
    game's fb may be smaller than 320x240x2 (e.g. 8-bit palettised = 76800 bytes),
    and reading past it segfaults our helper thread. */
@@ -203,20 +224,21 @@ static void present_active(gp2x_dev_t *d) {
                     oadr_phys, oadr, c0 ? "*" : " ", c1 ? "*" : " ");
     }
     d->hash[0] = n0; d->hash[1] = n1;
-    /* Only present a buffer big enough for a 320x240 RGB565 frame; an 8-bit fb
-       (76800 bytes) would overread in gp2x_present_rgb565. Such games drive the
-       display via the SDL shim (which writes the shm directly) or the MLC, so
-       skipping the raw fb here is correct, not a regression. */
     if (oadr) { gp2x_present_rgb565(d, oadr, 320, 240); return; }
     if (!a && !b) return;
-    int big0 = d->fb_len[0] >= 320u * 240u * 2, big1 = d->fb_len[1] >= 320u * 240u * 2;
-    if (c1 && b && big1)      gp2x_present_rgb565(d, b, 320, 240);
-    else if (c0 && a && big0) gp2x_present_rgb565(d, a, 320, 240);
-    else if (big0 || big1) {
-        void *pa = big0 ? a : NULL, *pb = big1 ? b : NULL;
-        gp2x_present_rgb565(d, surf_nonblank(pb, d->fb_len[1]) >
-                               surf_nonblank(pa, d->fb_len[0]) ? pb : pa, 320, 240);
+    /* Present the surface the game most recently changed, choosing the depth from
+       the mapped fb length: >=153600B is RGB565, 76800B is 8-bit indexed. */
+    void *pick = NULL; uint32_t plen = 0;
+    if (c1 && b)      { pick = b; plen = d->fb_len[1]; }
+    else if (c0 && a) { pick = a; plen = d->fb_len[0]; }
+    else {
+        int s_a = surf_nonblank(a, d->fb_len[0]), s_b = surf_nonblank(b, d->fb_len[1]);
+        if (s_b > s_a) { pick = b; plen = d->fb_len[1]; }
+        else if (a)    { pick = a; plen = d->fb_len[0]; }
     }
+    if (!pick) return;
+    if (plen >= 320u * 240u * 2)      gp2x_present_rgb565(d, pick, 320, 240);
+    else if (plen >= 320u * 240u)     gp2x_present_indexed8(d, pick, 320, 240);
 }
 
 /* Count real game frames by watching the MLC scanout address (OADR) flip. Called
