@@ -40,10 +40,11 @@ host\win\run_win.bat Payback_tmp 3
 or manually: `me_unicorn.exe Payback_tmp` in one window, `viewer.exe 3` in another. `bin\` needs
 `me_unicorn.exe`, `viewer.exe`, `SDL2.dll` (two-process) or `magiceyes.exe`, `SDL2.dll` (bundle).
 
-**NOTE:** the bundle (`-DME_BUNDLED`) collapses the engine↔viewer shm bridge into one process as
-intended by the cross-platform plan, but it does **not** fix the Payback black screen — that turned
-out to be a guest-rendering / loading-deadlock issue in the Unicorn engine, not the shm transport.
-See `BUNDLE_HANDOFF.md` (RESULT section).
+The bundle (`-DME_BUNDLED`) collapses the engine↔viewer shm bridge into one process (the viewer runs
+on a worker thread sharing the engine's in-process `g_shm`). Payback runs at **full parity with
+Linux** — renders correctly, real-time audio, 25fps, instant load (focused window). The root-cause
+history (host errno/`/proc`+`/etc`/`O_BINARY`/timer fixes + EcoQoS background-throttling) is in
+`WINDOWS_RENDER_DEBUG.md`.
 
 ## The compat layer (`host/win/`)
 MinGW provides pthreads (winpthreads), gettimeofday, usleep, nanosleep, sched_yield, fcntl/stdio.

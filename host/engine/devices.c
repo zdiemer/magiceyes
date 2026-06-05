@@ -30,10 +30,8 @@ void shm_setup(void) {
 #ifdef ME_BUNDLED
     /* Single-process bundle: the viewer runs in this same process (a worker thread, see
        main.c), so g_shm is plain in-process memory -- no cross-process named mapping to
-       mismatch on launch order/namespace/DACL. (This was expected to fix the native-Windows
-       black screen, but that turned out to be a guest-rendering issue, not the shm bridge --
-       see host/win/BUNDLE_HANDOFF.md. The single-process model is still the intended end
-       state per the cross-platform plan.) */
+       mismatch on launch order/namespace/DACL. This is the intended single-process end state
+       (the cross-platform plan); the native-Windows render fixes are in host/win/. */
     g_shm = calloc(1, sizeof(gp2x_shm_t));
     if (!g_shm) return;
     g_shm->buttons = 0; g_shm->quit = 0; g_shm->frame_seq = 0;
