@@ -88,4 +88,78 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
 void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                    int size, int64_t value, void *user);
 
+/* ---- shared types/macros: threads, signals, fork, mem ---- */
+#define MAXTH 32
+enum { TH_FREE = 0, TH_RUN, TH_BLOCKED, TH_SLEEPING, TH_DEAD };
+enum { BLK_NONE = 0, BLK_FUTEX, BLK_SIG };
+#define ME_CLONE_VM            0x00000100
+#define ME_CLONE_PARENT_SETTID 0x00100000
+#define ME_CLONE_CHILD_CLEARTID 0x00200000
+#define ME_CLONE_CHILD_SETTID  0x01000000
+#define ME_CLONE_SETTLS        0x00080000
+#define SIG_TRAMP 0xffff0f00u   /* restorer trampoline in the kuser page */
+#define PIPEFD_R 0x10000100
+#define PIPEFD_W 0x10000101
+
+struct thread {
+    uc_context *ctx;
+    int state, block, tid, ppid;
+    uint32_t tls;
+    uint32_t futex_addr;
+    uint32_t ctid;
+    uint64_t sig_pending, sig_blocked;
+    uint64_t susp_oldmask;
+    int susp_active;
+    int has_sigsave;
+    uint32_t sigsave[17];
+    double wake_deadline;
+    int enoent_streak;
+    uint32_t last_pc;
+};
+struct sigact { uint32_t handler, flags, restorer; uint64_t mask; };
+struct snap { uint64_t begin; uint32_t len; uint8_t *data; };
+struct freereg { uint32_t addr, len; };
+
+/* ---- threads.c (cooperative scheduler — to be rewritten for native threads) ---- */
+extern struct thread g_th[MAXTH];
+extern int g_nth, g_cur, g_next_tid, g_switched;
+extern struct sigact g_sigact[65];
+extern const int g_sregs[17];
+extern int g_threaddump;
+void wake_sleepers(void);
+int sched_pick(void);
+void sched_switch_to(int j);
+void block_current(int reason);
+void dump_threads(const char *why);
+void deliver_signals(void);
+long send_sig(int pid, int sig);
+
+/* ---- syscalls.c (syscall shim + synchronous fork + in-engine pipe) ---- */
+extern uc_context *g_fork_ctx;
+extern struct snap g_snap[2048];
+extern int g_nsnap, g_forked;
+extern uint32_t g_child_pid;
+extern uint8_t *g_pipebuf;
+extern uint32_t g_pipe_cap, g_pipe_w, g_pipe_r;
+void pipe_put(const uint8_t *p, uint32_t n);
+void read_cstr(uint32_t gaddr, char *out, size_t cap);
+void fill_oabi_stat(uint32_t gbuf, struct stat *hs);
+void fill_stat64(uint32_t gbuf, struct stat *hs);
+long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
+                  uint32_t a3, uint32_t a4, uint32_t a5);
+
+/* ---- mem.c (guest mmap/brk allocator + lazy fault map) ---- */
+extern struct freereg g_mfree[256];
+extern int g_nmfree;
+long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off);
+long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys);
+bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
+                    int size, int64_t value, void *user);
+
+/* ---- cpu.c (SVC entry, hooks, preemption timer) ---- */
+extern volatile int g_timer_run;
+extern unsigned g_slice_us;
+void intr_cb(uc_engine *uc, uint32_t intno, void *user);
+void *timer_thread(void *arg);
+
 #endif /* MAGICEYES_ENGINE_H */
