@@ -5,30 +5,33 @@ The magiceyes engine cross-compiles to a **native Windows `.exe`** via **MinGW-w
 MinGW's `winpthreads` means the engine's heavy pthread use works unchanged, so the only POSIX
 shim needed is mmap/shm + a couple of stdio calls.
 
-## Status
-- **Engine: DONE.** `bin/me_unicorn.exe` builds and **runs GP2X ARM code natively on Windows**
-  (verified: loads the Payback ELF, runs guest code through TCG, syscalls + `/dev/fb`/`/proc`
-  device interception all work, no WSL). Static PE32+, no DLL dependencies.
-- **Viewer: TODO.** `host/viewer.c` (SDL2) still needs a MinGW SDL2 build for the window/input/
-  audio half. The engine↔viewer shm bridge is already shimmed (named Win32 file mapping in
-  `posix_compat.c`), so it should drop in once SDL2-mingw is wired up.
+## Status — both halves build & run natively on Windows, no WSL
+- **Engine: DONE.** `bin/me_unicorn.exe` (static PE32+, no DLL deps) loads the Payback ELF and
+  runs GP2X ARM code through TCG; syscalls + `/dev/fb`/`/proc` device interception all work.
+- **Viewer: DONE.** `bin/viewer.exe` (SDL2, ships `SDL2.dll`) — the window/input/audio half. The
+  engine↔viewer framebuffer/audio bridge is a Win32 **named file mapping** (`posix_compat.c`),
+  the same name on both sides, so they share memory across the two processes.
 
-## One-time setup (WSL/Linux)
+## One-time setup (WSL/Linux build host)
 ```sh
 sudo apt install -y gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix
-host/win/build_fork_win.sh        # cross-builds the patched Unicorn fork -> $FORK/build-win/libunicorn.a
+host/win/build_fork_win.sh        # patched Unicorn fork -> $FORK/build-win/libunicorn.a
+host/win/get_sdl2.sh              # SDL2 mingw devel libs -> ~/sdl2-mingw
 ```
 
-## Build the engine
+## Build
 ```sh
-host/win/build_win.sh             # -> bin/me_unicorn.exe (native Windows)
+host/win/build_win.sh             # -> bin/me_unicorn.exe
+host/win/build_viewer_win.sh      # -> bin/viewer.exe (+ SDL2.dll)
 ```
 
-## Run (from Windows, e.g. cmd/PowerShell or MSYS)
+## Run (on Windows — cmd/PowerShell)
+From the directory holding the GP2X binary + its `Data\` folder:
 ```
-cd <dir with Payback_tmp + Data\>
-me_unicorn.exe Payback_tmp
+host\win\run_win.bat Payback_tmp 3
 ```
+or manually: `me_unicorn.exe Payback_tmp` in one window, `viewer.exe 3` in another (they
+rendezvous on the named mapping). `bin\` needs `me_unicorn.exe`, `viewer.exe`, `SDL2.dll`.
 
 ## The compat layer (`host/win/`)
 MinGW provides pthreads (winpthreads), gettimeofday, usleep, nanosleep, sched_yield, fcntl/stdio.
@@ -38,9 +41,10 @@ The shim only adds what MinGW lacks:
 - `compat/elf.h`: minimal ELF32 types/constants (MinGW has no `<elf.h>`).
 - `posix_compat.c`: `pread` (seek+read) and `lstat` (== `stat`). `mprotect` comes from libgcc.
 
-## Remaining for the viewer
-1. Get SDL2 MinGW dev libs (`SDL2-devel-*-mingw.tar.gz` from libsdl.org, or a packaged one).
-2. Cross-build `host/viewer.c` against them → `bin/viewer.exe`.
-3. The shm name (`gp2xshm.h` `GP2XSHM_NAME`) maps to `Local\magiceyes_<name>` on Windows; the
-   viewer uses the same `shm_open`+`mmap` path, so it shares the framebuffer/audio ring.
-   (Alternatively collapse engine+viewer into one process to drop the shm entirely.)
+## Notes / next
+- The shm name (`gp2xshm.h` `GP2XSHM_NAME`) maps to `Local\magiceyes_<name>` on Windows.
+- This native build is the clean way to settle the **audio-stutter** question — Windows uses
+  WASAPI/DirectSound via SDL2, not WSLg's PulseAudio RDP sink, so if the stutter is gone here it
+  was the WSLg path.
+- Optional future cleanup: collapse engine+viewer into one process (SDL on the main thread) to
+  drop the shm bridge entirely — see the cross-platform plan.

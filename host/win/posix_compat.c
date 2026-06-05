@@ -19,6 +19,11 @@ ssize_t pread(int fd, void *buf, size_t count, off_t off) {
     return _read(fd, buf, (unsigned)count);
 }
 int lstat(const char *path, struct stat *st) { return stat(path, st); }
+int setenv(const char *name, const char *val, int overwrite) {
+    if (!overwrite && getenv(name)) return 0;
+    char buf[1024]; snprintf(buf, sizeof buf, "%s=%s", name, val ? val : "");
+    return _putenv(buf);
+}
 
 /* ---- shm objects: a fake fd -> a Win32 named-mapping name ---- */
 #define SHM_FD_BASE 0x40000000
