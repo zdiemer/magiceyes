@@ -48,6 +48,7 @@ extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 
 void die(const char *m, uc_err e);
 void me_usleep(unsigned us);   /* sleep, low CPU (Windows usleep is ~15ms-granular) */
+void me_platform_init(void);   /* one-time host setup (Windows: timer res + no EcoQoS throttling) */
 void map_region(uint32_t addr, uint32_t size, uint32_t perms);   /* host-backed (mem.c) */
 void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms);
 void *guest_to_host(uint32_t gaddr);   /* host ptr backing a guest addr (host-atomic ops) */

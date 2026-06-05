@@ -32,10 +32,22 @@ draws"; `ME_SCRET` (per-thread syscall+return trace) + an index-diff of main's s
 run found each divergence in turn. Ground-truth render comparison: dump `/dev/shm/gp2x_fb` on WSL
 to PNG vs screenshot the Windows window — both show the same intro + title.
 
-## Remaining: slow + variable initial load (NOT a correctness issue)
-Steady-state **gameplay is at parity (25fps both)**; only reaching the first frame is slow on
-Windows (~16–34s vs WSL ~4s) and **varies run-to-run** (sometimes near-hangs in init). NOT yet
-root-caused, but extensively narrowed — evidence for the next session:
+## Load speed — RESOLVED: it was Windows background-process throttling (not a magiceyes bug)
+**Real interactive use loads instantly** (operator-confirmed) — the Windows build is at full
+parity (video, audio, 25fps gameplay, *and* load). The "slow + variable load" below was an
+artifact of launching the window **un-focused / in the background**, where Windows 11 throttles
+the process (EcoQoS: reduced CPU speed + coarsened timer resolution → short sleeps became ~9ms →
+the single-threaded asset/intro decode ran ~4x slower). A focused window is not throttled, so it
+loads as fast as Linux. `me_platform_init()` (`host/win/posix_compat.c`, called from `main`) now
+opts the process out of EcoQoS **execution-speed** and **timer-resolution** throttling
+(`SetProcessInformation`/`ProcessPowerThrottling`) so background/minimized runs are full-speed too,
+matching Linux (which never throttles). NOTE: this can't be verified from the agent's headless
+launch harness (it runs in a non-interactive session that throttles regardless of the opt-out), but
+it's standard, low-risk practice for a game/emulator and is honored on a normal desktop session.
+
+### (archival) symptoms seen under the background-throttled harness
+Steady-state gameplay was always 25fps; only reaching the first frame was slow (~16–34s vs ~4s) and
+variable. Evidence that pinned it to throttling rather than our code:
 - **Wait-bound, not CPU-bound:** during the slow load the process uses only ~9% of ONE core
   (per-thread `ProcessThread.TotalProcessorTime`). (An earlier "400% CPU" reading was a different
   transient phase.) So threads are *blocked*, not computing.

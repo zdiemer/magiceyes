@@ -63,6 +63,7 @@ void die(const char *m, uc_err e) {
 
 #ifndef _WIN32
 void me_usleep(unsigned us) { usleep(us); }   /* Linux usleep is already high-resolution */
+void me_platform_init(void) {}                /* Linux doesn't throttle background processes */
 #endif
 
 uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }
@@ -123,6 +124,8 @@ static void *helper_thread(void *arg) {
 int main(int argc, char **argv) {
     setvbuf(stderr, NULL, _IONBF, 0);   /* diagnostics must survive a kill (msvcrt fully buffers
                                            a redirected stderr otherwise -> lost logs on Windows) */
+    me_platform_init();   /* Windows: 1ms timer + opt out of EcoQoS throttling (else a backgrounded
+                             window is CPU/timer-throttled -> ~4x slower load; Linux never throttles) */
     if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
 #ifdef ME_BUNDLED
     /* a trailing all-numeric arg is the viewer scale (magiceyes.exe <binary> [scale]); strip

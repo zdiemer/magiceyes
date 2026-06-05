@@ -17,11 +17,38 @@
    workers cycle ~8500x/s on Linux) drop to ~90x/s -> the workers never produce a frame in time
    and the screen stays black. timeBeginPeriod(1) raises the tick to 1ms; sub-ms waits busy-spin
    on QueryPerformanceCounter (matches Linux, where the short sleeps are effectively instant). */
+/* One-time host setup. Windows throttles a process whose window isn't in the foreground (EcoQoS /
+   "background" mode): coarser timer + reduced CPU speed. That made a backgrounded/minimized (or
+   headlessly-launched) magiceyes load Payback ~4x slower with short sleeps coarsened to ~9ms, while
+   a focused window loads instantly. Linux never does this, so for parity we opt OUT of execution-
+   speed throttling and pin the timer to 1ms -- the game then runs full speed regardless of focus. */
+#ifndef PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+#define PROCESS_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#endif
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4   /* Win11: honor timeBeginPeriod in bg */
+#endif
+#ifndef PROCESS_POWER_THROTTLING_CURRENT_VERSION
+#define PROCESS_POWER_THROTTLING_CURRENT_VERSION 1
+typedef struct _PROCESS_POWER_THROTTLING_STATE {
+    ULONG Version; ULONG ControlMask; ULONG StateMask;
+} PROCESS_POWER_THROTTLING_STATE;
+#endif
+void me_platform_init(void) {
+    timeBeginPeriod(1);
+    /* Opt out of BOTH EcoQoS execution-speed throttling AND background timer-resolution coarsening.
+       StateMask bit clear (with the bit set in ControlMask) = that throttling is DISABLED. */
+    PROCESS_POWER_THROTTLING_STATE pt; memset(&pt, 0, sizeof pt);
+    pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED |
+                     PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    pt.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
+}
+
 void me_usleep(unsigned us) {
-    static volatile LONG inited = 0;
-    if (!inited && InterlockedExchange(&inited, 1) == 0) timeBeginPeriod(1);
     if (us == 0) { SwitchToThread(); return; }
-    unsigned ms = us / 1000; if (ms < 1) ms = 1;   /* 1ms floor (timeBeginPeriod set the tick) */
+    unsigned ms = us / 1000; if (ms < 1) ms = 1;   /* 1ms floor (me_platform_init set the tick) */
     Sleep(ms);
 }
 
