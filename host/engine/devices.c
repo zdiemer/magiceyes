@@ -72,6 +72,8 @@ int g_flip_active = 0; uint32_t g_flip_guest = 0;
    and stop the async 16ms helper present -- that async copy was catching mid-draw frames
    (tearing) at a rate decoupled from the game's (stutter). */
 int g_oadr_driven = 0;
+int g_frame_ready = 0;   /* OADR write sets this; the helper thread does the actual present
+                            (keeping the heavy copy OFF the guest render thread) */
 void present_fb(uint32_t phys) {
     uint32_t g;
     if (phys_to_guest(phys, &g)) {
@@ -238,10 +240,12 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         fprintf(stderr, "FLIP off=%04x phys=%08x -> guest=%08x(%s)  fb0=%08x fb1=%08x flipactive=%d\n",
                 off, phys, g, ok ? "ok" : "UNRESOLVED", g_fb_guest, g_fb_guest2, g_flip_active);
     } else { static int n = 0; if (n++ < 8) fprintf(stderr, "  MMSP2 flip -> phys=%08x\n", phys); }
-    g_oadr_driven = 1;          /* the game drives present via OADR now -> stop async present */
-    present_fb(phys);           /* real-address flip: present + lock to it */
-    if (!g_flip_active) present_active();   /* phys=0/unresolved (Payback): present the
-                                               just-drawn buffer, synced to this frame boundary */
+    /* Don't present here: this runs in the guest render thread's write hook; doing the heavy
+       fb copy on it raced (crash entering a level, masked by ME_THREADDUMP's timing). Just
+       record the frame boundary + flip target and let the helper thread present, frame-synced. */
+    g_oadr_driven = 1;
+    uint32_t g; if (phys_to_guest(phys, &g)) { g_flip_active = 1; g_flip_guest = g; }
+    g_frame_ready = 1;
 }
 /* Serve MMSP2 register reads. The free-running microsecond timer (TCOUNT @ 0x0a00)
    must advance or the game's timing/frame loops spin forever. */

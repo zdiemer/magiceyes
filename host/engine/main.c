@@ -76,9 +76,10 @@ static void *helper_thread(void *arg) {
                                                    periodically clearing a guest "DMA busy" flag */
     uint32_t acaddr = ac ? (uint32_t)strtoul(ac, NULL, 0) : 0;
     while (!g_exit) {
-        usleep(16000);
-        if (g_fb_guest && !g_oadr_driven) present_active();  /* async fallback until the game
-                                              drives present via OADR (then it's frame-synced) */
+        usleep(g_oadr_driven ? 2000 : 16000);   /* poll faster once frame-driven (low latency) */
+        /* Present off the guest render thread: frame-synced to the game's OADR write
+           (g_frame_ready) once it drives present, else an async fallback. */
+        if (g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; present_active(); }
         if (acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
         double now = host_now();
         if (prof && now - prof_t >= 2.0) {

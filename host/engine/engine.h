@@ -69,6 +69,7 @@ extern struct memmap g_mem[64];
 extern int g_nmem;
 extern uint32_t g_mmsp2_guest, g_fb_guest, g_fb_guest2;
 extern int g_oadr_driven;   /* game drives present via OADR writes -> async present off */
+extern int g_frame_ready;   /* OADR write -> helper thread presents this frame (off-render-thread) */
 extern uint32_t g_aud_freq, g_aud_ch, g_aud_bits;
 extern double g_aud_t0;
 extern int g_aud_on;
