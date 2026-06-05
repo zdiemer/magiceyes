@@ -150,6 +150,12 @@ bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
             UC_ARM_REG_R9,UC_ARM_REG_R10,UC_ARM_REG_R11,UC_ARM_REG_R12};
         fprintf(stderr, "   regs:");
         for (int i = 0; i < 13; i++) fprintf(stderr, " r%d=%08x", i, gread(rr[i]));
+        fprintf(stderr, "\n   stack ret-addrs:");
+        uint32_t sp = gread(UC_ARM_REG_SP);
+        for (int k = 0; k < 96; k++) {
+            uint32_t w = 0; uc_mem_read(g_uc, sp + k * 4, &w, 4);
+            if (w >= 0x8100 && w < 0x19bc00) fprintf(stderr, " %08x", w);  /* .text range */
+        }
         fprintf(stderr, "\n");
     }
     map_region(ALIGN_DN(a), PAGE, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);

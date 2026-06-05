@@ -2,6 +2,11 @@
  * (A dynamic-linker / PT_INTERP path for Wiz titles lands here later.) */
 #include "engine.h"
 
+/* program-header info for the auxv (AT_PHDR/PHENT/PHNUM) — glibc's static-TLS setup
+   reads the phdrs via AT_PHDR to find PT_TLS; without it, __thread/locale/stdio init is
+   left half-built (fopen'd FILE*s get a null vtable). Set by load_elf. */
+static uint32_t g_phdr_va, g_phnum, g_phent, g_elf_entry;
+
 /* ---- ELF loader (static EXEC) ---- */
 uint32_t load_elf(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -33,6 +38,14 @@ uint32_t load_elf(const char *path) {
     }
     g_brk_start = g_brk = ALIGN_UP(max_end);
     map_region(g_brk, PAGE, UC_PROT_READ | UC_PROT_WRITE); /* initial brk page */
+    /* where the phdrs ended up in guest memory (the PT_LOAD covering e_phoff) */
+    g_phdr_va = 0;
+    for (int i = 0; i < eh->e_phnum; i++)
+        if (ph[i].p_type == PT_LOAD && eh->e_phoff >= ph[i].p_offset &&
+            eh->e_phoff < ph[i].p_offset + ph[i].p_filesz) {
+            g_phdr_va = ph[i].p_vaddr + (eh->e_phoff - ph[i].p_offset); break;
+        }
+    g_phnum = eh->e_phnum; g_phent = eh->e_phentsize; g_elf_entry = eh->e_entry;
     uint32_t entry = eh->e_entry;
     free(buf);
     return entry;
@@ -55,12 +68,29 @@ uint32_t setup_stack(int argc, char **argv) {
     sp -= 16; sp &= ~15u; uint32_t at_random = sp;
     uint8_t rnd[16] = {0x4d,0x61,0x67,0x69,0x63,0x45,0x79,0x65,0x73,1,2,3,4,5,6,7};
     uc_mem_write(g_uc, sp, rnd, 16);
+    /* AT_PLATFORM string */
+    sp -= 4; sp &= ~3u; uint32_t at_platform = sp;
+    uc_mem_write(g_uc, sp, "v5l", 4);
 
-    /* build the initial stack block; align so final sp is 8-aligned */
+    /* Full auxv, mirroring qemu-user's create_elf_tables() so glibc's static-TLS +
+       stdio/C++ init complete (AT_PHDR is the critical one for PT_TLS). */
     uint32_t aux[][2] = {
-        {6 /*AT_PAGESZ*/, PAGE},
-        {25/*AT_RANDOM*/, at_random},
-        {0 /*AT_NULL*/, 0},
+        {3 /*AT_PHDR*/,    g_phdr_va},
+        {4 /*AT_PHENT*/,   g_phent},
+        {5 /*AT_PHNUM*/,   g_phnum},
+        {6 /*AT_PAGESZ*/,  PAGE},
+        {7 /*AT_BASE*/,    0},
+        {8 /*AT_FLAGS*/,   0},
+        {9 /*AT_ENTRY*/,   g_elf_entry},
+        {11/*AT_UID*/,     0}, {12/*AT_EUID*/, 0},
+        {13/*AT_GID*/,     0}, {14/*AT_EGID*/, 0},
+        {16/*AT_HWCAP*/,   0x97},   /* armv5te: SWP|HALF|THUMB|FAST_MULT|EDSP */
+        {17/*AT_CLKTCK*/,  100},
+        {15/*AT_PLATFORM*/,at_platform},
+        {23/*AT_SECURE*/,  0},
+        {25/*AT_RANDOM*/,  at_random},
+        {31/*AT_EXECFN*/,  n ? argp[0] : 0},
+        {0 /*AT_NULL*/,    0},
     };
     int naux = sizeof(aux) / sizeof(aux[0]);
     /* total words: argc(1) + argv(n) + null(1) + envp null(1) + aux(2*naux) */

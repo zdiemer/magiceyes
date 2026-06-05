@@ -226,6 +226,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a0, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         if (g_trace) fprintf(stderr, "  open '%s' flags=%x\n", p, (int)a1);
+        if (getenv("ME_NOMOUNTS") && (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab")))
+            return -ENOENT;   /* test: make setmntent() fail cleanly instead of feeding getmntent */
         if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab")) {
             if (g_trace) fprintf(stderr, "  [fake mounts for %s]\n", p);
             /* the game runs getmntent(); the HOST mount table (WSL/drvfs, dozens of long
