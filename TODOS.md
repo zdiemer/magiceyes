@@ -294,17 +294,17 @@ binary with no VM. Guest side is untouched (it already owns the SDL/audio/DRM
 surface, so the remaining syscall surface is modest: file I/O, mmap, ioctl, time,
 shm). Lives under `host/` next to the qemu backend.
 
-### Native Windows: RESOLVED — Payback renders + plays (only load speed remains)
-The native Windows build (`bin/magiceyes.exe` bundle) now renders Payback correctly (intro + title
-pixel-equivalent to WSL), runs the frame loop at the hardware-correct **25fps**, and streams audio.
-The black screen was a stack of Windows-only host-portability bugs (NOT a thread race, as first
-suspected): host-vs-Linux **errno** values, missing **/proc + /etc** fakes (the guest's glibc init
-diverged on ENOENT), **O_BINARY** open flags, **cacheflush-driven present**, and the ~15.6ms
-**timer resolution** (`timeBeginPeriod(1)`). Found by diffing main's syscall+return stream
-(`ME_SCRET`) WSL↔Windows. Full write-up: `host/win/WINDOWS_RENDER_DEBUG.md`.
-**Remaining:** initial load is ~3–4x slower than WSL (~16–34s vs ~4s) — CPU-bound parallel TCG
-warmup, steady-state gameplay fps is at parity. Likely winpthreads lock/scheduling or MinGW-TCG
-JIT throughput; not yet root-caused.
+### Native Windows: DONE — Payback at full parity (renders, audio, 25fps, instant load)
+The native Windows build (`bin/magiceyes.exe` bundle) runs Payback at full parity with Linux:
+renders correctly (intro + title pixel-equivalent to WSL), frame loop at the hardware-correct
+**25fps**, real-time audio, and instant load. The black screen was a stack of Windows-only
+host-portability bugs (NOT a thread race): host-vs-Linux **errno** values, missing **/proc + /etc**
+fakes (glibc init diverged on ENOENT), **O_BINARY** open flags, **cacheflush-driven present**, and
+**timer resolution** (`timeBeginPeriod(1)`) — found by diffing main's syscall+return stream
+(`ME_SCRET`) WSL↔Windows. The apparent "~4x slower load" was **Windows 11 EcoQoS background-window
+throttling**, not our code (a focused window loads instantly); `me_platform_init()` opts the process
+out of execution-speed + timer-resolution throttling so backgrounded runs are full-speed too. Full
+write-up: `host/win/WINDOWS_RENDER_DEBUG.md`.
 
 ### Engine headless-blocks without a viewer (make it self-drain)
 The Unicorn engine's audio producer paces against the viewer consuming the shm ring, so a
