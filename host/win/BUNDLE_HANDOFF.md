@@ -1,5 +1,37 @@
 # Handoff: collapse engine + viewer into ONE process (fixes the Windows black screen)
 
+## RESULT (2026-06-05) — bundle DONE; it did NOT fix the black screen (premise was wrong)
+
+The single-process bundle is implemented and works as a mechanism: `bin/magiceyes.exe` (+ the
+shipped `SDL2.dll`, the only non-system DLL dependency) runs the engine and the SDL viewer in
+one process over a shared in-process `g_shm`. Window opens, the present pipeline runs
+(`frame_seq` advances), input/audio share the same pointer, and the quit path works (close the
+window → `exit()`; engine exit → `g_shm->quit` ends the viewer). Build: `host/win/build_bundle_win.sh`.
+Run on Windows: `bin\magiceyes.exe <binary> [scale]` (e.g. `magiceyes.exe Payback_tmp 3`).
+
+**But Payback is still a black screen, because the cross-process shm bridge was NOT the cause.**
+Measured on the bundle (`ME_GP2X_PRESENTLOG`): the engine presents ~25fps and `frame_seq`
+advances, the game's frame loop is alive (~36k TCOUNT reads/s, 1 harmless lazy-map fault), yet
+**179 of 180 presented frames are black** — only the very first (loading) frame has content.
+So the engine→g_shm→viewer→window path delivers frames fine; the **guest framebuffer content
+itself goes black after ~1 frame**. Disabling the fb0 flip-lock (present whichever of fb0/fb1
+changed) left it black too → **both** buffers are black, i.e. the game stops drawing, it's not a
+buffer-selection bug. A headless Linux run of the same engine (`bin/me_unicorn`, with `ME_TRACE`
+so the log actually flushes) shows all guest threads parked in `nanosleep` — a stall. Both
+platforms fail to render Payback under the **Unicorn** engine (timing-sensitive: Windows spins
+the loop drawing black, traced-Linux stalls). This is the documented **loading-deadlock /
+guest-rendering** class problem (`host/engine/LOADING_DEADLOCK.md`, `NATIVE_THREADS.md`), and the
+**qemu** backend remains the playable GP2X path. Next step is to debug guest rendering / the
+native-threads loading deadlock in the Unicorn engine — NOT the transport.
+
+Diagnostic gotcha discovered: MinGW/msvcrt **fully buffers stderr when redirected to a file**, so
+low-volume logs are lost on force-kill; capture with `Start-Process -NoNewWindow` AND let the
+process exit cleanly (or flood with `ME_TRACE`). Several earlier "0 frames presented" readings
+were this artifact, not real.
+
+---
+
+
 ## Goal
 Build a single `magiceyes.exe` that runs the engine **and** the SDL viewer in one process,
 sharing `g_shm` as a plain in-process `malloc` (no Win32 named file mapping). This eliminates

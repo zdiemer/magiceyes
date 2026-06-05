@@ -21,17 +21,29 @@ host/win/get_sdl2.sh              # SDL2 mingw devel libs -> ~/sdl2-mingw
 
 ## Build
 ```sh
-host/win/build_win.sh             # -> bin/me_unicorn.exe
+host/win/build_win.sh             # -> bin/me_unicorn.exe (two-process engine)
 host/win/build_viewer_win.sh      # -> bin/viewer.exe (+ SDL2.dll)
+host/win/build_bundle_win.sh      # -> bin/magiceyes.exe (+ SDL2.dll)  SINGLE-PROCESS bundle
 ```
 
 ## Run (on Windows — cmd/PowerShell)
-From the directory holding the GP2X binary + its `Data\` folder:
+From the directory holding the GP2X binary + its `Data\` folder.
+
+Single-process bundle (engine + viewer in one process, shared in-process `g_shm`):
+```
+bin\magiceyes.exe Payback_tmp 3
+```
+Two-process (engine + separate viewer, rendezvous on a Win32 named mapping):
 ```
 host\win\run_win.bat Payback_tmp 3
 ```
-or manually: `me_unicorn.exe Payback_tmp` in one window, `viewer.exe 3` in another (they
-rendezvous on the named mapping). `bin\` needs `me_unicorn.exe`, `viewer.exe`, `SDL2.dll`.
+or manually: `me_unicorn.exe Payback_tmp` in one window, `viewer.exe 3` in another. `bin\` needs
+`me_unicorn.exe`, `viewer.exe`, `SDL2.dll` (two-process) or `magiceyes.exe`, `SDL2.dll` (bundle).
+
+**NOTE:** the bundle (`-DME_BUNDLED`) collapses the engine↔viewer shm bridge into one process as
+intended by the cross-platform plan, but it does **not** fix the Payback black screen — that turned
+out to be a guest-rendering / loading-deadlock issue in the Unicorn engine, not the shm transport.
+See `BUNDLE_HANDOFF.md` (RESULT section).
 
 ## The compat layer (`host/win/`)
 MinGW provides pthreads (winpthreads), gettimeofday, usleep, nanosleep, sched_yield, fcntl/stdio.
@@ -46,5 +58,6 @@ The shim only adds what MinGW lacks:
 - This native build is the clean way to settle the **audio-stutter** question — Windows uses
   WASAPI/DirectSound via SDL2, not WSLg's PulseAudio RDP sink, so if the stutter is gone here it
   was the WSLg path.
-- Optional future cleanup: collapse engine+viewer into one process (SDL on the main thread) to
-  drop the shm bridge entirely — see the cross-platform plan.
+- Engine+viewer are now collapsable into one process via `build_bundle_win.sh` (`-DME_BUNDLED`):
+  the viewer runs on a worker thread (SDL on Windows is happy off the main thread; macOS will need
+  the flip — viewer on main, engine on a worker) and shares the engine's in-process `g_shm`.

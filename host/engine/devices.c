@@ -27,6 +27,19 @@ int dev_type(int fd) {
 /* ---- shm framebuffer bridge to the native viewer (shared w/ the Wiz shim) ---- */
 gp2x_shm_t *g_shm = NULL;
 void shm_setup(void) {
+#ifdef ME_BUNDLED
+    /* Single-process bundle: the viewer runs in this same process (a worker thread, see
+       main.c), so g_shm is plain in-process memory -- no cross-process named mapping to
+       mismatch on launch order/namespace/DACL. (This was expected to fix the native-Windows
+       black screen, but that turned out to be a guest-rendering issue, not the shm bridge --
+       see host/win/BUNDLE_HANDOFF.md. The single-process model is still the intended end
+       state per the cross-platform plan.) */
+    g_shm = calloc(1, sizeof(gp2x_shm_t));
+    if (!g_shm) return;
+    g_shm->buttons = 0; g_shm->quit = 0; g_shm->frame_seq = 0;
+    g_shm->magic = GP2XSHM_MAGIC;
+    return;
+#else
     int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
     if (fd < 0) return;
     if (ftruncate(fd, sizeof(gp2x_shm_t)) != 0) { /* may pre-exist */ }
@@ -35,6 +48,7 @@ void shm_setup(void) {
     if (p == MAP_FAILED) return;
     g_shm = p; g_shm->buttons = 0; g_shm->quit = 0; g_shm->frame_seq = 0;
     g_shm->magic = GP2XSHM_MAGIC;
+#endif
 }
 
 /* /dev/mem mmap tracking so MMSP2 framebuffer phys addresses resolve to guest. */

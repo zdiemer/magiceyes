@@ -39,6 +39,22 @@ void pipe_put(const uint8_t *p, uint32_t n) {
 
 unsigned long g_n_rd = 0, g_n_wr = 0, g_n_fault = 0;  /* hook-call profiling */
 
+#ifdef ME_BUNDLED
+/* Single-process bundle: the SDL viewer runs in this process on a worker thread, sharing the
+   engine's in-process g_shm directly (no cross-process shm bridge -> no Windows black screen).
+   viewer_run lives in host/viewer.c; declared here so main.c needn't include SDL.h (which would
+   #define main -> SDL_main and rename the engine's entry point). */
+int viewer_run(gp2x_shm_t *shm, int scale);
+static int g_view_scale = 3;
+static void *viewer_thread(void *arg) {
+    (void)arg;
+    viewer_run(g_shm, g_view_scale);   /* returns when the window closes */
+    g_exit = 1;                        /* stop the engine + helper threads */
+    if (g_shm) g_shm->quit = 1;
+    exit(g_exit_code);                 /* engine main is blocked in uc_emu_start; force exit */
+}
+#endif
+
 void die(const char *m, uc_err e) {
     fprintf(stderr, "me_unicorn: %s: %s\n", m, e ? uc_strerror(e) : "");
     exit(1);
@@ -95,6 +111,15 @@ static void *helper_thread(void *arg) {
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
+#ifdef ME_BUNDLED
+    /* a trailing all-numeric arg is the viewer scale (magiceyes.exe <binary> [scale]); strip
+       it so it isn't handed to the guest as an argv entry. */
+    if (argc >= 3) {
+        const char *last = argv[argc - 1]; int alldig = last[0] != 0;
+        for (const char *p = last; *p; p++) if (*p < '0' || *p > '9') { alldig = 0; break; }
+        if (alldig) { g_view_scale = atoi(last); argc--; }
+    }
+#endif
     if (getenv("ME_TRACE")) g_trace = 1;
     if (getenv("ME_THREADDUMP")) g_threaddump = 1;
     threads_init();
@@ -128,10 +153,17 @@ int main(int argc, char **argv) {
 
     if (g_trace) fprintf(stderr, "entry=%08x sp=%08x brk=%08x\n", entry, sp, g_brk);
     pthread_t helper; pthread_create(&helper, NULL, helper_thread, NULL);
+#ifdef ME_BUNDLED
+    pthread_t vth; pthread_create(&vth, NULL, viewer_thread, NULL);
+#endif
 
     e = uc_emu_start(u, entry, 0, 0, 0);   /* run the main guest thread to completion */
     if (e != UC_ERR_OK && !g_exit)
         fprintf(stderr, "me_unicorn: main emu err %s pc=%08x\n", uc_strerror(e), gread(UC_ARM_REG_PC));
     g_exit = 1;
+#ifdef ME_BUNDLED
+    if (g_shm) g_shm->quit = 1;            /* engine done -> end the viewer loop, then it exit()s */
+    pthread_join(vth, NULL);
+#endif
     return g_exit_code;
 }

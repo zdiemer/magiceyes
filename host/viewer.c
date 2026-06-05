@@ -3,6 +3,9 @@
  * (X11/Wayland), feeds keyboard input back as GP2X buttons, and plays the PCM
  * ring the shim produces. Build with host gcc + SDL2 (NOT the ARM toolchain).
  */
+#ifdef ME_BUNDLED
+#define SDL_MAIN_HANDLED 1   /* bundled: the engine owns main(); don't link SDL2main */
+#endif
 #include <SDL2/SDL.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -82,15 +85,16 @@ static int audio_thread(void *arg) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    int scale = (argc > 1) ? atoi(argv[1]) : 3;
+/* Run the viewer on an already-mapped shm. In the two-process build `main` maps the shm and
+   calls this; in the single-process bundle the engine passes its in-process g_shm here from a
+   worker thread (host/engine/main.c) -- same pointer the engine writes, so input/audio/frames
+   need no transport. */
+int viewer_run(gp2x_shm_t *shm_in, int scale) {
+    shm = shm_in;
     if (scale < 1) scale = 1;
-
-    int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (fd < 0) { perror("shm_open"); return 1; }
-    if (ftruncate(fd, sizeof(gp2x_shm_t)) != 0) { /* may pre-exist */ }
-    shm = mmap(NULL, sizeof(gp2x_shm_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (shm == MAP_FAILED) { perror("mmap"); return 1; }
+#ifdef ME_BUNDLED
+    SDL_SetMainReady();                /* required when SDL_MAIN_HANDLED is set */
+#endif
 
     /* When PULSE_SERVER is set the box is running PulseAudio (possibly over a
        socket, e.g. a remote/containerised display); SDL may otherwise default to
@@ -183,3 +187,16 @@ int main(int argc, char **argv) {
     SDL_Quit();
     return 0;
 }
+
+#ifndef ME_BUNDLED
+int main(int argc, char **argv) {
+    int scale = (argc > 1) ? atoi(argv[1]) : 3;
+
+    int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (fd < 0) { perror("shm_open"); return 1; }
+    if (ftruncate(fd, sizeof(gp2x_shm_t)) != 0) { /* may pre-exist */ }
+    gp2x_shm_t *m = mmap(NULL, sizeof(gp2x_shm_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { perror("mmap"); return 1; }
+    return viewer_run(m, scale);
+}
+#endif
