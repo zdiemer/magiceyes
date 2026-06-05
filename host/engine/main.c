@@ -144,7 +144,9 @@ static void *helper_thread(void *arg) {
     return NULL;
 }
 
-#define ME_VERSION "0.2"
+#ifndef ME_VERSION
+#define ME_VERSION "0.2.0-dev"   /* release builds inject the tag via -DME_VERSION (build_bundle_win.sh) */
+#endif
 static void print_usage(const char *p0) {
     fprintf(stderr,
         "magiceyes - run GP2X/Wiz games on a PC\n"

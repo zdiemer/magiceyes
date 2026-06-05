@@ -1,0 +1,44 @@
+name: CI
+
+# Build the native Windows bundle (magiceyes.exe) on every push/PR so it never silently breaks.
+# Cross-compiles with MinGW-w64 on an Ubuntu runner -- the same path as host/win/build_release.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  windows-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
+                                  cmake ninja-build python3 wget
+
+      - name: Cache Unicorn fork (Windows static lib)
+        uses: actions/cache@v4
+        with:
+          path: ~/me-unicorn-fork
+          key: unicorn-fork-win-v1-${{ hashFiles('host/engine/fork-patches/*.py') }}
+
+      - name: Cache SDL2 MinGW devel
+        uses: actions/cache@v4
+        with:
+          path: ~/sdl2-mingw
+          key: sdl2-mingw-2.30.9
+
+      - name: Build bundle
+        run: bash host/win/build_release.sh "ci-${GITHUB_SHA::8}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magiceyes-win64
+          path: dist/*.zip
+          if-no-files-found: error

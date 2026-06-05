@@ -14,9 +14,12 @@ CC=x86_64-w64-mingw32-gcc
 [ -f "$FORK/build-win/libunicorn.a" ] || { echo "no Windows fork lib ($FORK/build-win); run host/win/build_fork_win.sh"; exit 1; }
 [ -f "$SDL/include/SDL2/SDL.h" ]      || { echo "no SDL2 mingw at $SDL (run host/win/get_sdl2.sh)"; exit 1; }
 mkdir -p "$REPO/bin"
+# Optional version stamp for releases: MAGICEYES_VERSION=0.2.0 -> -DME_VERSION="0.2.0".
+DEFS=(-DME_BUNDLED)
+[ -n "${MAGICEYES_VERSION:-}" ] && DEFS+=(-DME_VERSION="\"${MAGICEYES_VERSION}\"")
 # SDL2 is linked dynamically (ship SDL2.dll); libgcc + winpthread are linked statically so the
 # only runtime DLL dependency is SDL2.dll.
-$CC -O2 -Wall -DME_BUNDLED -o "$REPO/bin/magiceyes.exe" \
+$CC -O2 -Wall "${DEFS[@]}" -o "$REPO/bin/magiceyes.exe" \
   "$REPO"/host/engine/*.c "$REPO/host/viewer.c" "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/host/engine" -I "$FORK/include" \
   -I "$REPO/guest/src" -I "$SDL/include" \

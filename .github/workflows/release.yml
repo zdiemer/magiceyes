@@ -1,0 +1,46 @@
+name: Release
+
+# Push a tag like v0.2.0 -> build the version-stamped Windows bundle and publish a GitHub release
+# with magiceyes-<version>-win64.zip attached.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
+                                  cmake ninja-build python3 wget
+
+      - name: Cache Unicorn fork (Windows static lib)
+        uses: actions/cache@v4
+        with:
+          path: ~/me-unicorn-fork
+          key: unicorn-fork-win-v1-${{ hashFiles('host/engine/fork-patches/*.py') }}
+
+      - name: Cache SDL2 MinGW devel
+        uses: actions/cache@v4
+        with:
+          path: ~/sdl2-mingw
+          key: sdl2-mingw-2.30.9
+
+      - name: Build + package (version from tag)
+        run: bash host/win/build_release.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --title "magiceyes $GITHUB_REF_NAME" \
+            --generate-notes
