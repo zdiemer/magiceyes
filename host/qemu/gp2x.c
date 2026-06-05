@@ -216,7 +216,16 @@ abi_long gp2x_write(int fd, abi_long buf, abi_long count) {
     if (count <= 0) return 0;
     void *p = lock_user(VERIFY_READ, buf, count, 1);
     if (!p) return -TARGET_EFAULT;
+    /* The game opens /dev/dsp O_WRONLY and relies on write() pacing it to real time
+       (Payback's AMA decoder otherwise dumps a whole song at ~750x). We store the
+       PCM into the ring without ever blocking on the viewer (gp2x_dsp_write drops
+       oldest if the ring is full), then sleep just enough to track real time — the
+       OSS blocking-write behaviour, but bounded to ~one fragment so an audio-backend
+       stall can never freeze the game's render thread via a held mixer mutex. */
     uint32_t n = gp2x_dsp_write(g_dev, p, (uint32_t)count);
     unlock_user(p, buf, 0);
-    return n;                                /* OSS: bytes accepted (GETOSPACE-gated) */
+    for (uint32_t us = gp2x_dsp_pace_us(g_dev); us; us = gp2x_dsp_pace_us(g_dev)) {
+        usleep(us > 20000 ? 20000 : us);
+    }
+    return n;
 }

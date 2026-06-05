@@ -36,8 +36,10 @@ struct gp2x_dev {
 
     /* audio (OSS /dev/dsp) */
     uint32_t    aud_freq, aud_ch, aud_bits;
-    double      aud_t0;
-    int         aud_on;
+    uint32_t    aud_fmt;          /* SDL audio format word for the viewer */
+    double      prod_t0;          /* wall-clock epoch for producer real-time pacing */
+    uint64_t    prod_bytes;       /* bytes the game has written since prod_t0 */
+    int         prod_on;
     uint32_t    last_hb;          /* last seen viewer heartbeat */
     double      last_hb_t;        /* host time it last changed */
     int         debug;            /* ME_GP2X_DEBUG: log regions + present decisions */
@@ -56,7 +58,7 @@ static double host_now(void) {
 gp2x_dev_t *gp2x_open(void) {
     gp2x_dev_t *d = calloc(1, sizeof *d);
     if (!d) return NULL;
-    d->aud_freq = 44100; d->aud_ch = 2; d->aud_bits = 16;
+    d->aud_freq = 44100; d->aud_ch = 2; d->aud_bits = 16; d->aud_fmt = 0x8010; /* S16LSB */
     d->t0 = host_now();
     d->debug = getenv("ME_GP2X_DEBUG") != NULL;
 
@@ -113,17 +115,20 @@ static void *phys_to_host(gp2x_dev_t *d, uint32_t phys) {
 }
 
 /* ---- timer ---- */
-/* The GP2X MMSP2 system timer (TCOUNT @ 0x0a00) runs at 14.7456 MHz (= 2x the
-   7.3728 MHz reference crystal). Games pace frames by busy-waiting on it; Payback
-   waits 245760 ticks/frame == 1/60s at this rate, so the correct rate yields
-   60fps. Crucially the *simulation speed* is NOT timer-coupled (it is real-time
-   clocked elsewhere): measured world-scroll speed is identical at 7.3728 and
-   14.7456 MHz (~64 px/s), only the frame rate changes (30 -> 60fps). So 14.7456
-   is the right value -- it doubles fps with no change in game speed. (7.3728 was
-   half-rate: correct speed but capped at 30fps; 1 MHz was the old slow-motion
-   bug, ~7.4x too slow.) ME_GP2X_TIMESCALE=N overrides to N *MHz* (NOT an Nx
-   multiplier) for experiments -- so =1 is 1 MHz, not "1x". */
-#define GP2X_TIMER_HZ 14745600.0
+/* The GP2X MMSP2 system timer (TCOUNT @ 0x0a00) reads at 7.3728 MHz (the
+   reference crystal). Payback paces frames by busy-waiting on TCOUNT (245760
+   ticks/frame) AND derives its simulation dt from the same counter, so the timer
+   rate sets BOTH the frame rate and the game speed together: at 7.3728 MHz it
+   runs at its intended speed and ~30fps. We cannot reach 60fps just by doubling
+   the rate -- 14.7456 MHz gives 60fps but runs the whole game ~2x too fast
+   (operator-confirmed in hands-on play). A genuine 60fps would need decoupling
+   the game's dt from its frame pacing (a per-title patch), not a timer change.
+   (1 MHz was the old slow-motion bug, ~7.4x too slow. An earlier world-scroll
+   measurement wrongly suggested the speed was timer-independent -- it only
+   sampled on-foot walking, which is velocity-clamped, so it missed the coupling.)
+   ME_GP2X_TIMESCALE=N overrides to N *MHz* (NOT an Nx multiplier) -- so =1 is
+   1 MHz, not "1x"; e.g. =9 would run a touch faster than the 7.3728 default. */
+#define GP2X_TIMER_HZ 7372800.0
 uint32_t gp2x_timer_us(gp2x_dev_t *d) {
     double hz = GP2X_TIMER_HZ;
     const char *s = getenv("ME_GP2X_TIMESCALE");
@@ -237,31 +242,18 @@ void gp2x_tick(gp2x_dev_t *d) {
     present_active(d);
 }
 
-/* ---- /dev/dsp (OSS) audio ring ---- */
-static void aud_drain(gp2x_dev_t *d) {
-    if (!d->shm) return;
-    /* Diagnostic: instant drain — keep the ring empty so the game never blocks
-       on /dev/dsp and writes audio at its *true* (game-speed-coupled) rate.
-       a_write delta/sec then measures whether the simulation runs at real time. */
-    if (getenv("ME_GP2X_AUDIO_FREERUN")) { d->shm->a_read = d->shm->a_write; return; }
-    double now = host_now();
-    /* If a viewer is attached it consumes the ring via real playback and owns
-       a_read; advancing a_read here too would double-drain it (underruns/stutter).
-       Detect the viewer by its heartbeat and yield a_read to it. */
-    uint32_t hb = d->shm->viewer_heartbeat;
-    if (hb != d->last_hb) { d->last_hb = hb; d->last_hb_t = now; }
-    if (now - d->last_hb_t < 0.5) { d->aud_on = 0; return; }  /* viewer alive */
-    /* headless: advance a_read as if played in real time so the ring drains and
-       the game keeps producing at the right rate. */
-    if (!d->aud_on) { d->aud_t0 = now; d->aud_on = 1; }
-    uint32_t bps = d->aud_freq * d->aud_ch * (d->aud_bits / 8);
-    if (!bps) return;
-    uint64_t consumed = (uint64_t)((now - d->aud_t0) * bps);
-    if (consumed > d->shm->a_write) consumed = d->shm->a_write;
-    if (consumed > d->shm->a_read) d->shm->a_read = (uint32_t)consumed;
-}
+/* ---- /dev/dsp (OSS) audio ring ----
+
+   Pacing model: the game's audio thread writes PCM to /dev/dsp; on real OSS the
+   write blocks until the DAC has played enough, which both paces the game to real
+   time AND (critically) only ever stalls it ~one fragment (~90ms). We reproduce
+   that with WALL-CLOCK pacing (gp2x_dsp_pace_us, slept by the caller) instead of
+   blocking on the viewer's a_read: if we block on the viewer and the audio backend
+   wedges for ~1s, the audio thread would hold its mixer mutex that long and freeze
+   rendering. gp2x_dsp_write therefore NEVER blocks — if the ring is full (the
+   viewer stalled) it drops the oldest audio to make room, keeping the game running
+   and the viewer current once it recovers. */
 static uint32_t aud_free(gp2x_dev_t *d) {
-    aud_drain(d);
     if (!d->shm) return 0;
     uint32_t used = d->shm->a_write - d->shm->a_read;
     return used < GP2XSHM_ARING ? GP2XSHM_ARING - used : 0;
@@ -269,16 +261,41 @@ static uint32_t aud_free(gp2x_dev_t *d) {
 
 uint32_t gp2x_dsp_write(gp2x_dev_t *d, const void *pcm, uint32_t n) {
     if (!d || !d->shm) return n;
-    uint32_t fr = aud_free(d);
-    if (n > fr) n = fr;
-    if (n) {
-        uint32_t w = d->shm->a_write % GP2XSHM_ARING, first = GP2XSHM_ARING - w;
-        if (first > n) first = n;
-        memcpy(d->shm->aring + w, pcm, first);
-        if (n > first) memcpy(d->shm->aring, (const uint8_t *)pcm + first, n - first);
-        d->shm->a_write += n;
+    if (getenv("ME_GP2X_AUDIO_FREERUN")) { d->shm->a_read = d->shm->a_write; }
+    if (n > GP2XSHM_ARING) n = GP2XSHM_ARING;
+    uint32_t used = d->shm->a_write - d->shm->a_read;
+    uint32_t freeb = used < GP2XSHM_ARING ? GP2XSHM_ARING - used : 0;
+    if (n > freeb) {                       /* consumer stalled: drop oldest, never block */
+        uint32_t frame = d->aud_ch * (d->aud_bits / 8); if (frame < 1) frame = 1;
+        uint32_t drop = ((n - freeb + frame - 1) / frame) * frame;
+        if (drop > used) drop = used;
+        d->shm->a_read += drop;
     }
+    uint32_t w = d->shm->a_write % GP2XSHM_ARING, first = GP2XSHM_ARING - w;
+    if (first > n) first = n;
+    memcpy(d->shm->aring + w, pcm, first);
+    if (n > first) memcpy(d->shm->aring, (const uint8_t *)pcm + first, n - first);
+    d->shm->a_write += n;
+    d->prod_bytes += n;
     return n;
+}
+
+/* Microseconds the caller should sleep so the game's audio output tracks real time
+   (the OSS-blocking-write pacing, without ever blocking on the viewer). 0 = on time
+   or behind; rebases on a >0.25s gap so banked idle time can't burst. */
+uint32_t gp2x_dsp_pace_us(gp2x_dev_t *d) {
+    uint32_t bps = d->aud_freq * d->aud_ch * (d->aud_bits / 8);
+    if (!bps) return 0;
+    double now = host_now();
+    if (!d->prod_on) { d->prod_on = 1; d->prod_t0 = now; d->prod_bytes = 0; }
+    double allowed = (now - d->prod_t0) * bps;
+    if ((double)d->prod_bytes > allowed) {
+        return (uint32_t)(((double)d->prod_bytes - allowed) / bps * 1e6);
+    }
+    if (allowed > (double)d->prod_bytes + bps * 0.25) {   /* long idle: restart clock */
+        d->prod_t0 = now; d->prod_bytes = 0;
+    }
+    return 0;
 }
 
 /* ---- /dev/fb0,fb1 screeninfo (Linux fbdev ABI, 32-bit ARM target) ---- */
@@ -314,13 +331,16 @@ int gp2x_dsp_ioctl(gp2x_dev_t *d, uint32_t cmd, void *arg, uint32_t *outlen) {
     case GP2X_DSP_SPEED:    if (v) d->aud_freq = v; break;
     case GP2X_DSP_STEREO:   d->aud_ch = v ? 2 : 1; break;
     case GP2X_DSP_CHANNELS: if (v) d->aud_ch = v; break;
-    case GP2X_DSP_SETFMT:   d->aud_bits = (v == 8 /*AFMT_U8*/) ? 8 : 16; break;
+    case GP2X_DSP_SETFMT:   /* OSS AFMT -> bits + SDL format word for the viewer */
+        if (v == 8 /*AFMT_U8*/)        { d->aud_bits = 8;  d->aud_fmt = 0x0008; } /* U8 */
+        else if (v == 32 /*S16_BE*/)   { d->aud_bits = 16; d->aud_fmt = 0x9010; } /* S16MSB */
+        else /* 16 = AFMT_S16_LE */    { d->aud_bits = 16; d->aud_fmt = 0x8010; } /* S16LSB */
+        break;
     case GP2X_DSP_GETBLKSIZE: v = 4096; break;
     case GP2X_DSP_SETFRAGMENT: break;                 /* accept as-is */
     case GP2X_DSP_GETFMTS:  v = 0x18; break;           /* S16_LE | U8 */
     case GP2X_DSP_GETCAPS:  v = 0; break;
     case GP2X_DSP_GETODELAY:
-        aud_drain(d);
         v = d->shm ? (d->shm->a_write - d->shm->a_read) : 0;
         break;
     case GP2X_DSP_GETOSPACE: {  /* audio_buf_info{fragments,fragstotal,fragsize,bytes} */
@@ -337,10 +357,15 @@ int gp2x_dsp_ioctl(gp2x_dev_t *d, uint32_t cmd, void *arg, uint32_t *outlen) {
         if (outlen) *outlen = 0;
         return 0;
     }
-    /* publish the negotiated format so the viewer opens the right audio device */
+    /* publish the negotiated format so the viewer opens the right audio device.
+       Honour the game's SNDCTL_DSP_SETFMT (recorded in aud_fmt) rather than
+       guessing: Payback sets AFMT_S16_LE and writes little-endian S16, all in
+       frame-aligned 16384-byte chunks. (An earlier "it's big-endian" read was a
+       false positive from analysing the ring at a mid-frame a_read offset, before
+       the drain was frame-aligned.) */
     if (d->shm) {
         d->shm->audio_freq = d->aud_freq;
-        d->shm->audio_format = (d->aud_bits == 8) ? 0x0008u : 0x8010u; /* U8/S16LSB */
+        d->shm->audio_format = d->aud_fmt;
         d->shm->audio_channels = d->aud_ch;
         d->shm->audio_active = 1;
     }

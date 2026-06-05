@@ -296,6 +296,13 @@ def patch_userexec():
         "static void gp2x_smc_note_fault(target_ulong address)\n"
         "{\n"
         "    target_ulong pg;\n"
+        "    if (getenv(\"ME_GP2X_SMCLOG\")) {\n"
+        "        static unsigned long n;\n"
+        "        if ((++n % 20000) == 0) {\n"
+        "            fprintf(stderr, \"[gp2x] SMC faults=%lu last page=%08x\\n\",\n"
+        "                    n, (uint32_t)(address & TARGET_PAGE_MASK));\n"
+        "        }\n"
+        "    }\n"
         "    if (getenv(\"ME_GP2X_NOSMCFREEZE\")) {\n"
         "        return;\n"
         "    }\n"
@@ -368,6 +375,90 @@ def patch_userexec():
     print("  user-exec.c patched (SMC-freeze)")
 
 
+def patch_tcg():
+    """Enlarge the TCG code-gen buffer for GP2X (tcg/region.c). The stock 128MB
+    user-mode buffer fills during sustained gameplay and the resulting global
+    tb_flush is a ~1-2s freeze of every guest thread; a large buffer makes flushes
+    effectively never happen. Also add an env-gated tb_flush log (tb-maint.c) used
+    to diagnose this class of stutter."""
+    region = os.path.join(QEMU, "tcg", "region.c")
+    with open(region) as f:
+        s = f.read()
+    if "ME_GP2X_TBSIZE_MB" in s:
+        print("  region.c already patched")
+    else:
+        old = (
+            "    /* Size the buffer.  */\n"
+            "    if (tb_size == 0) {\n"
+            "        size_t phys_mem = qemu_get_host_physmem();\n"
+            "        if (phys_mem == 0) {\n"
+            "            tb_size = DEFAULT_CODE_GEN_BUFFER_SIZE;\n"
+            "        } else {\n"
+            "            tb_size = QEMU_ALIGN_DOWN(phys_mem / 8, page_size);\n"
+            "            tb_size = MIN(DEFAULT_CODE_GEN_BUFFER_SIZE, tb_size);\n"
+            "        }\n"
+            "    }\n"
+        )
+        new = (
+            "    /* Size the buffer.  */\n"
+            "    if (tb_size == 0) {\n"
+            "#ifdef CONFIG_GP2X\n"
+            "        /* GP2X games keep a large working set of translated code, so the\n"
+            "           stock 128MB user buffer fills during play and the resulting\n"
+            "           global tb_flush is a 1-2s freeze. Use a much larger buffer so\n"
+            "           flushes are rare; tunable via ME_GP2X_TBSIZE_MB. */\n"
+            "        const char *e = getenv(\"ME_GP2X_TBSIZE_MB\");\n"
+            "        tb_size = (size_t)(e ? atoi(e) : 1024) * MiB;\n"
+            "#else\n"
+            "        size_t phys_mem = qemu_get_host_physmem();\n"
+            "        if (phys_mem == 0) {\n"
+            "            tb_size = DEFAULT_CODE_GEN_BUFFER_SIZE;\n"
+            "        } else {\n"
+            "            tb_size = QEMU_ALIGN_DOWN(phys_mem / 8, page_size);\n"
+            "            tb_size = MIN(DEFAULT_CODE_GEN_BUFFER_SIZE, tb_size);\n"
+            "        }\n"
+            "#endif\n"
+            "    }\n"
+        )
+        if old not in s:
+            sys.exit("ERROR: region.c tb_size anchor not found")
+        s = s.replace(old, new)
+        with open(region, "w") as f:
+            f.write(s)
+        print("  region.c patched (GP2X TCG buffer)")
+
+    maint = os.path.join(QEMU, "accel", "tcg", "tb-maint.c")
+    with open(maint) as f:
+        s = f.read()
+    if "ME_GP2X_TBFLUSHLOG" in s:
+        print("  tb-maint.c already patched")
+        return
+    old = (
+        "    did_flush = true;\n"
+        "\n"
+        "    CPU_FOREACH(cpu) {\n"
+    )
+    new = (
+        "    did_flush = true;\n"
+        "\n"
+        "#ifdef CONFIG_GP2X\n"
+        "    if (getenv(\"ME_GP2X_TBFLUSHLOG\")) {\n"
+        "        fprintf(stderr, \"[gp2x] tb_flush #%u (code buffer full -> global \"\n"
+        "                \"re-translate)\\n\", tb_ctx.tb_flush_count + 1);\n"
+        "    }\n"
+        "#endif\n"
+        "\n"
+        "    CPU_FOREACH(cpu) {\n"
+    )
+    if old not in s:
+        print("  tb-maint.c anchor not found (skipping flush log)")
+        return
+    s = s.replace(old, new)
+    with open(maint, "w") as f:
+        f.write(s)
+    print("  tb-maint.c patched (tb_flush log)")
+
+
 def patch_meson():
     path = os.path.join(LU, "meson.build")
     with open(path) as f:
@@ -393,6 +484,7 @@ def main():
     patch_syscall()
     patch_main()
     patch_userexec()
+    patch_tcg()
     patch_meson()
     print("apply_gp2x: done")
 

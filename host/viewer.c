@@ -1,6 +1,6 @@
 /* Native x86 SDL2 viewer for the GP2X shim.
  * Maps /dev/shm/gp2x_fb, shows the RGB565 framebuffer in a scaled window
- * (WSLg/X11), feeds keyboard input back as GP2X buttons, and plays the PCM
+ * (X11/Wayland), feeds keyboard input back as GP2X buttons, and plays the PCM
  * ring the shim produces. Build with host gcc + SDL2 (NOT the ARM toolchain).
  */
 #include <SDL2/SDL.h>
@@ -13,18 +13,73 @@
 #include "gp2xshm.h"
 
 static gp2x_shm_t *shm;
-static unsigned long long g_consumed = 0;
-static int g_underruns = 0, g_cb_calls = 0;
+static unsigned long long g_consumed = 0;   /* real audio bytes played (B/s stat) */
+static unsigned long long g_fed = 0;        /* all bytes queued incl. silence pad */
 
-static void audio_cb(void *ud, Uint8 *stream, int len) {
-    (void)ud;
-    uint32_t w = shm->a_write, r = shm->a_read;
-    uint32_t avail = w - r;                 /* unsigned wrap-safe */
-    int n = (int)avail; if (n > len) n = len;
-    for (int i = 0; i < n; i++) stream[i] = shm->aring[(r + i) % GP2XSHM_ARING];
-    if (n < len) { memset(stream + n, 0, len - n); g_underruns++; }
-    shm->a_read = r + n;
-    g_consumed += n; g_cb_calls++;
+/* Audio runs on its OWN thread: SDL_CloseAudioDevice/OpenAudioDevice can take up
+   to ~1s on some audio backends, so reopening a wedged device from the render loop
+   would freeze the whole window. Here a reopen only stalls audio, never rendering. */
+static int audio_thread(void *arg) {
+    (void)arg;
+    SDL_AudioDeviceID adev = 0; int audio_open = 0;
+    unsigned long long wd_played = 0; Uint32 wd_t = 0, stat_t = 0;
+    while (!shm->quit) {
+        if (!audio_open && shm->audio_active && shm->audio_freq) {
+            SDL_AudioSpec want, have;
+            memset(&want, 0, sizeof(want));
+            want.freq = (int)shm->audio_freq;
+            want.format = (Uint16)shm->audio_format;
+            want.channels = (Uint8)shm->audio_channels;
+            want.samples = 4096;                  /* device buffer */
+            want.callback = NULL;                 /* queue (push) mode */
+            adev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+            if (adev) { audio_open = 1; SDL_PauseAudioDevice(adev, 0);
+                fprintf(stderr, "viewer: audio %dHz fmt=%04x ch=%d (queue mode)\n",
+                        want.freq, want.format, want.channels); }
+            else { fprintf(stderr, "viewer: SDL_OpenAudioDevice failed: %s\n",
+                           SDL_GetError()); SDL_Delay(100); }
+        }
+        if (audio_open) {
+            uint32_t frame = shm->audio_channels * 2; if (frame < 2) frame = 4;
+            uint32_t bps = shm->audio_freq * frame;
+            uint32_t target = bps / 5;            /* keep ~200ms queued */
+            uint32_t queued = SDL_GetQueuedAudioSize(adev);
+            uint32_t avail = shm->a_write - shm->a_read;
+            if (queued < target) {
+                uint32_t n = target - queued; if (n > avail) n = avail; n -= n % frame;
+                if (n) {
+                    uint32_t r = shm->a_read % GP2XSHM_ARING;
+                    uint32_t first = GP2XSHM_ARING - r; if (first > n) first = n;
+                    SDL_QueueAudio(adev, shm->aring + r, first);
+                    if (n > first) SDL_QueueAudio(adev, shm->aring, n - first);
+                    shm->a_read += n; g_consumed += n; g_fed += n;
+                }
+                /* pad with silence on a producer gap so the device never underruns */
+                uint32_t still = target - SDL_GetQueuedAudioSize(adev); still -= still % frame;
+                if (still) {
+                    static uint8_t zeros[8192];
+                    for (uint32_t z = still; z; ) { uint32_t c = z > sizeof(zeros) ? sizeof(zeros) : z;
+                        SDL_QueueAudio(adev, zeros, c); z -= c; }
+                    g_fed += still;
+                }
+            }
+            /* watchdog on PLAYED = fed - queued (advances even through silence). A
+               reopen here only blocks THIS thread, not rendering. */
+            unsigned long long played = g_fed - SDL_GetQueuedAudioSize(adev);
+            Uint32 nowt = SDL_GetTicks(); if (!wd_t) wd_t = nowt;
+            if (played != wd_played) { wd_played = played; wd_t = nowt; }
+            else if (nowt - wd_t > 500) {
+                SDL_CloseAudioDevice(adev); audio_open = 0; wd_t = nowt;
+                fprintf(stderr, "viewer: audio device stalled -> reopening\n");
+            }
+            if (nowt - stat_t >= 4000) { stat_t = nowt;
+                fprintf(stderr, "viewer audio: fed=%llu queued=%u ring=%u\n",
+                        g_fed, SDL_GetQueuedAudioSize(adev), shm->a_write - shm->a_read); }
+        }
+        SDL_Delay(4);
+    }
+    if (audio_open) SDL_CloseAudioDevice(adev);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -36,6 +91,18 @@ int main(int argc, char **argv) {
     if (ftruncate(fd, sizeof(gp2x_shm_t)) != 0) { /* may pre-exist */ }
     shm = mmap(NULL, sizeof(gp2x_shm_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (shm == MAP_FAILED) { perror("mmap"); return 1; }
+
+    /* When PULSE_SERVER is set the box is running PulseAudio (possibly over a
+       socket, e.g. a remote/containerised display); SDL may otherwise default to
+       a backend (ALSA) with no usable device and fail to open. Prefer PulseAudio
+       in that case, unless the user pinned SDL_AUDIODRIVER. Harmless on a normal
+       desktop, where PULSE_SERVER is usually unset and SDL autodetects. */
+    if (getenv("PULSE_SERVER") && !getenv("SDL_AUDIODRIVER")) {
+        setenv("SDL_AUDIODRIVER", "pulseaudio", 1);
+    }
+    /* Request a generous PulseAudio server buffer; some setups otherwise drop the
+       stream under latency spikes. */
+    if (!getenv("PULSE_LATENCY_MSEC")) setenv("PULSE_LATENCY_MSEC", "120", 1);
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1;
@@ -51,7 +118,7 @@ int main(int argc, char **argv) {
         SDL_TEXTUREACCESS_STREAMING, w, h);
     int cur_w = w, cur_h = h;
 
-    int audio_open = 0, audio_started = 0;
+    SDL_Thread *ath = SDL_CreateThread(audio_thread, "gp2x-audio", NULL);
     uint32_t last_seq = ~0u;
     int running = 1;
 
@@ -85,31 +152,9 @@ int main(int argc, char **argv) {
         if (k[SDL_SCANCODE_RSHIFT] || k[SDL_SCANCODE_BACKSPACE]) b |= 1u << GP2X_SELECT;
         if (k[SDL_SCANCODE_Q]) b |= 1u << GP2X_L;
         if (k[SDL_SCANCODE_W]) b |= 1u << GP2X_R;
-        shm->buttons = b;
+        if (!getenv("ME_VIEWER_NOINPUT")) shm->buttons = b;  /* allow scripted input */
 
-        /* late audio open once the shim advertises a format */
-        if (!audio_open && shm->audio_active && shm->audio_freq) {
-            SDL_AudioSpec want;
-            memset(&want, 0, sizeof(want));
-            want.freq = (int)shm->audio_freq;
-            want.format = (Uint16)shm->audio_format;
-            want.channels = (Uint8)shm->audio_channels;
-            want.samples = 1024;
-            want.callback = audio_cb;
-            /* obtained=NULL -> SDL2 converts hardware format to exactly `want`,
-               so our callback always receives ring-matching PCM. Opens PAUSED. */
-            if (SDL_OpenAudio(&want, NULL) == 0) { audio_open = 1;
-                fprintf(stderr, "viewer: audio %dHz fmt=%04x ch=%d (prebuffering)\n",
-                        want.freq, want.format, want.channels); }
-            else fprintf(stderr, "viewer: SDL_OpenAudio failed: %s\n", SDL_GetError());
-        }
-        /* start playback only once the producer has built up a cushion */
-        if (audio_open && !audio_started &&
-            (shm->a_write - shm->a_read) >= 10000) {
-            SDL_PauseAudio(0); audio_started = 1;
-            fprintf(stderr, "viewer: playback started (ring=%u)\n",
-                    shm->a_write - shm->a_read);
-        }
+        /* audio is serviced on its own thread (see audio_thread) */
 
         /* resize texture if the game changed mode */
         if ((int)shm->width != cur_w || (int)shm->height != cur_h) {
@@ -122,14 +167,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        { static Uint32 t0 = 0, tp = 0;
-          Uint32 now = SDL_GetTicks(); if (!t0) t0 = now;
-          if (now - tp >= 2000) { tp = now;
-            double secs = (now - t0) / 1000.0;
-            fprintf(stderr, "viewer audio: %.0f B/s (want %d), underruns=%d/%d, ring=%u\n",
-                    g_consumed / (secs > 0 ? secs : 1), shm->audio_freq * shm->audio_channels * 2,
-                    g_underruns, g_cb_calls, shm->a_write - shm->a_read); } }
-
         if (shm->frame_seq != last_seq && cur_w > 0) {
             last_seq = shm->frame_seq;
             /* shm rows are GP2XSHM_MAXW wide; upload only cur_w x cur_h */
@@ -141,7 +178,8 @@ int main(int argc, char **argv) {
             SDL_Delay(5);
         }
     }
-    if (audio_open) SDL_CloseAudio();
+    shm->quit = 1;                     /* signal the audio thread to exit */
+    if (ath) SDL_WaitThread(ath, NULL);
     SDL_Quit();
     return 0;
 }

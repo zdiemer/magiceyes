@@ -1,7 +1,8 @@
 #!/bin/bash
 # Interactive GP2X run on the magiceyes qemu-user backend: launch the SDL2 viewer
-# (window + keyboard + audio, via WSLg) alongside the patched qemu-arm running a
-# decompressed static GP2X binary. The viewer and engine rendezvous on the shm
+# (window + keyboard + audio, on any X11/Wayland Linux desktop) alongside the
+# patched qemu-arm running a decompressed static GP2X binary. The viewer and engine
+# rendezvous on the shm
 # framebuffer (/dev/shm/gp2x_fb). Ctrl-C or closing the window stops both.
 #
 # usage: run-gp2x-qemu.sh <decompressed-static-binary> [scale]

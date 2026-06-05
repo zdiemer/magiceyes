@@ -14,13 +14,15 @@ and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too
   and **Cave Story / NXEngine** both render with correct **video, audio, input, and
   timing**. Backend = qemu-user + our **fake-SDL shim** (`guest/`) + native SDL2
   **viewer** (`host/viewer.c`).
-- **GP2X, playable end-to-end @ 60fps** (qemu backend): **Payback** (commercial, static)
-  boots → menus → **gameplay** with **video @ a solid 60fps (correct full speed),
-  audio, input, native threads, and no crash**, via the **forked qemu-user backend**
-  (`host/qemu/`). Three fixes got it there (details below): the **SMC-freeze**
+- **GP2X, playable end-to-end @ 30fps** (qemu backend): **Payback** (commercial, static)
+  boots → menus → **gameplay** with **video @ a solid 30fps (the hardware-correct rate,
+  correct game speed), audio, input, native threads, and no crash**, via the **forked
+  qemu-user backend** (`host/qemu/`). Key fixes (details below): the **SMC-freeze**
   (`apply_gp2x.py`; killed the .iwram false-SMC thrash that capped CPU), the
-  **LinuxThreads worker-exit** fix (`apply_gp2x.py`; the AMA-audio "crash"), and the
-  **14.7456 MHz TCOUNT rate** (`gp2x_device.c`; the frame-pacing timer — 30→60fps).
+  **LinuxThreads worker-exit** fix (`apply_gp2x.py`; the AMA-audio "crash"), the **large
+  TCG buffer** (no tb_flush stutter), and **wall-clock audio pacing + a threaded
+  push-model viewer** (audio glitches can't freeze rendering). Gameplay is stutter-free;
+  remaining audio choppiness on WSLg is a known backend bug (issue #908), not ours.
   This is the chosen path
   (the QEMU pivot, below). (Gotcha: the game needs `Data/Config/*.ini` readable+writable —
   mode-000 ini files caused EACCES and stuck the menu; `chmod -R u+rwX Data/`.) The
@@ -214,7 +216,7 @@ Hooks (~9k/s) and mmap churn (now free-listed) are NOT the bottleneck.
 
 **The QEMU plan — DONE & PLAYABLE (`host/qemu/`).** Forked **qemu-user** (`qemu-arm` v8.2.2):
 same TCG JIT but full chaining + native threads/signals/fork, so Payback runs **menus AND
-gameplay at a steady 60fps with audio + no crash** and the entire hand-rolled scheduler/
+gameplay at a steady 30fps with audio + no crash** and the entire hand-rolled scheduler/
 signal/sync-fork machinery is gone.
 GP2X games are *static* (can't `LD_PRELOAD` — that's the Wiz path), so we **patch
 `linux-user/`** to intercept the GP2X devices (`host/qemu/gp2x.c` + the engine-agnostic
@@ -238,7 +240,7 @@ this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
 
 **Two fixes that made it playable (both reproduced by `apply_gp2x.py`):**
 - **SMC-freeze** (`accel/tcg/user-exec.c`) — *the* CPU-cost fix that lets rendering reach the
-  timer's frame cap: with it gameplay hits the full **60fps**; without it the re-translation
+  timer's frame cap: with it gameplay hits the full **30fps**; without it the re-translation
   thrash caps gameplay at **6.6fps** (and CPU at 84% vs 10%).
   Payback's RWE segment has the GP2X **`.iwram*` scratch sections (executable) interleaved
   with `.text`**, so a hot data variable (`0x19a444`) shares a page with hot code
@@ -261,22 +263,46 @@ this unifies Wiz+GP2X under qemu). Unicorn stays as a fallback.
   temporary exit_group backtrace dump — pc/lr + bl-preceded stack scan — not shipped, since
   walking a dying thread's stack can itself fault during teardown.)
 
-**Framerate / timer — the TCOUNT rate is 14.7456 MHz (= 60fps).** Payback's frame loop spins
-on `nanosleep` until **TCOUNT** (MMSP2 timer @0x0a00) advances **245760 ticks/frame**; the game
-was written assuming a **14.7456 MHz** timer (245760 = 14745600/60 = 2× the 7.3728 MHz reference
-crystal), so at that rate it hits **60fps**. Render fps scales **linearly with the TCOUNT rate**
-(`fps ≈ 4.15 × MHz`). Critically, the **simulation speed is NOT timer-coupled** — it is real-time
-clocked elsewhere: measured world-scroll speed is the same (~64–67 px/s) at 7.3728 and 14.7456
-MHz; only the frame rate changes (30→60fps), and audio stays real-time (drain 176400 B/s) at
-both. So 14.7456 is the correct value (full speed, no speed-up) and `gp2x_device.c` now defaults
-to it. Earlier mistakes for the record: **1 MHz** = the original slow-motion bug; **7.3728 MHz**
-= half-rate (correct speed but capped at 30fps); the false "30fps is hardware-correct" read came
-from trusting the audio-drain (which is *our* wall-clock logic, so it can't validate the guest
-timer). **Gotcha: `ME_GP2X_TIMESCALE=N` sets the timer to `N` *MHz*, not an N× multiplier** — so
+**Framerate / timer — TCOUNT is 7.3728 MHz → 30fps, and that's correct.** Payback's frame loop
+spins on `nanosleep` until **TCOUNT** (MMSP2 timer @0x0a00) advances **245760 ticks/frame**. The
+game derives BOTH its frame pacing AND its simulation dt from TCOUNT, so the timer rate sets the
+frame rate and the game speed *together*: at the **7.3728 MHz** reference-crystal rate it runs at
+its intended speed and ~30fps. Render fps scales linearly with the rate (`fps ≈ 4.15 × MHz`), but
+so does game speed — **14.7456 MHz gives 60fps but runs the whole game ~2× too fast**
+(operator-confirmed in hands-on play; my earlier "decoupled" read was a measurement error — the
+world-scroll test only sampled on-foot walking, which is velocity-clamped). So 30fps is genuine
+hardware behaviour; a real 60fps would need a per-title patch decoupling the game's dt from its
+frame pacing, not a timer change. (For the record: **1 MHz** = the original slow-motion bug.)
+**Gotcha: `ME_GP2X_TIMESCALE=N` sets the timer to `N` *MHz*, not an N× multiplier** — so
 `ME_GP2X_TIMESCALE=1` runs at **1 MHz → a bogus 4fps**; several `tools/gp2x/*` hard-code `=1`,
-so don't trust an fps from them. To measure sim speed independent of fps, use world-scroll
-cross-correlation over a *fixed real interval* (≤0.2s sampling so the shift stays within the
-±40px search window) — `tools/gp2x/measure_scroll_speed.sh`.
+so don't trust an fps from them.
+
+**TB-flush stutter (the "1-2s freeze every ~15-30s").** qemu's user-mode code-gen buffer is
+128MB; Payback's working set fills it and the resulting global `tb_flush` freezes ALL guest
+threads for ~1-2s. NOT SMC (steady-state SMC faults are ~0 after the .iwram pages freeze). Fixed
+by a **1GB buffer** (`apply_gp2x.py` patches `tcg/region.c`; `ME_GP2X_TBSIZE_MB` to tune,
+`ME_GP2X_TBFLUSHLOG=1` to log flushes) — 0 flushes over minutes of play.
+
+**Audio pacing — wall-clock, never block on the consumer.** The game writes PCM to `/dev/dsp`
+and relies on the write *blocking* to pace its AMA decoder (else it dumps a song at ~750×). We do
+NOT block on the viewer: `gp2x_dsp_write` stores into the shm ring (dropping oldest if full) and
+`gp2x_write` then sleeps by **wall clock** (`gp2x_dsp_pace_us`) to track real time. Blocking on
+the viewer was the *stutter root cause*: when the audio backend stalled ~1s, the audio thread held
+its mixer mutex that long and froze the render thread too. Audio is **S16_LE** (honour the game's
+`SNDCTL_DSP_SETFMT`; an earlier "it's big-endian" read was a misaligned-`a_read` artifact).
+
+**Viewer audio (push model, on its own thread).** `host/viewer.c` plays the ring via
+`SDL_QueueAudio` (the pull-callback wedges on flaky backends) on a **dedicated thread**, so a
+device reopen — `SDL_Close/OpenAudioDevice` can take ~1s — never blocks rendering. A watchdog
+reopens a stalled device; silence-fill prevents underruns. Prefers the PulseAudio SDL driver when
+`PULSE_SERVER` is set. All of this is generic Linux/SDL2 (no WSL-specific code).
+
+**Known limitation — audio choppiness on WSLg.** On WSLg (Win11 + WSL2 + Ubuntu) the PulseAudio
+**RDP sink** desyncs/stutters after ~20-30s of sustained playback and gets progressively worse
+(Microsoft WSLg bug; a bare SDL/`pacat` tone with no emulator reproduces it identically). Our
+audio-thread + watchdog keep it from ever affecting **gameplay** (which is smooth), but the audio
+itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --shutdown`,
+`apt install pulseaudio`, or a less-affected distro/host.
 
 **GP2X hardware contract (worked out in Unicorn — port to qemu syscall.c):**
 - Binary: EABI structs + **OABI syscalls** (`swi #(0x900000+nr)`); glibc 2.3.6 LinuxThreads.

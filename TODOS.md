@@ -7,8 +7,8 @@ its own repo.
 ## DONE: pivoted the GP2X backend from Unicorn to forked qemu-user
 
 The qemu-user backend (`host/qemu/`) runs **Payback playable end-to-end — menus AND
-gameplay at a steady 60fps, with audio, input, and no crash** (see "GP2X SPEED + CRASH:
-RESOLVED" below for the three fixes that got it there) — versus the Unicorn backend's
+gameplay at a steady 30fps, stutter-free, with audio, input, and no crash** (see "GP2X SPEED +
+CRASH: RESOLVED" below for the fixes that got it there) — versus the Unicorn backend's
 structural ~6fps, which was the whole point of the pivot. How it shook out vs the original
 plan:
 1. **Built vanilla `qemu-arm` v8.2.2** in WSL (`host/qemu/fetch_qemu.sh`, arm-linux-user
@@ -35,10 +35,11 @@ Build: `host/qemu/build_qemu.sh`. Run: `host/qemu/run-gp2x-qemu.sh <static-binar
 The SDL2 viewer, shm contract, and `tools/gp2x/decomp_*.sh` are unchanged; the Unicorn
 backend stays as a fallback. See `host/qemu/README.md`.
 
-### GP2X SPEED + CRASH: RESOLVED — Payback is playable end-to-end @ 60fps with audio
-Payback now runs **menus AND gameplay at a steady 60fps (correct full speed), with audio,
-input, and no crash**. Trajectory: ~4fps slow-motion → 60fps. Three fixes:
-- **SMC-freeze** (`accel/tcg/user-exec.c`) — the CPU-cost fix: gameplay **6.6→60fps** (CPU
+### GP2X SPEED + CRASH: RESOLVED — Payback is playable end-to-end @ 30fps, stutter-free
+Payback now runs **menus AND gameplay at a steady 30fps (the hardware-correct rate, correct
+game speed), with audio, input, and no crash — and stutter-free**. Trajectory: ~4fps
+slow-motion → 30fps. Fixes:
+- **SMC-freeze** (`accel/tcg/user-exec.c`) — the CPU-cost fix: gameplay **6.6→30fps** (CPU
   84%→10%; without it the thrash caps rendering at 6.6fps, below the timer's frame cap).
   Payback's RWE segment interleaves the GP2X **`.iwram*` scratch sections (flagged executable)
   with `.text`**, so a hot data variable (`0x19a444`) shares a 4KB page with hot code
@@ -53,17 +54,23 @@ input, and no crash**. Trajectory: ~4fps slow-motion → 60fps. Three fixes:
   exit_group (`first_cpu != cpu`) becomes a single-thread exit. (Game now survives music
   present/absent/finished.) Diagnosed with a temporary exit_group backtrace dump (not shipped
   — walking a dying thread's stack can itself fault during teardown).
-- **TCOUNT @ 14.7456 MHz, not 7.3728** (`gp2x_device.c`) — the 30→60fps fix. The MMSP2 timer
-  runs at 14.7456 MHz (2× the 7.3728 reference crystal); Payback waits 245760 ticks/frame =
-  14745600/60, so the correct rate gives 60fps. Verified the **simulation speed is NOT
-  timer-coupled** (real-time clocked elsewhere): world-scroll speed is the same ~64–67 px/s at
-  7.3728 and 14.7456, only fps changes (30→60), audio real-time at both — so 14.7456 doubles
-  fps with no speed-up. (7.3728 was half-rate = 30fps; 1 MHz was the old slow-motion bug.) The
-  earlier "30fps is hardware-correct" read was wrong — it trusted the audio drain, which is
-  *our* wall-clock logic and can't validate the guest timer. **Pitfall: `ME_GP2X_TIMESCALE=N`
-  sets the timer to N *MHz*** (not Nx), so tools pinning `=1` run at 1 MHz → a bogus 4fps; to
-  measure sim speed use world-scroll cross-correlation at ≤0.2s sampling
-  (`tools/gp2x/measure_scroll_speed.sh`).
+- **TCOUNT @ 7.3728 MHz → 30fps is correct** (`gp2x_device.c`). The game derives both frame
+  pacing AND simulation dt from TCOUNT, so the timer rate sets fps and game speed *together*: at
+  the 7.3728 MHz reference-crystal rate it runs at its intended speed and 30fps. 14.7456 MHz
+  gives 60fps but runs the whole game ~2× too fast (operator-confirmed). A real 60fps would need
+  a per-title patch decoupling dt from frame pacing, not a timer change. (`ME_GP2X_TIMESCALE=N`
+  sets the timer to N *MHz*, not Nx — `=1` is 1 MHz → a bogus 4fps.) An earlier commit wrongly
+  set 14.7456 based on a world-scroll measurement that only sampled velocity-clamped on-foot
+  walking; reverted.
+- **TB-flush stutter** (`tcg/region.c`) — the "1-2s freeze every ~15-30s": qemu's 128MB user
+  code-gen buffer fills and the global `tb_flush` freezes all guest threads. NOT SMC (~0 steady
+  faults). Fixed with a 1GB buffer (`ME_GP2X_TBSIZE_MB` to tune, `ME_GP2X_TBFLUSHLOG` to log).
+- **Audio: wall-clock pacing + threaded push-model viewer** — the stutter root cause was the
+  audio thread *blocking* in `/dev/dsp` write() on the viewer; when the audio backend stalled
+  ~1s it held the game's mixer mutex and froze rendering. Now `gp2x_dsp_write` never blocks
+  (drops oldest if the ring is full) and `gp2x_write` paces by wall clock (`gp2x_dsp_pace_us`);
+  the viewer plays via `SDL_QueueAudio` on its own thread so a device reopen never blocks
+  rendering. Audio is S16_LE (honour the game's SETFMT). Gameplay is now stutter-free.
 
 Earlier two fixes (still relevant, kept for the record):
 - **getpid() -> per-thread tid** (commit): glibc-2.3.6 LinuxThreads emulates a 2.4 kernel
@@ -73,13 +80,22 @@ Earlier two fixes (still relevant, kept for the record):
   handoffs/sec (~50000x; native NPTL ~34000). General: any cond/mutex-heavy LinuxThreads title.
 - **TCOUNT off 1 MHz** (commit): we first advanced the timer at 1 MHz so the game read time
   ~7.4x too slowly -> slow motion + the in-game clock stuck (operator saw pause-menu
-  time-elapsed = 0). Bumped to 7.3728 MHz (the reference crystal) which fixed slow-motion, then
-  **superseded by 14.7456 MHz** (above) which is the actual frame-pacing rate (→ 60fps).
+  time-elapsed = 0). Bumped to **7.3728 MHz** (the reference crystal) — the correct rate (30fps,
+  correct speed). (A later commit briefly tried 14.7456 MHz for 60fps but that runs 2× fast;
+  reverted — see above.)
 - **The "residual ~9fps CPU-bound" open question is ANSWERED:** the CPU-bound cost was the
   `.iwram` false-SMC thrash above (the main thread WAS 100% of a core re-translating, not
   genuinely rendering). The SMC-freeze drops that core to ~10% and rendering reaches the
-  60fps timer cap. (`mon.py`'s `GAME_fps` via OADR is misleading for Payback, which never
+  30fps timer cap. (`mon.py`'s `GAME_fps` via OADR is misleading for Payback, which never
   flips OADR — measure distinct framebuffer *contents* instead.)
+
+### Known limitation: audio choppiness on WSLg (NOT our code)
+On WSLg (Win11 + WSL2 + Ubuntu) the PulseAudio **RDP sink** desyncs/stutters after ~20-30s of
+sustained playback and gets progressively worse — Microsoft WSLg bug (issue #908). Confirmed: a
+bare SDL/`pacat` tone with no emulator reproduces it identically (clean ~30s, then growing
+freezes to ~4.5s). Our threaded audio + watchdog keep it from affecting **gameplay** (smooth),
+but the audio glitches. Environmental mitigations only: periodic `wsl --shutdown`,
+`apt install pulseaudio`, or a less-affected distro (Fedora reported good) / host audio tunnel.
 - We do NOT present all MLC layers (only the OADR scanout) — visible rendering is mostly right
   but multi-layer compositing/scaling is unemulated; revisit for correctness.
 

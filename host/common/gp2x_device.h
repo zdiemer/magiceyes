@@ -100,8 +100,11 @@ void gp2x_present_rgb565(gp2x_dev_t *d, const void *src, uint32_t w, uint32_t h)
    argument on entry; on return it holds the reply and *outlen is the number of
    bytes (0/4/16) to copy back to the guest. Returns 0 or -errno. */
 int  gp2x_dsp_ioctl(gp2x_dev_t *d, uint32_t cmd, void *arg, uint32_t *outlen);
-/* Queue PCM into the audio ring; returns bytes accepted (<= n). */
+/* Queue PCM into the audio ring (never blocks; drops oldest if the ring is full). */
 uint32_t gp2x_dsp_write(gp2x_dev_t *d, const void *pcm, uint32_t n);
+/* Microseconds the caller should sleep so the game's audio output tracks real time
+   (reproduces OSS blocking-write pacing without blocking on the viewer). */
+uint32_t gp2x_dsp_pace_us(gp2x_dev_t *d);
 
 /* Fill a Linux fb_fix_screeninfo (>=80 bytes) for a 320x240x16 GP2X framebuffer
    whose physical base is `smem_start` (GP2X_FB0_PHYS / GP2X_FB1_PHYS). The game
