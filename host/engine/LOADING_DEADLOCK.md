@@ -1,81 +1,49 @@
-# Handoff: Payback loading-screen deadlock (LinuxThreads, NOT audio DMA)
+# Payback status — load deadlock FIXED, playable to level-select
 
-The load-crash is fixed (CRASH_HANDOFF.md). Payback now boots, spawns its LinuxThreads
-workers, renders a few frames — then **hangs on the loading screen**. This session corrected
-the earlier "audio DMA" theory and pinned the real cause via a qemu diff. (Unicorn engine,
-`host/engine/`; the qemu backend reaches gameplay, so it's the reference.)
+Payback now boots to its menus and is **interactively playable** on the Unicorn engine: the
+main menu runs at full speed, audio plays, and you can navigate **Play → Story → level-select**.
+The loading-screen deadlock that blocked everything is fixed. (Unicorn engine, `host/engine/`;
+qemu backend = the working reference.)
 
-## CORRECTION: it is NOT MMSP2 audio DMA
-Payback uses **`/dev/dsp` (OSS)** for audio — it `DEV open /dev/dsp` and writes 16 KB PCM
-buffers, exactly like the qemu backend (which only models `/dev/dsp`, no MMSP2 audio DMA). The
-earlier "audio-DMA flag `*(0xe9eae8)` never clears" was a *symptom*, not the cause. (`dev_open`
-logs as `DEV open …`, not `open '…'` — that's why an earlier grep missed the `/dev/dsp` open.)
+## What was fixed (this line of work)
+- **Synchronous-fork signal-handler leak (the load deadlock)** — commit 452f0db. A `system()`
+  fork child, run inline in our synchronous-fork model, resets signal handlers to SIG_DFL
+  pre-exec; `g_sigact` is host-side state shared with the still-running parent threads, so it
+  wiped main's LinuxThreads restart (SIGRTMIN/32) handler → every later pthread restart was
+  deliver-dropped → main never woke from `__pthread_lock`. Fix: save/restore `g_sigact`+mask
+  across the fork AND ignore the inline child's own `sigaction` writes (`g_fork_thread`).
+- **Audio pacing** — commit a225a0a. `dsp_write` drops-oldest + paces by wall-clock so the
+  audio thread tracks real time instead of free-running ~1000×.
+- **CF_PARALLEL** (adf00c0, real host atomics), **TCOUNT 7.3728 MHz + real gettimeofday** (464e9d4).
+- **Flicker: lock display to the page-flipped front buffer** — commit <pending>. The change
+  heuristic in `present_active()` showed the half-drawn back buffer between OADR flips.
 
-## The qemu diff (the key evidence)
-Run headless with a syscall trace:
-`QEMU_STRACE=1 ~/src/qemu/build/qemu-arm ./Payback_tmp` (cd ~/pbtest).
-- **qemu**: the main thread reaches the game's run loop — a steady stream of
-  `write(8,…,16384)` to `/dev/dsp` interleaved with frame `nanosleep`, plus
-  `ioctl(9, SOUND_MIXER_WRITE_PCM,…)`. The audio engine RUNS.
-- **us**: main makes **0** `/dev/dsp` writes — it never reaches the run loop. It's stuck
-  earlier, in a LinuxThreads lock.
+Note: headless, main still hangs at a later `pthread_mutex_lock` because the audio thread
+free-runs with no viewer consuming it; **with a viewer it progresses** (audio paced/consumed).
+`ME_GP2X_FORKNOMEM=1` confirmed the synchronous-fork **memory restore clobbers parent-thread
+lock state** (skips the snapshot — moves main off that wait, but leaks child changes). A proper
+fork fix (isolate the inline child from concurrent parent threads — restore only the forking
+thread's stack, or pause other threads during the child) is a known follow-up for robustness.
 
-Both engines: 3 clones, 3 manager-pipe writes (148-byte requests), 2 `kill(100,32)` restarts.
-So our manager/restart protocol works for the 2 thread-creates; main hangs *after*, before the
-audio loop.
-
-## Where main is stuck (precise)
-`ME_THREADDUMP=1` — stable across all dumps (hard hang):
-```
-tid=100 (main)  livePC=0x13309c lr=0x132200  ← __pthread_lock suspend, waiting for a lock
-tid=101 (mgr)   livePC=0x15944c              ← manager poll() on the request pipe (idle/normal)
-tid=102 (mixer) livePC=0x0ae168              ← audio mixer busy-spin on *(0xe9eae8)
-tid=103         livePC=0x135440              ← nanosleep loop
-```
-- `0x1321c0` (where main suspends, lr=0x132200) is **`__pthread_lock`**: caller `0x1324a0`
-  does the CAS-decrement / on-contention queue-self-and-suspend pattern. So **main is blocked
-  acquiring a pthread lock** and won't wake until the holder unlocks + restarts it.
-- The lock primitive bottoms out in the ARMv5 **`swp`** instruction (`__pthread_acquire`
-  `0x134b1c`: `swp r3,r3,[r6]`), the basis of every LinuxThreads lock/CAS.
-- This is a **deterministic** deadlock (identical every run) — so it's a logical circular
-  wait / lost-restart, NOT an atomicity race.
-
-## swp atomicity — checked, fixed for correctness, but NOT the cause
-Our native-threads model = one `uc`/CPU per host thread sharing one host RAM backing. The fork's
-`curr_cflags()` returned 0, so `CF_PARALLEL` was never set and TCG emitted **non-atomic** `swp`
-(load+store). That's a real latent bug for shared-memory threads, fixed by
-`fork-patches/parallel_cflags.py` (`curr_cflags()` → `CF_PARALLEL`, so `op_swp`'s
-`tcg_gen_atomic_xchg_i32` emits a real host atomic on the shared backing). **But it did not
-change the hang** (same PCs, 0 dsp writes) — consistent with the deadlock being deterministic,
-not a race. Kept as a correctness fix; not the fix for this hang.
-
-## Most likely next step
-Find **which lock** main is blocked on and **who holds it**, then why the holder never releases.
-- The lock pointer is `r0` into `0x1324a0` (stored at its `[sp+4]`). Instrument the engine to
-  log it when main enters the `__pthread_lock` suspend, then scan the other threads / the lock
-  word to find the holder.
-- Hypothesis: a circular wait our cooperative-ish model creates that qemu's real preemptive
-  scheduling avoids — e.g. the holder is tid 102 (mixer) or tid 103, itself blocked on something
-  main provides. Or a **lost restart**: the holder unlocks and `kill(main,32)`s, but main's
-  `sigsuspend`/`__pthread_lock` re-check misses it (check `sigsuspend_wait` + case 179 in
-  threads.c/syscalls.c for a window where a restart set between the lock re-test and the suspend
-  is dropped).
-- Cross-check against qemu at the instruction level around `0x1324a0`/`0x133080`: see which
-  thread releases the lock there and how main gets restarted.
+## Remaining symptoms (interactive, reported)
+1. **Sprite/text flicker** — a fix is in (front-buffer lock on OADR flip); verify it helped. If
+   not, capture the flip pattern: the engine logs `MMSP2 flip -> phys=…` (currently capped at 8).
+2. **Audio micro-stutter** — likely the known **WSLg PulseAudio RDP-sink** stutter (see CLAUDE.md
+   "Known limitation"); a bare tone reproduces it with no emulator. Our pacing matches qemu. If
+   it's worse than qemu, suspect the per-write `usleep` granularity in `dsp_pace_us`/case 4.
+3. **Crash/freeze entering a level** — the priority. Reproduce interactively and capture the
+   engine stderr (`run.sh` → `$ME_LOG`, default `/tmp/me_engine.log`): `mem_invalid_cb` prints a
+   reg dump + backtrace on a null/bad-pointer fault, and `main()` prints `main emu err pc=…` on a
+   CPU error. `tail -60 /tmp/me_engine.log` after the freeze shows the fault PC to trace.
 
 ## Diagnostics (env-gated, zero-cost off)
-- `ME_THREADDUMP=1` — per-thread livePC/lr/lastSC (threads.c `dump_threads`; `last_pc` set in
-  `intr_cb`). How the hang was localized.
-- `ME_WATCH=0xADDR` — log every guest write to a word (found the single `*(0xe9eae8)=1`).
-- `ME_AUDIOCLEAR=0xADDR` — helper thread periodically zeros a guest word. `=0xe9eae8` frees the
-  mixer's spin, but main then *also* blocks in `__pthread_lock` — i.e. clearing the symptom
-  doesn't fix the underlying lock hang.
+- `ME_THREADDUMP` — per-thread livePC/lr/lastSC + regs + stack backtrace.
+- `ME_SIGLOG` — signal/restart path; `ME_WATCH=0xA,0xB,…` — guest writes to up to 4 words.
+- `ME_GP2X_NOFLIPLOCK` — revert the front-buffer lock; `ME_GP2X_FORKNOMEM` — skip fork mem restore.
 
 ## Repro
 ```sh
-host/engine/fork-patches/apply_and_build.sh     # build fork (SMC-freeze + CF_PARALLEL) + engine
-cd ~/pbtest
-ME_TRACE=1 ME_THREADDUMP=1 timeout 20 .../bin/me_unicorn ~/pbtest/Payback_tmp 2>/tmp/d.log
-QEMU_STRACE=1 timeout 12 ~/src/qemu/build/qemu-arm ./Payback_tmp 2>/tmp/q.log   # working reference
+host/engine/fork-patches/apply_and_build.sh   # fork (SMC-freeze + CF_PARALLEL); then build_engine.sh
+host/engine/run.sh ~/pbtest/Payback_tmp       # interactive (WSLg + input); log -> /tmp/me_engine.log
+QEMU_STRACE=1 timeout 12 ~/src/qemu/build/qemu-arm ./Payback_tmp 2>/tmp/q.log   # reference
 ```
-Interactive (viewer): `host/engine/run.sh ~/pbtest/Payback_tmp` (needs WSLg + input).
