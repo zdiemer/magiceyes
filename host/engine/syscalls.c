@@ -1,6 +1,45 @@
 /* magiceyes Unicorn engine — Linux-ARM (EABI/OABI) syscall shim. */
 
 #include "engine.h"
+#ifdef _WIN32
+#include <direct.h>
+#define ME_MKDIR(p) _mkdir(p)
+#else
+#define ME_MKDIR(p) mkdir(p, 0777)
+#endif
+
+/* Host scratch dir for decompressed GPEComp temps + extracted zips (created on first use). */
+void me_host_tmpdir(char *out, size_t cap) {
+#ifdef _WIN32
+    const char *t = getenv("TEMP"); if (!t) t = getenv("TMP"); if (!t) t = ".";
+    snprintf(out, cap, "%s\\magiceyes", t);
+#else
+    const char *t = getenv("TMPDIR"); if (!t) t = "/tmp";
+    snprintf(out, cap, "%s/magiceyes", t);
+#endif
+    ME_MKDIR(out);
+}
+
+/* Redirect guest writes/reads under /mnt/tmp and /tmp into the host scratch dir (the GPEComp
+   stub writes its decompressed payload to /mnt/tmp/<name>_tmp). Identity on Linux, where those
+   paths exist for real; on Windows there is no /mnt/tmp, so map it to %TEMP%\magiceyes. */
+void rewrite_guest_path(const char *in, char *out, size_t cap) {
+#ifdef _WIN32
+    const char *rest = NULL;
+    if (!strncmp(in, "/mnt/tmp/", 9)) rest = in + 9;
+    else if (!strncmp(in, "/tmp/", 5)) rest = in + 5;
+    if (rest) {
+        char base[PATH_MAX]; me_host_tmpdir(base, sizeof base);
+        char fixed[PATH_MAX]; size_t j = 0;
+        for (size_t i = 0; rest[i] && j < sizeof fixed - 1; i++)
+            fixed[j++] = (rest[i] == '/') ? '\\' : rest[i];
+        fixed[j] = 0;
+        snprintf(out, cap, "%s\\%s", base, fixed);
+        return;
+    }
+#endif
+    snprintf(out, cap, "%s", in);
+}
 
 void read_cstr(uint32_t gaddr, char *out, size_t cap) {
     size_t i;
@@ -121,6 +160,27 @@ static int memfd_make_bin(const void *s, uint32_t len) {
     return -1;
 }
 static int memfd_make(const char *s) { return memfd_make_bin(s, (uint32_t)strlen(s)); }
+
+/* Track the real host fds we hand back to the guest from open()/openat(). The guest closes
+   most of them, but a game that exits/reloads mid-load leaks the rest; over many hot reloads
+   that exhausts the msvcrt/posix fd table. syscalls_reset closes any still open. */
+#define HOSTFD_MAX 512
+static int g_hostfd[HOSTFD_MAX]; static int g_nhostfd = 0;
+static void hostfd_track(int fd) {
+    if (fd < 0) return;
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] < 0) { g_hostfd[i] = fd; return; }
+    if (g_nhostfd < HOSTFD_MAX) g_hostfd[g_nhostfd++] = fd;
+}
+static void hostfd_untrack(int fd) {
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) { g_hostfd[i] = -1; return; }
+}
+/* Between games: close leaked host fds + free the in-memory /proc-/etc fake files. */
+void syscalls_reset(void) {
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] >= 0) close(g_hostfd[i]);
+    g_nhostfd = 0;
+    for (int i = 0; i < MEMFD_MAX; i++)
+        if (g_memf[i].used) { free(g_memf[i].data); g_memf[i].used = 0; g_memf[i].data = NULL; }
+}
 
 /* Minimal TZif (v1) for UTC — the guest's glibc opens /etc/localtime; a host without it (no
    /proc/etc on Windows) returns ENOENT and the game's init gets stuck re-polling. */
@@ -307,8 +367,21 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (g_trace) fprintf(stderr, "  [fork] child execve %s -> exit(0)\n", base);
             return g_child_pid;
         }
+        /* A non-fork execve is the GPEComp self-extractor chain-loading the decompressed game:
+           the stub already wrote it (open/write to /mnt/tmp -> redirected to the host scratch
+           dir). Record it as the reload target, stop this uc, and let the main loop reset +
+           load it. This is how inline decompression works in the native engine. */
+        if (!g_forked) {
+            rewrite_guest_path(ep, g_reload_path, sizeof g_reload_path);
+            if (g_trace) fprintf(stderr, "  [execve] reload -> %s (guest '%s')\n", g_reload_path, ep);
+            g_setpc = 1; uc_emu_stop(g_uc);
+            return 0;
+        }
         return LERR(ENOSYS);
     }
+    case 15:   /* chmod */
+    case 94:   /* fchmod: the GPEComp stub +x's its temp; we load it via fopen, so just accept */
+        return 0;
     case 140: { /* _llseek(fd, off_hi, off_lo, result64*, whence) */
         int64_t off = ((int64_t)(uint32_t)a1 << 32) | (uint32_t)a2;
         struct memfile *mf = memfd_get((int)a0);
@@ -369,10 +442,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            replaces it. */
         { int mf = sysfile_open(p); if (mf) { if (g_trace) fprintf(stderr, "  [fake %s]\n", p);
                                               return mf; } }
-        long r = open(p, host_open_flags((int)a1), a2); int e2 = errno;
+        char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
+        long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
         if (getenv("ME_OPENLOG")) { char b[1100]; snprintf(b, sizeof b,
             "OPEN '%s' flags=%x -> %ld%s\n", p, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
-        if (r >= 0) { g_self->enoent_streak = 0; return r; }
+        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track((int)r); return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
         if (e2 == ENOENT && ++g_self->enoent_streak > 3) {
@@ -387,13 +461,17 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a1, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         int mf = sysfile_open(p); if (mf) return mf;
-        long r = open(p, host_open_flags((int)a2), a3); return r < 0 ? LERR(errno) : r;
+        char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
+        long r = open(hp, host_open_flags((int)a2), a3);
+        if (r >= 0) { hostfd_track((int)r); return r; }
+        return LERR(errno);
     }
     case 6:    /* close */
         if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W) return 0;
         { struct memfile *mf = memfd_get((int)a0);
           if (mf) { free(mf->data); mf->used = 0; mf->data = NULL; return 0; } }
         if (dev_type((int)a0)) { dev_close((int)a0); return 0; }  /* free the device slot */
+        hostfd_untrack((int)a0);
         return close((int)a0) < 0 ? LERR(errno) : 0;
     case 19: { /* lseek */
         struct memfile *mf = memfd_get((int)a0);
@@ -476,6 +554,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return 0;
     }
     case 120: { /* clone(flags, child_stack, ptid, tls, ctid) -> a native host thread */
+        if (g_exit) return -11 /*EAGAIN*/;   /* teardown in progress: don't spawn new workers */
         int slot = thread_alloc();
         if (slot < 0) return -11 /*EAGAIN*/;
         struct thread *c = &g_th[slot];
@@ -542,7 +621,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 369:  return 0;  /* prlimit64 */
     case 106: { /* stat(path, buf) */
         char p[1024]; read_cstr(a0, p, sizeof p);
-        struct stat s; if (stat(p, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
+        char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
+        struct stat s; if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
         struct memfile *mf = memfd_get((int)a0);
@@ -563,7 +643,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                if (mf) { struct memfile *m = memfd_get(mf); struct stat ms; memset(&ms, 0, sizeof ms);
                          ms.st_mode = S_IFREG | 0644; ms.st_size = m->len; free(m->data); m->used = 0;
                          fill_stat64(a1, &ms); return 0; }
-               ok = (nr == 196) ? lstat(p, &s) : stat(p, &s); }
+               char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
+               ok = (nr == 196) ? lstat(hp, &s) : stat(hp, &s); }
         if (g_trace && nr != 197) fprintf(stderr, "  stat64 '%s' -> %s\n", p, ok ? "FAIL" : "ok");
         if (ok) return LERR(errno);
         fill_stat64(a1, &s); return 0;  /* EABI struct stat64 (st_size@48, 104B) */

@@ -157,6 +157,9 @@ void gp2x_cacheflush(uint32_t guest) {
 /* ---- /dev/dsp (OSS) audio -> shm audio ring (consumed by the viewer) ---- */
 uint32_t g_aud_freq = 44100, g_aud_ch = 2, g_aud_bits = 16;
 double g_aud_t0 = 0; int g_aud_on = 0;
+/* Promoted out of a function-static so a reload can reset it (else the new game inherits a
+   stale TCOUNT epoch -> a huge first dt). */
+double g_tcount_t0 = 0;            /* TCOUNT free-running-timer epoch */
 double host_now(void) {
     struct timeval tv; gettimeofday(&tv, NULL); return tv.tv_sec + tv.tv_usec * 1e-6;
 }
@@ -290,14 +293,14 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
            sets frame rate and game speed together. The GP2X reference crystal is 7.3728 MHz
            (fps ~= 4.15*MHz -> ~30fps at intended speed); 1 MHz was the slow-motion bug.
            ME_GP2X_TIMESCALE = N sets the rate to N MHz (matches the qemu backend's knob). */
-        static double t0 = 0, hz = 0;
+        static double hz = 0;
         if (hz == 0) { const char *e = getenv("ME_GP2X_TIMESCALE");
                        double mhz = e ? atof(e) : 7.3728; if (mhz <= 0) mhz = 7.3728;
                        hz = mhz * 1e6; }
         struct timeval tv; gettimeofday(&tv, NULL);
         double now = tv.tv_sec + tv.tv_usec * 1e-6;
-        if (t0 == 0) t0 = now;
-        uint32_t us = (uint32_t)((now - t0) * hz);
+        if (g_tcount_t0 == 0) g_tcount_t0 = now;
+        uint32_t us = (uint32_t)((now - g_tcount_t0) * hz);
         uc_mem_write(uc, g_mmsp2_guest + 0x0a00, &us, 4);
         return;
     }
@@ -315,6 +318,30 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         return;
     }
     if (g_trace) { static int n = 0; if (n++ < 200) fprintf(stderr, "  MMSP2 RD %04x\n", off); }
+}
+
+/* Reset the per-game shm cursors so a reloaded game starts from a clean audio ring and the
+   viewer renegotiates the audio format on its first ioctl. frame_seq stays MONOTONIC (the
+   viewer compares against its own last_seq; resetting it to 0 could make it skip the first
+   new frame). buttons/quit/magic/viewer_heartbeat are preserved (the viewer owns them). */
+void shm_reset_for_new_game(void) {
+    if (!g_shm) return;
+    g_shm->a_write = 0; g_shm->a_read = 0;
+    g_shm->audio_active = 0;
+}
+
+/* Zero all per-game device/framebuffer/audio/MMSP2 state between games (engine_reset_globals).
+   The shm allocation itself is preserved (the viewer thread holds it) -- see shm_reset_for_new_game. */
+void devices_reset(void) {
+    memset(g_devtype, 0, sizeof g_devtype); g_devn = 0;
+    memset(g_mem, 0, sizeof g_mem); g_nmem = 0;
+    g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0;
+    g_flip_active = 0; g_flip_guest = 0;
+    g_oadr_driven = 0; g_frame_ready = 0;
+    g_aud_freq = 44100; g_aud_ch = 2; g_aud_bits = 16;
+    g_aud_t0 = 0; g_aud_on = 0;
+    g_prod_on = 0; g_prod_t0 = 0; g_prod_bytes = 0;
+    g_tcount_t0 = 0;
 }
 
 /* mmap free-list: recycle freed regions instead of uc_mem_unmap, which flushes

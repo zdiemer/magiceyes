@@ -3,10 +3,28 @@
  * run on their own host threads (threads.c); a helper thread presents the framebuffer.
  * g_uc/g_self/g_th/g_biglock live in threads.c. */
 #include "engine.h"
+#ifdef _WIN32
+#include <direct.h>
+#define ME_CHDIR(p) _chdir(p)
+#else
+#define ME_CHDIR(p) chdir(p)
+#endif
+
+/* chdir into the directory holding `path` so the game finds its Data/ (relative opens). */
+static void chdir_to_dir_of(const char *path) {
+    char d[PATH_MAX]; snprintf(d, sizeof d, "%s", path);
+    char *s1 = strrchr(d, '/'), *s2 = strrchr(d, '\\');
+    char *s = s1 > s2 ? s1 : s2;
+    if (s && s != d) { *s = 0; if (ME_CHDIR(d) != 0 && g_trace) fprintf(stderr, "  [chdir %s failed]\n", d); }
+}
 
 uint32_t g_brk, g_brk_start;
 uint32_t g_mmap_next = MMAP_BASE;
 int g_exit = 0, g_exit_code = 0;
+int g_shutdown = 0;   /* real quit (ends helper+viewer); g_exit is the transient per-run CPU bail */
+int g_reloading = 0;  /* a reset/reload is in flight -> the helper thread skips present */
+int g_reload_chdir = 0;   /* File->Open: chdir to the new game's dir; GPEComp re-exec: keep cwd */
+char g_reload_path[PATH_MAX] = {0};   /* non-empty -> the main loop resets + loads this binary */
 int g_trace = 0;
 int g_scret = 0;   /* ME_SCRET: log every syscall + return value per thread (divergence diff) */
 __thread int g_setpc = 0;   /* a syscall set PC (signal entry / sigreturn): skip R0 write */
@@ -40,17 +58,21 @@ void pipe_put(const uint8_t *p, uint32_t n) {
 
 unsigned long g_n_rd = 0, g_n_wr = 0, g_n_fault = 0;  /* hook-call profiling */
 
+/* viewer options (set by the CLI parser; the menu may change scale/fullscreen/audio at runtime).
+   Defined unconditionally so the parser is the same in both builds; only the bundle's viewer
+   thread consumes them (the two-process viewer.exe parses its own argv). */
+static int g_view_scale = 3, g_fullscreen = 0, g_mute = 0, g_volume = 100;
+
 #ifdef ME_BUNDLED
 /* Single-process bundle: the SDL viewer runs in this process on a worker thread, sharing the
    engine's in-process g_shm directly (no cross-process shm bridge -> no Windows black screen).
    viewer_run lives in host/viewer.c; declared here so main.c needn't include SDL.h (which would
    #define main -> SDL_main and rename the engine's entry point). */
-int viewer_run(gp2x_shm_t *shm, int scale);
-static int g_view_scale = 3;
+int viewer_run(gp2x_shm_t *shm, int scale, int fullscreen, int mute, int volume);
 static void *viewer_thread(void *arg) {
     (void)arg;
-    viewer_run(g_shm, g_view_scale);   /* returns when the window closes */
-    g_exit = 1;                        /* stop the engine + helper threads */
+    viewer_run(g_shm, g_view_scale, g_fullscreen, g_mute, g_volume);  /* returns on window close */
+    g_shutdown = 1; g_exit = 1;        /* real quit: stop the engine + helper threads */
     if (g_shm) g_shm->quit = 1;
     exit(g_exit_code);                 /* engine main is blocked in uc_emu_start; force exit */
 }
@@ -103,11 +125,12 @@ static void *helper_thread(void *arg) {
     const char *ac = getenv("ME_AUDIOCLEAR");   /* TEMP: simulate audio-DMA completion by
                                                    periodically clearing a guest "DMA busy" flag */
     uint32_t acaddr = ac ? (uint32_t)strtoul(ac, NULL, 0) : 0;
-    while (!g_exit) {
+    while (!g_shutdown) {   /* survives reloads (g_exit is the transient per-run bail) */
         usleep(g_oadr_driven ? 2000 : 16000);   /* poll faster once frame-driven (low latency) */
         /* Present off the guest render thread: frame-synced to the game's OADR write
-           (g_frame_ready) once it drives present, else an async fallback. */
-        if (g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; present_active(); }
+           (g_frame_ready) once it drives present, else an async fallback. Skip while a reload
+           is tearing down/rebuilding guest memory (g_fb_guest is being reset). */
+        if (!g_reloading && g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; present_active(); }
         if (acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
         double now = host_now();
         if (prof && now - prof_t >= 2.0) {
@@ -121,63 +144,167 @@ static void *helper_thread(void *arg) {
     return NULL;
 }
 
+#define ME_VERSION "0.2"
+static void print_usage(const char *p0) {
+    fprintf(stderr,
+        "magiceyes - run GP2X/Wiz games on a PC\n"
+        "usage: %s [options] <game.gpe | folder | game.zip>\n\n"
+        "  -s, --scale N      window scale factor (default 3)\n"
+        "  -f, --fullscreen   start fullscreen (toggle in-app with F11)\n"
+        "      --mute         start muted\n"
+        "      --volume N     output volume 0..100 (default 100)\n"
+        "      --timescale M  GP2X timer rate in MHz (default 7.3728; sets fps + game speed)\n"
+        "      --trace        verbose syscall/device trace (ME_TRACE)\n"
+        "      --profile      fps + hook profiling (ME_PROF)\n"
+        "      --scret        per-thread syscall+return trace (ME_SCRET)\n"
+        "      --threaddump   periodic thread-state dump (ME_THREADDUMP)\n"
+        "      --no-smcfreeze disable the SMC-freeze CPU fix (ME_GP2X_NOSMCFREEZE)\n"
+        "  -h, --help         show this help\n"
+        "      --version      show version\n", p0);
+}
+
+/* Map + populate the ARMv5 kuser helper page (no HW TLS/atomics). Redone for each fresh uc
+   (uc_close drops the mappings, mem_reset frees the backing), so a reload re-installs it. */
+static void map_kuser_page(void) {
+    uc_engine *u = g_uc;
+    map_region(0xffff0000u, PAGE, UC_PROT_READ | UC_PROT_EXEC);
+    uint32_t mb = 0xe1a0f00eu;                        /* mov pc,lr (memory_barrier) */
+    uc_mem_write(u, 0xffff0fa0u, &mb, 4);
+    uint32_t cx[] = {0xef90fff0u, 0xe1a0f00eu};       /* svc #0x90fff0 ; mov pc,lr (cmpxchg) */
+    uc_mem_write(u, 0xffff0fc0u, cx, sizeof cx);
+    uint32_t gt[] = {0xe59f0008u, 0xe1a0f00eu};       /* get_tls: ldr r0,[pc,#8]; mov pc,lr */
+    uc_mem_write(u, 0xffff0fe0u, gt, sizeof gt);
+    uint32_t ver = 2; uc_mem_write(u, 0xffff0ffcu, &ver, 4);
+    uint32_t tramp[] = {0xe3a070adu, 0xef000000u};    /* SIG_TRAMP: mov r7,#173; svc 0 */
+    uc_mem_write(u, 0xffff0f00u, tramp, sizeof tramp);
+}
+
+/* Per-game setup: a fresh uc over a clean address space, the kuser page, the ELF, the SysV
+   stack (argv[0] = the binary path), and the main guest-thread record. Returns the entry PC.
+   Called once at startup and again by engine_reset_and_load on every reload. */
+static uint32_t engine_load_game(const char *path) {
+    uc_engine *u;
+    uc_err e = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &u);
+    if (e) die("uc_open", e);
+    g_uc = u;
+    map_kuser_page();
+    shm_reset_for_new_game();
+    uint32_t entry = load_elf(path);
+    char *av[1]; av[0] = (char *)path;
+    uint32_t sp = setup_stack(1, av);
+    gwrite(UC_ARM_REG_SP, sp);
+    memset(&g_th[0], 0, sizeof g_th[0]);
+    g_th[0].uc = u; g_th[0].th = 0; g_th[0].tid = g_next_tid++; g_th[0].ppid = 1;
+    g_th[0].state = TH_RUN; g_self = &g_th[0]; g_nth = 1;
+    uc_hook_std(u);
+    return entry;
+}
+
+/* Zero/free every accumulated per-game global so a reload starts clean. Runs AFTER all ucs are
+   closed and guest RAM is freed. (Inventory: main.c fork/snapshot/pipe + brk/mmap; threads.c
+   table + signal dispositions; devices.c + syscalls.c via their own reset hooks.) */
+static void engine_reset_globals(void) {
+    if (g_fork_ctx) { uc_context_free(g_fork_ctx); g_fork_ctx = NULL; }
+    for (int i = 0; i < g_nsnap; i++) free(g_snap[i].data);
+    g_nsnap = 0; g_forked = 0;
+    free(g_pipebuf); g_pipebuf = NULL; g_pipe_cap = g_pipe_w = g_pipe_r = 0;
+    g_fork_thread = NULL; g_fork_sigblocked = 0;
+    memset(g_sigact_fork, 0, sizeof g_sigact_fork);
+    g_n_rd = g_n_wr = g_n_fault = 0;
+    g_brk = g_brk_start = 0; g_mmap_next = MMAP_BASE;
+    memset(g_th, 0, sizeof g_th); g_nth = 0; g_next_tid = 100;
+    memset(g_sigact, 0, sizeof g_sigact);
+    devices_reset();
+    syscalls_reset();
+}
+
+/* The load-bearing primitive: tear down all guest state and (re)load a fresh ELF, keeping the
+   process (and the viewer/helper threads + shm) alive. Returns the new entry PC, or 0 if the
+   load failed. Used by both the GPEComp re-exec (case 11) and File->Open hot reload. */
+static uint32_t engine_reset_and_load(const char *path) {
+    g_reloading = 1;
+    engine_stop_all_threads();                          /* join workers, close their ucs */
+    if (g_th[0].uc) { uc_close(g_th[0].uc); g_th[0].uc = NULL; }
+    mem_reset();                                        /* free guest RAM (every uc now closed) */
+    engine_reset_globals();
+    g_exit = 0; g_exit_code = 0;
+    if (g_reload_chdir) { chdir_to_dir_of(path); g_reload_chdir = 0; }  /* File->Open: into the new game's dir */
+    uint32_t entry = engine_load_game(path);
+    g_reloading = 0;
+    if (g_trace) fprintf(stderr, "  [reload] -> %s entry=%08x\n", path, entry);
+    return entry;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stderr, NULL, _IONBF, 0);   /* diagnostics must survive a kill (msvcrt fully buffers
                                            a redirected stderr otherwise -> lost logs on Windows) */
     me_platform_init();   /* Windows: 1ms timer + opt out of EcoQoS throttling (else a backgrounded
                              window is CPU/timer-throttled -> ~4x slower load; Linux never throttles) */
-    if (argc < 2) { fprintf(stderr, "usage: me_unicorn <static-arm.elf> [args]\n"); return 1; }
-#ifdef ME_BUNDLED
-    /* a trailing all-numeric arg is the viewer scale (magiceyes.exe <binary> [scale]); strip
-       it so it isn't handed to the guest as an argv entry. */
-    if (argc >= 3) {
-        const char *last = argv[argc - 1]; int alldig = last[0] != 0;
-        for (const char *p = last; *p; p++) if (*p < '0' || *p > '9') { alldig = 0; break; }
-        if (alldig) { g_view_scale = atoi(last); argc--; }
+    /* ---- CLI: parse flags; the first non-flag positional is the game ---- */
+    const char *input = NULL;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] != '-' || a[1] == 0) { input = a; break; }   /* a bare "-" is not a flag */
+        if      (!strcmp(a, "-h") || !strcmp(a, "--help"))       { print_usage(argv[0]); return 0; }
+        else if (!strcmp(a, "--version"))                        { printf("magiceyes %s\n", ME_VERSION); return 0; }
+        else if (!strcmp(a, "-f") || !strcmp(a, "--fullscreen")) g_fullscreen = 1;
+        else if (!strcmp(a, "--mute"))                           g_mute = 1;
+        else if (!strcmp(a, "-s") || !strcmp(a, "--scale"))      { if (++i < argc) g_view_scale = atoi(argv[i]); }
+        else if (!strcmp(a, "--volume"))                         { if (++i < argc) g_volume = atoi(argv[i]); }
+        else if (!strcmp(a, "--timescale"))                      { if (++i < argc) setenv("ME_GP2X_TIMESCALE", argv[i], 1); }
+        else if (!strcmp(a, "--trace"))                          setenv("ME_TRACE", "1", 1);
+        else if (!strcmp(a, "--profile"))                        setenv("ME_PROF", "1", 1);
+        else if (!strcmp(a, "--scret"))                          setenv("ME_SCRET", "1", 1);
+        else if (!strcmp(a, "--threaddump"))                     setenv("ME_THREADDUMP", "1", 1);
+        else if (!strcmp(a, "--no-smcfreeze"))                   setenv("ME_GP2X_NOSMCFREEZE", "1", 1);
+        else { fprintf(stderr, "magiceyes: unknown option '%s'\n", a); print_usage(argv[0]); return 2; }
     }
-#endif
+    if (g_view_scale < 1) g_view_scale = 1;
+    if (g_volume < 0) g_volume = 0; else if (g_volume > 100) g_volume = 100;
+    if (!input) { fprintf(stderr, "magiceyes: no game specified\n"); print_usage(argv[0]); return 2; }
+
+    /* ---- resolve folder/.zip/.gpe -> a runnable binary; reject dynamic-linked titles ---- */
+    char binbuf[PATH_MAX];
+    const char *bin = resolve_input(input, binbuf, sizeof binbuf);
+    if (!bin) return 2;
+    int cls = classify_elf(bin);
+    if (cls < 0) return 2;
+    if (cls == 1) {
+        fprintf(stderr, "magiceyes: '%s' is dynamically linked -- native dynamic-linked titles "
+                        "aren't supported yet (Wiz/qemu path only).\n", bin);
+        return 3;
+    }
+
     if (getenv("ME_TRACE")) g_trace = 1;
     if (getenv("ME_SCRET")) g_scret = 1;
     if (getenv("ME_THREADDUMP")) g_threaddump = 1;
     threads_init();
-
-    uc_engine *u;
-    uc_err e = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &u);
-    if (e) die("uc_open", e);
-    g_uc = u;   /* this (main) host thread's uc */
-
-    /* kuser helper page (ARMv5 has no HW TLS/atomics). cmpxchg traps to a magic SVC so
-       it can be done host-atomically across native threads (see syscalls.c case 0xfff0). */
-    map_region(0xffff0000u, PAGE, UC_PROT_READ | UC_PROT_EXEC);
-    { uint32_t mb = 0xe1a0f00eu;                       /* mov pc,lr (memory_barrier) */
-      uc_mem_write(u, 0xffff0fa0u, &mb, 4);
-      uint32_t cx[] = {0xef90fff0u, 0xe1a0f00eu};      /* svc #0x90fff0 ; mov pc,lr */
-      uc_mem_write(u, 0xffff0fc0u, cx, sizeof cx);
-      uint32_t gt[] = {0xe59f0008u, 0xe1a0f00eu};      /* get_tls: ldr r0,[pc,#8]; mov pc,lr */
-      uc_mem_write(u, 0xffff0fe0u, gt, sizeof gt);
-      uint32_t ver = 2; uc_mem_write(u, 0xffff0ffcu, &ver, 4);
-      uint32_t tramp[] = {0xe3a070adu, 0xef000000u};   /* SIG_TRAMP: mov r7,#173; svc 0 */
-      uc_mem_write(u, 0xffff0f00u, tramp, sizeof tramp); }
-
     shm_setup();
-    uint32_t entry = load_elf(argv[1]);
-    uint32_t sp = setup_stack(argc - 1, argv + 1);
-    gwrite(UC_ARM_REG_SP, sp);
 
-    g_th[0].uc = u; g_th[0].th = 0; g_th[0].tid = g_next_tid++; g_th[0].ppid = 1;
-    g_th[0].state = TH_RUN; g_self = &g_th[0]; g_nth = 1;
-    uc_hook_std(u);
+    chdir_to_dir_of(bin);   /* run from the game's dir so its Data/ resolves */
+    uint32_t entry = engine_load_game(bin);
+    if (g_trace) fprintf(stderr, "entry=%08x brk=%08x\n", entry, g_brk);
 
-    if (g_trace) fprintf(stderr, "entry=%08x sp=%08x brk=%08x\n", entry, sp, g_brk);
+    /* helper + viewer threads are created ONCE and outlive every reload */
     pthread_t helper; pthread_create(&helper, NULL, helper_thread, NULL);
 #ifdef ME_BUNDLED
     pthread_t vth; pthread_create(&vth, NULL, viewer_thread, NULL);
 #endif
 
-    e = uc_emu_start(u, entry, 0, 0, 0);   /* run the main guest thread to completion */
-    if (e != UC_ERR_OK && !g_exit)
-        fprintf(stderr, "me_unicorn: main emu err %s pc=%08x\n", uc_strerror(e), gread(UC_ARM_REG_PC));
-    g_exit = 1;
+    for (;;) {
+        uc_err e = uc_emu_start(g_th[0].uc, entry, 0, 0, 0);   /* run the main guest thread */
+        if (g_reload_path[0] && !g_shutdown) {                 /* GPEComp re-exec or File->Open */
+            char path[PATH_MAX]; snprintf(path, sizeof path, "%s", g_reload_path); g_reload_path[0] = 0;
+            entry = engine_reset_and_load(path);
+            if (entry) continue;
+            fprintf(stderr, "magiceyes: reload of '%s' failed\n", path);
+            break;
+        }
+        if (e != UC_ERR_OK && !g_exit)
+            fprintf(stderr, "me_unicorn: main emu err %s pc=%08x\n", uc_strerror(e), gread(UC_ARM_REG_PC));
+        break;
+    }
+    g_shutdown = 1; g_exit = 1;
 #ifdef ME_BUNDLED
     if (g_shm) g_shm->quit = 1;            /* engine done -> end the viewer loop, then it exit()s */
     pthread_join(vth, NULL);

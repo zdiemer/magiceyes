@@ -39,6 +39,11 @@
 extern __thread uc_engine *g_uc;   /* per host thread: the calling guest thread's uc */
 extern uint32_t g_brk, g_brk_start, g_mmap_next;
 extern int g_exit, g_exit_code, g_trace, g_scret;
+extern int g_shutdown;        /* real quit: ends helper + viewer (g_exit is the per-run CPU bail) */
+extern int g_reloading;       /* a reset/reload is in flight: the helper skips present */
+extern int g_reload_chdir;    /* reload should chdir to the new binary's dir (File->Open: yes;
+                                 GPEComp re-exec into the temp: no -- keep the game's cwd) */
+extern char g_reload_path[PATH_MAX];   /* non-empty -> the main loop resets + loads this binary */
 extern __thread int g_setpc;   /* a syscall set PC (signal entry/sigreturn): skip R0 write */
 extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 
@@ -49,6 +54,22 @@ extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 void die(const char *m, uc_err e);
 void me_usleep(unsigned us);   /* sleep, low CPU (Windows usleep is ~15ms-granular) */
 void me_platform_init(void);   /* one-time host setup (Windows: timer res + no EcoQoS throttling) */
+
+/* ---- reset/reload (shared by GPEComp re-exec + File->Open hot reload) ---- */
+void engine_request_reload(const char *host_path);  /* viewer thread: stop+reset+load (threads.c) */
+void engine_stop_all_threads(void);                 /* join every worker, close its uc (threads.c) */
+void mem_reset(void);                               /* free all guest-RAM host backing (mem.c) */
+void devices_reset(void);                           /* zero device/fb/audio/MMSP2 state (devices.c) */
+void shm_reset_for_new_game(void);                  /* reset per-game shm cursors (devices.c) */
+void syscalls_reset(void);                          /* close host fds, free memfds (syscalls.c) */
+
+/* ---- loader.c: resolve folder/.zip/.gpe -> a runnable binary, classify static/dynamic ---- */
+const char *resolve_input(const char *in, char *out, size_t cap);  /* NULL + message on error */
+int classify_elf(const char *path);   /* 0 = static ET_EXEC ok, 1 = dynamic (deferred), -1 = error */
+
+/* ---- path redirect: /mnt/tmp,/tmp -> host temp on Windows (identity on Linux), syscalls.c ---- */
+void rewrite_guest_path(const char *in, char *out, size_t cap);
+void me_host_tmpdir(char *out, size_t cap);   /* host scratch dir (created on first use) */
 void map_region(uint32_t addr, uint32_t size, uint32_t perms);   /* host-backed (mem.c) */
 void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms);
 void *guest_to_host(uint32_t gaddr);   /* host ptr backing a guest addr (host-atomic ops) */
@@ -140,6 +161,7 @@ uc_engine *uc_new_thread(void);
 void *thread_entry(void *arg);
 int futex_wait(uint32_t uaddr, uint32_t val);
 int futex_wake(uint32_t uaddr, int n);
+void futex_wake_all(void);   /* broadcast every wait-queue (teardown: free blocked threads) */
 void sigsuspend_wait(void);
 void threads_init(void);
 int thread_alloc(void);

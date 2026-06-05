@@ -27,18 +27,35 @@ host/win/build_bundle_win.sh      # -> bin/magiceyes.exe (+ SDL2.dll)  SINGLE-PR
 ```
 
 ## Run (on Windows — cmd/PowerShell)
-From the directory holding the GP2X binary + its `Data\` folder.
 
 Single-process bundle (engine + viewer in one process, shared in-process `g_shm`):
 ```
-bin\magiceyes.exe Payback_tmp 3
+bin\magiceyes.exe [options] <game.gpe | folder | game.zip | static-binary>
 ```
-Two-process (engine + separate viewer, rendezvous on a Win32 named mapping):
+`magiceyes.exe` accepts a **folder** (finds the single `.gpe` in it, following a shell-script
+launcher to the real ARM binary; errors on 0 or 2+ `.gpe`), a **`.zip`** (extracted to
+`%TEMP%\magiceyes\` then treated as a folder), a **`.gpe`** directly, or an already-decompressed
+static binary. A GP2X `.gpe` is itself a static GPEComp self-extractor: the engine runs it and the
+`execve` of its decompressed payload triggers an in-process reload onto the real game (inline
+decompression, no separate decompressor). Dynamically-linked titles (Wiz, dynamic GP2X) are
+detected and reported — native dynamic-linker support is still pending. It runs from the game's
+directory automatically, so `Data\` resolves.
+
+Options: `-s/--scale N`, `-f/--fullscreen` (toggle in-app with **F11**/Alt-Enter), `--mute`,
+`--volume N`, `--timescale MHz`, `-h/--help`, `--version`, plus diagnostic flags
+(`--trace`/`--profile`/`--scret`/`--threaddump`/`--no-smcfreeze`).
+
+The bundle has a native **menu bar**: **File** → Open… (also Ctrl+O) / Open Recent / Reload / Exit;
+**View** → Scale 1–4× / Fullscreen; **Audio** → Mute / Volume; **Help** → Controls / About. File →
+Open hot-reloads a different game **in-process** (the engine tears down the running game and loads
+the new one without restarting — see `engine_reset_and_load` in `host/engine/main.c`).
+
+Two-process (engine + separate viewer, rendezvous on a Win32 named mapping; no menu bar):
 ```
 host\win\run_win.bat Payback_tmp 3
 ```
-or manually: `me_unicorn.exe Payback_tmp` in one window, `viewer.exe 3` in another. `bin\` needs
-`me_unicorn.exe`, `viewer.exe`, `SDL2.dll` (two-process) or `magiceyes.exe`, `SDL2.dll` (bundle).
+or manually: `me_unicorn.exe Payback_tmp` in one window, `viewer.exe --scale 3` in another. `bin\`
+needs `me_unicorn.exe`, `viewer.exe`, `SDL2.dll` (two-process) or `magiceyes.exe`, `SDL2.dll` (bundle).
 
 The bundle (`-DME_BUNDLED`) collapses the engine↔viewer shm bridge into one process (the viewer runs
 on a worker thread sharing the engine's in-process `g_shm`). Payback runs at **full parity with

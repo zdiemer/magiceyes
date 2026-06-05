@@ -64,6 +64,17 @@ void *guest_to_host(uint32_t gaddr) {
     return h;
 }
 
+/* Free every guest-RAM host backing (the registry owns it; uc_close only drops the uc's
+   view of these uc_mem_map_ptr mappings). Called between games by engine_reset_and_load
+   AFTER all worker ucs and the main uc are closed -- nothing maps these pointers anymore. */
+void mem_reset(void) {
+    pthread_mutex_lock(&g_reg_lock);
+    for (int i = 0; i < g_nreg; i++) munmap(g_reg[i].host, g_reg[i].len);
+    g_nreg = 0;
+    pthread_mutex_unlock(&g_reg_lock);
+    g_nmfree = 0;
+}
+
 /* Map every recorded region into a fresh uc — the native-thread factory. */
 void uc_map_all(uc_engine *u) {
     pthread_mutex_lock(&g_reg_lock);

@@ -54,7 +54,9 @@ typedef struct {
 #define ELFCLASS32 1
 
 /* e_type / e_machine */
+#define ET_REL  1
 #define ET_EXEC 2
+#define ET_DYN  3
 #define EM_ARM  40
 
 /* p_type */
