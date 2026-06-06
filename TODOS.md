@@ -171,13 +171,15 @@ runs a growing set of titles with no WSL/qemu at run time. Detail: CLAUDE.md + t
 
 **Working (boot to gameplay):**
 - **Wiz — Cave Story / NXEngine**: clean (video/audio/input).
-- **Wiz — Deicide 3** (`d3return_en.gpe`, Inka DRM): runs, **audio clean**. `stage_rootfs.sh`
-  stages our DRM gate stubs over the firmware libinkadrm/libdrmcode.
+- **Wiz — Deicide 3** (`d3return_en.gpe`, Inka DRM): boots + DRM gate OK, but **rendering and
+  audio are both wrong — OPEN, see Known Issues**. `stage_rootfs.sh` stages our DRM gate stubs
+  over the firmware libinkadrm/libdrmcode.
 - **Wiz — Her Knights** (`knights.gpe`): runs, gameplay perfect — **BGM static (OPEN, below)**.
   Needed the GPH-fork Wiz SDL extensions in the shim (SDL_SetLcdMode etc.).
-- **Wiz — Patissier** (`rg_ura/rg.gpe`, CodeSourcery **EABI**): runs (render+audio). Uses the
-  second **EABI rootfs** (`host/win/stage_rootfs_eabi.sh` → `assets/rootfs-eabi`, Debian Wheezy
-  armel + EABI-cross-built shim), selected per-title by PT_INTERP.
+- **Wiz — Patissier** (`rg_ura/rg.gpe`, CodeSourcery **EABI**): boots via the EABI rootfs, but
+  **rendering is wrong — OPEN, see Known Issues**. Uses the second **EABI rootfs**
+  (`host/win/stage_rootfs_eabi.sh` → `assets/rootfs-eabi`, Debian Wheezy armel + EABI-cross-built
+  shim), selected per-title by PT_INTERP.
 - **GP2X static** — Payback, Blazar, Quartz2, Vektar, Knight Lore: render + play (FB ioctls,
   _newselect, MESG blitter, 8bpp palette, EADR scanout).
 - **GP2X dynamic** — Odonata, Wind & Water: render/run (dyn loader + rootfs + FPA emu).
@@ -195,6 +197,27 @@ runs a growing set of titles with no WSL/qemu at run time. Detail: CLAUDE.md + t
   too ⇒ shim/SDL_mixer bug (fixable); clean ⇒ engine CPU/DSP-emulation bug (deep). Trace HK's
   custom BGM loader (no symbols). Debug env: host `ME_FAKESDL_AUDIO_DUMP=/tmp/x.pcm` → guest
   ring PCM; analyse with zcr (≈0.5 static, <0.15 clean music).
+- **Deicide 3 — incorrect rendering + audio** (OPEN, reported 2026-06): the title boots and the
+  DRM gate passes (Deicide assets are plaintext, so `getcode`=0 stub yields correct data — this is
+  NOT a DRM problem), but the **visuals don't render correctly** and the **audio is wrong**
+  (regressed from the earlier "audio clean" note — re-verify against current shim). It runs
+  *correctly* on the qemu backend (known-good video/audio on Wiz), so this is a native-engine
+  divergence. Next steps:
+  - **Video**: capture the blit stream (`ME_FAKESDL_BLIT_LOG=1`) + a guest surface/framebuffer
+    dump; check whether backgrounds/sprites land at the wrong depth/format/pitch/position. Suspect
+    the shim SDL_Surface/PixelFormat ABI vs the rootfs SDL_image (same class as RetroVirus's
+    empty-surface bug) or a `SDL_LoadBMP_RW`/colour-key path.
+  - **Audio**: dump the guest ring (`ME_FAKESDL_AUDIO_DUMP=/tmp/d3.pcm`, analyse zcr) and compare
+    the played format/rate to the game's `SDL_OpenAudio` request; verify the U8/S16 + resample
+    conversion (cf. the Her Knights 8-bit pipeline + commit 4f22714). Also confirm the `.dat`
+    assets are extracted (`tools/extract_dat.py`) — loose `dat/snd/*.wav` are read as files.
+  - Localize by diffing the native run against the qemu-backend run (same game, same assets).
+- **Patissier — incorrect rendering** (OPEN, reported 2026-06): boots via the EABI rootfs but
+  **doesn't render correctly**. EABI-specific (second rootfs + EABI-cross-built shim), so suspect
+  an **EABI ABI mismatch** in the SDL surface/blit path, or a missing GPH/Wiz SDL extension the
+  title needs. Next: `ME_FAKESDL_BLIT_LOG=1` + surface dump to compare drawn-vs-expected; confirm
+  the EABI shim's SDL_Surface/PixelFormat layout is ABI-identical to the Wheezy-armel
+  SDL_image/ttf it links against; compare against a reference `qemu-arm` run of the same binary.
 - **Odonata — gameplay object-pool crash** (PARKED): title+menu render in true colour, but a
   few seconds into gameplay it hits the game's own assert (object.cpp:297, `!instance_list.empty()`)
   — dead sprite objects never freed → pool empties + framerate collapses. FPA word-swap fixed
