@@ -52,9 +52,17 @@ static uint32_t cpdt_addr(uc_engine *uc, uint32_t insn) {
     int P = (insn >> 24) & 1, U = (insn >> 23) & 1, W = (insn >> 21) & 1, Rn = (insn >> 16) & 0xf;
     uint32_t off = (insn & 0xff) * 4, base = 0;
     uc_reg_read(uc, g_sregs[Rn], &base);          /* g_sregs[0..15] = R0..R12,SP,LR,PC */
+    if (Rn == 15) {
+        /* PC-relative literal load (ldfd f0,[pc,#N] loads an FP constant from the literal pool):
+           the ARM addressing base is Align(PC,4)+8, but in the invalid-insn hook PC reads as the
+           faulting instruction's own address. Without the +8 every FP constant loads 8 bytes off
+           -> wrong gameplay physics -> object-list corruption (Odonata's AddPBullet assert). */
+        base = (base & ~3u) + 8;
+    }
     uint32_t addr = P ? (U ? base + off : base - off) : base;
-    uint32_t wb   = U ? base + off : base - off;
-    if ((P && W) || !P) { uc_reg_write(uc, g_sregs[Rn], &wb); }
+    /* LDC/STC writeback iff W==1 (P=0,W=0 is the no-writeback "unindexed" form -- writing back
+       there would corrupt Rn). */
+    if (W) { uint32_t wb = U ? base + off : base - off; uc_reg_write(uc, g_sregs[Rn], &wb); }
     return addr;
 }
 
@@ -88,17 +96,21 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
                 }
             }
         } else {                                       /* LDF / STF: one register */
-            if (lenbits == 0) {                        /* single (4 bytes) */
+            if (lenbits == 0) {                        /* single (4 bytes, one word -- no swap) */
                 if (L) { float f = 0; uc_mem_read(uc, addr, &f, 4); g_fpa[Fd] = (double)f; }
                 else   { float f = (float)g_fpa[Fd]; uc_mem_write(uc, addr, &f, 4); }
-            } else if (lenbits == 1) {                 /* double (8 bytes) */
-                if (L) { double d = 0; uc_mem_read(uc, addr, &d, 8); g_fpa[Fd] = d; }
-                else   { double d = g_fpa[Fd]; uc_mem_write(uc, addr, &d, 8); }
-            } else {                                   /* extended/packed (12 B): treat as double */
-                if (L) { double d = 0; uc_mem_read(uc, addr, &d, 8); g_fpa[Fd] = d; }
-                else   { double d = g_fpa[Fd]; uint8_t z[4] = {0};
-                         uc_mem_write(uc, addr, &d, 8); uc_mem_write(uc, addr + 8, z, 4); }
-                if (getenv("ME_FPA_LOG")) fprintf(stderr, "  [fpa] extended LDF/STF @%08x (approx)\n", pc);
+            } else {                                    /* double (8 bytes) / extended (12, top 8) */
+                /* ARM FPA stores a double WORD-SWAPPED: the high 32-bit word at the lower address
+                   (mixed-endian), unlike a host little-endian double. Without swapping the two
+                   words, every double the game loads/stores via FPA (coordinates, angles, the
+                   PC-relative literal constants) is garbage -> corrupted gameplay physics. */
+                if (L) { uint8_t b[8]; uc_mem_read(uc, addr, b, 8);
+                         uint8_t s[8]; memcpy(s, b + 4, 4); memcpy(s + 4, b, 4);
+                         double d; memcpy(&d, s, 8); g_fpa[Fd] = d; }
+                else   { double d = g_fpa[Fd]; uint8_t s[8]; memcpy(s, &d, 8);
+                         uint8_t b[8]; memcpy(b, s + 4, 4); memcpy(b + 4, s, 4);
+                         uc_mem_write(uc, addr, b, 8);
+                         if (lenbits == 2) { uint8_t z[4] = {0}; uc_mem_write(uc, addr + 8, z, 4); } }
             }
         }
         return 1;

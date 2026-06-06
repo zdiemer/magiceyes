@@ -144,15 +144,24 @@ uint32_t setup_stack(int argc, char **argv) {
     uint32_t sp = STACK_TOP;
 
     /* env strings (dynamic only) */
-    const char *envs[4]; int nenv = 0;
+    const char *envs[12]; int nenv = 0;
+    static char envbuf[12][128];
     if (g_is_dynamic) {
         envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib";
         envs[nenv++] = "HOME=/tmp";
-        static char fps[32];
-        const char *f = getenv("ME_GP2X_FPS"); snprintf(fps, sizeof fps, "FAKESDL_FPS=%s", f ? f : "60");
-        envs[nenv++] = fps;
+        const char *f = getenv("ME_GP2X_FPS");
+        snprintf(envbuf[nenv], sizeof envbuf[0], "FAKESDL_FPS=%s", f ? f : "60"); envs[nenv] = envbuf[nenv]; nenv++;
+        /* Forward shim debug toggles from the host env (the guest getenv reads only the envp we
+           build here, not the host environment): ME_FAKESDL_FOO -> FAKESDL_FOO in the guest. */
+        static const char *fwd[] = { "FAKESDL_BLIT_LOG", "FAKESDL_PRESENT_LOG", "FAKESDL_NO_COLORKEY",
+                                     "FAKESDL_SRC_DUMP", "FAKESDL_AUDIO_DUMP" };
+        for (int i = 0; i < (int)(sizeof fwd / sizeof fwd[0]) && nenv < 11; i++) {
+            char host[64]; snprintf(host, sizeof host, "ME_%s", fwd[i]);
+            const char *v = getenv(host);
+            if (v) { snprintf(envbuf[nenv], sizeof envbuf[0], "%s=%s", fwd[i], v); envs[nenv] = envbuf[nenv]; nenv++; }
+        }
     }
-    uint32_t envp[4];
+    uint32_t envp[12];
 
     /* push strings, collect guest pointers */
     uint32_t argp[64]; int n = argc < 63 ? argc : 63;
