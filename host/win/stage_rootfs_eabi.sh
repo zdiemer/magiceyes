@@ -45,18 +45,32 @@ $CC -shared -fPIC -O2 -march=armv5te -marm -mfloat-abi=soft -fno-stack-protector
    -nostdinc -I "$SH/inc/SDL" -I "$SH/inc" -I "$REPO/guest/src" \
    -isystem "$GCCINC" -isystem "$SYS/usr/include/$MA" -isystem "$SYS/usr/include" \
    -Wl,-soname,libSDL-1.2.so.0 -o "$SH/libSDL-1.2.so.0" "$REPO/guest/src/fakesdl.c" -lrt -ldl
+# (dlopen IS used now — IMG_Load decodes PNG via libpng12 dlopen'd at runtime; Wheezy glibc 2.13
+#  provides it in libdl.so.2, which we stage, so __dlopen is fine for THIS EABI rootfs.)
 bad=$(readelf -W --dyn-syms "$SH/libSDL-1.2.so.0" | awk '$7=="UND"{print $8}' \
-      | grep -E '__gettimeofday64|__nanosleep64|__dlopen|GLIBC_2\.(1[4-9]|[2-9][0-9])' || true)
+      | grep -E '__gettimeofday64|__nanosleep64|GLIBC_2\.(1[4-9]|[2-9][0-9])' || true)
 [ -z "$bad" ] || { echo "shim has too-new refs: $bad"; exit 1; }
+
+echo "== cross-compile the fake-GLES1.1/EGL software rasterizer (Caanoo GPU emu) =="
+# Self-contained (defines its own Khronos types); needs libc + libm + librt only.
+$CC -shared -fPIC -O2 -march=armv5te -marm -mfloat-abi=soft -fno-stack-protector -D_FORTIFY_SOURCE=0 \
+   --sysroot="$SYS" -B "$SYS/usr/lib/$MA" -L "$SYS/usr/lib/$MA" -L "$SYS/lib/$MA" \
+   -nostdinc -I "$REPO/guest/src" \
+   -isystem "$GCCINC" -isystem "$SYS/usr/include/$MA" -isystem "$SYS/usr/include" \
+   -Wl,-soname,libGLESv1_CM.so -o "$SH/libGLESv1_CM.so" "$REPO/guest/src/fakegles.c" -lm -lrt
 
 echo "== extract runtime libs =="
 ST="$W/stage"; mkdir -p "$ST"
 #   core: libc/ld/libm/libpthread/libdl/librt, C++ runtime, zlib
 #   SDL_mixer + its real OGG decoder chain (bgm is .ogg) + mod/flac/mad (NEEDED, so must load)
 #   SDL_gfx (rotozoomSurface)
+#   Caanoo GLES titles need REAL image/font/audio leaf libs (not stubs): Propis decodes PNG
+#   assets (libpng12) + a TTF font (libfreetype); Rhythmos streams MP3 (libmad + libid3tag).
+#   libts (tslib): Caanoo touchscreen lib — Propis NEEDs libts-0.0.so.0 (clean deps: libdl+libc).
 for p in libc6 libgcc1 libstdc++6 zlib1g \
          libsdl-mixer1.2 libsdl-gfx1.2-4 \
-         libvorbisfile3 libvorbis0a libogg0 libmikmod2 libmad0 libflac8; do
+         libvorbisfile3 libvorbis0a libogg0 libmikmod2 libmad0 libflac8 \
+         libpng12-0 libfreetype6 libid3tag0 libts-0.0-0; do
   dpkg-deb -x "$(fetch $p)" "$ST"
 done
 
@@ -75,15 +89,45 @@ done
 # rg NEEDs libSDL_gfx.so.0 but Wheezy's soname is libSDL_gfx.so.13 (rotozoomSurface ABI is stable)
 G=$(ls libSDL_gfx.so.13* 2>/dev/null | head -1); [ -n "${G:-}" ] && cp -f "$G" libSDL_gfx.so.0
 
-echo "== fake-SDL shim + empty soname stubs (rg NEEDs these only to LOAD) =="
+echo "== fake-SDL shim + empty soname stubs (titles NEED these only to LOAD) =="
 for n in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do cp -f "$SH/libSDL-1.2.so.0" "$DST/lib/$n"; done
 echo '' > "$W/empty.c"
-for s in libSDL_image-1.2.so.0 libSDL_ttf-2.0.so.0 libjpeg.so.7 libpng12.so.0 \
-         libfreetype.so.6 libvorbisidec.so.1; do
+for s in libSDL_image-1.2.so.0 libSDL_ttf-2.0.so.0 libjpeg.so.7 libvorbisidec.so.1; do
   $CC -shared -nostdlib -march=armv5te -marm -Wl,-soname,$s -o "$DST/lib/$s" "$W/empty.c"
 done
-# DRM gate stubs (harmless; lets DRM-locked EABI titles boot past the gate too)
-for b in libinkadrm libdrmcode; do cp -f "$REPO/bin/guest/$b.so.0" "$DST/lib/$b.so.0" 2>/dev/null || true; done
+
+echo "== fake-GLES shim under every Caanoo GL/EGL soname + Pollux driver stubs =="
+# Our rasterizer exports the full gl*/egl* set; install it under each soname the games NEED
+# (Khronos names for Rhythmos; the *_lite/glport pair for Propis). First definition wins at
+# link time, so the real Pollux GPU driver libs below are pure load-time stubs.
+for n in libGLESv1_CM.so libOpenEGL.so libopengles_lite.so libglport.so.0; do
+  cp -f "$SH/libGLESv1_CM.so" "$DST/lib/$n"
+done
+for s in libMesNativeOEM.so libDrv.so libmedia.so librec.so libunicodefont.so libinifile.so; do
+  $CC -shared -nostdlib -march=armv5te -marm -Wl,-soname,$s -o "$DST/lib/$s" "$W/empty.c"
+done
+# DRM gate stubs (Inka "NED") — cross-compile EABI so ld-linux.so.3 accepts the OS ABI.
+# (The GPH-toolchain copies in bin/guest carry the firmware's OABI OS-ABI byte, which the
+# Debian EABI ld-linux.so.3 rejects with "ELF file OS ABI invalid" — hit by Caanoo DRM titles
+# Propis/Rhythmos/Liar; Patissier had no DRM so this was never exercised.) One source exports
+# the full symbol set; stage it as BOTH sonames.
+for b in libinkadrm libdrmcode; do
+  $CC -shared -fPIC -O2 -march=armv5te -marm -mfloat-abi=soft -nostdinc \
+     -isystem "$GCCINC" -isystem "$SYS/usr/include/$MA" -isystem "$SYS/usr/include" \
+     --sysroot="$SYS" -B "$SYS/usr/lib/$MA" -L "$SYS/usr/lib/$MA" -L "$SYS/lib/$MA" \
+     -Wl,-soname,$b.so.0 -o "$DST/lib/$b.so.0" "$REPO/guest/src/drmstub.c"
+done
+
+# Caanoo firmware system assets (fonts, etc.): titles open absolute paths like
+# /usr/gp2x/HYUni_GPH_B_V1.01.ttf (the handset's Korean TrueType font, used by the DGE/QType4
+# font engine in Propis/Rhythmos). These live only in the firmware (yaffs2_rfs.img). If a
+# dereferenced copy has been staged into assets/caanoo-ref (see host/win/extract_caanoo_fw.sh),
+# overlay it into the rootfs so the absolute opens resolve.
+REF="$REPO/assets/caanoo-ref"
+if [ -d "$REF/usr" ]; then
+  echo "== overlay Caanoo firmware assets (assets/caanoo-ref/usr -> rootfs) =="
+  cp -a "$REF/usr/." "$DST/usr/" 2>/dev/null || { mkdir -p "$DST/usr"; cp -a "$REF/usr/." "$DST/usr/"; }
+fi
 
 echo "done. $(ls "$DST/lib" | wc -l) libs in $DST/lib"
 echo "ME_GP2X_ROOTFS_EABI=$DST  (auto-found as assets/rootfs-eabi; selected by PT_INTERP)"

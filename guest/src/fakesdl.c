@@ -35,6 +35,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <dlfcn.h>
+#include <setjmp.h>
 
 #include "gp2xshm.h"
 
@@ -45,6 +46,14 @@ static char g_err[256];
 static unsigned long g_start_ms = 0;
 static unsigned int g_prev_buttons = 0;
 static int g_inited = 0;
+
+/* When a GLES title is ALSO loaded (Caanoo Propis/Rhythmos use SDL for input/audio/timing but
+   EGL+GLES for rendering), the fakegles shim owns the shm framebuffer. Suppress every SDL present
+   (SDL_Flip + the continuous-scanout fallback) so they can't overwrite the GL frame. Weak ref:
+   resolves to fakegles's `magiceyes_gl_active` when that lib is loaded, else &sym == NULL and
+   SDL-only titles are unaffected. */
+extern int magiceyes_gl_active __attribute__((weak));
+static int gl_owns_fb(void) { return (&magiceyes_gl_active != 0) && magiceyes_gl_active; }
 
 #define EVQ_SIZE 256
 static SDL_Event g_evq[EVQ_SIZE];
@@ -209,6 +218,7 @@ SDL_Surface *SDL_GetVideoSurface(void) { return g_screen; }
 
 static void present(SDL_Surface *s) {
     if (!g_shm || !s) return;
+    if (gl_owns_fb()) return;          /* GLES title: the fakegles shim presents the GL frame */
     int w = s->w, h = s->h, x, y;
     if (w > GP2XSHM_MAXW) w = GP2XSHM_MAXW;
     if (h > GP2XSHM_MAXH) h = GP2XSHM_MAXH;
@@ -238,6 +248,7 @@ static void present(SDL_Surface *s) {
 static unsigned long g_last_flip_ms = 0, g_last_scan_ms = 0;
 static void scanout_maybe(void) {
     if (!g_screen) return;
+    if (gl_owns_fb()) return;          /* GLES title owns the framebuffer; don't scan out SDL's */
     unsigned long t = now_ms();
     if (t - g_last_flip_ms < 200) return;   /* the game is actively flipping: leave it alone */
     if (t - g_last_scan_ms < 16) return;    /* else emulate ~60Hz scanout */
@@ -948,6 +959,111 @@ SDL_Surface *SDL_LoadBMP_RW(SDL_RWops *src, int freesrc) {
 }
 int SDL_SaveBMP_RW(SDL_Surface *s, SDL_RWops *dst, int freedst) {
     (void)s; if (freedst && dst) dst->close(dst); return 0;
+}
+
+/* -------------------------------------------------------------- SDL_image (PNG)
+ * Caanoo GLES titles (Propis/Rhythmos) load textures with IMG_Load. Pulling the real
+ * SDL_image drags in a libjpeg/libtiff/libwebp chain; instead we decode PNG ourselves via
+ * the staged libpng12, dlopen'd LAZILY so the shim keeps no hard NEEDED (the firmware rootfs
+ * has no libpng). IMG_Load resolves from this shim; libSDL_image-1.2.so.0 stays a load-only
+ * stub. Output is a 32-bit RGBA surface (byte order R,G,B,A) ready for glTexImage2D(GL_RGBA). */
+typedef void (*png_rw_t)(void *, unsigned char *, unsigned long);
+typedef void (*png_err_t)(void *, const char *);
+static struct {
+    int tried; void *h;
+    void* (*create_read)(const char *, void *, png_err_t, png_err_t);
+    void* (*create_info)(void *);
+    void  (*destroy)(void **, void **, void **);
+    void  (*set_read_fn)(void *, void *, png_rw_t);
+    void  (*read_info)(void *, void *);
+    void  (*read_image)(void *, unsigned char **);
+    void  (*read_update_info)(void *, void *);
+    void  (*set_strip_16)(void *);
+    void  (*set_expand)(void *);
+    void  (*set_gray_to_rgb)(void *);
+    void  (*set_tRNS_to_alpha)(void *);
+    void  (*set_filler)(void *, unsigned int, int);
+    unsigned int  (*get_iw)(void *, void *);
+    unsigned int  (*get_ih)(void *, void *);
+    unsigned char (*get_bitdepth)(void *, void *);
+    unsigned char (*get_colortype)(void *, void *);
+    const char* (*get_ver)(void *);
+    void* (*get_error_ptr)(void *);
+    void* (*get_io_ptr)(void *);
+} P;
+static int png_load(void) {
+    if (P.tried) return P.h != NULL;
+    P.tried = 1;
+    P.h = dlopen("libpng12.so.0", RTLD_NOW | RTLD_GLOBAL);
+    if (!P.h) { fprintf(stderr, "fakesdl: IMG_Load: libpng12 not loadable (%s)\n", dlerror()); return 0; }
+#define L(f,n) P.f = (void *)dlsym(P.h, n)
+    L(create_read,"png_create_read_struct"); L(create_info,"png_create_info_struct");
+    L(destroy,"png_destroy_read_struct");     L(set_read_fn,"png_set_read_fn");
+    L(read_info,"png_read_info");             L(read_image,"png_read_image");
+    L(read_update_info,"png_read_update_info");L(set_strip_16,"png_set_strip_16");
+    L(set_expand,"png_set_expand");           L(set_gray_to_rgb,"png_set_gray_to_rgb");
+    L(set_tRNS_to_alpha,"png_set_tRNS_to_alpha"); L(set_filler,"png_set_filler");
+    L(get_iw,"png_get_image_width");          L(get_ih,"png_get_image_height");
+    L(get_bitdepth,"png_get_bit_depth");      L(get_colortype,"png_get_color_type");
+    L(get_ver,"png_get_libpng_ver");          L(get_error_ptr,"png_get_error_ptr");
+    L(get_io_ptr,"png_get_io_ptr");
+#undef L
+    if (!P.create_read || !P.read_image || !P.set_read_fn || !P.get_io_ptr)
+        { fprintf(stderr, "fakesdl: IMG_Load: libpng12 symbols missing\n"); P.h = NULL; return 0; }
+    return 1;
+}
+static void png_cb_read(void *png, unsigned char *data, unsigned long len) {
+    SDL_RWops *rw = (SDL_RWops *)P.get_io_ptr(png);
+    if (rw) rw->read(rw, data, 1, (int)len);
+}
+static void png_cb_err(void *png, const char *msg) {
+    jmp_buf *jb = (jmp_buf *)P.get_error_ptr(png);
+    fprintf(stderr, "fakesdl: IMG_Load: libpng error: %s\n", msg ? msg : "?");
+    if (jb) longjmp(*jb, 1);
+}
+static void png_cb_warn(void *png, const char *msg) { (void)png; (void)msg; }
+
+SDL_Surface *IMG_Load_RW(SDL_RWops *src, int freesrc) {
+    if (!src) return NULL;
+    if (!png_load()) { if (freesrc) src->close(src); return NULL; }
+    jmp_buf jb;
+    void *png = P.create_read(P.get_ver ? P.get_ver(NULL) : "1.2.49", &jb, png_cb_err, png_cb_warn);
+    if (!png) { if (freesrc) src->close(src); return NULL; }
+    void *info = P.create_info(png);
+    SDL_Surface * volatile surf = NULL;
+    unsigned char ** volatile rows = NULL;
+    if (setjmp(jb)) goto done;                 /* libpng error path */
+    P.set_read_fn(png, src, png_cb_read);
+    P.read_info(png, info);
+    unsigned int w = P.get_iw(png, info), h = P.get_ih(png, info), y;
+    int bd = P.get_bitdepth(png, info), ct = P.get_colortype(png, info);
+    if (bd == 16) P.set_strip_16(png);
+    P.set_expand(png);                         /* palette->RGB, sub-8-bit gray->8, tRNS->alpha */
+    if (!(ct & 2)) P.set_gray_to_rgb(png);     /* PNG_COLOR_MASK_COLOR == 2 */
+    P.set_tRNS_to_alpha(png);
+    P.set_filler(png, 0xFF, 1);                /* PNG_FILLER_AFTER: force RGB -> RGBA */
+    P.read_update_info(png, info);
+    surf = alloc_surface(0, (int)w, (int)h, 32, 0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
+    rows = (unsigned char **)malloc((size_t)h * sizeof(unsigned char *));
+    for (y = 0; y < h; y++)
+        rows[y] = (unsigned char *)surf->pixels + (size_t)y * surf->pitch;
+    P.read_image(png, rows);
+    { static int log = -1; if (log < 0) log = getenv("FAKESDL_BLIT_LOG") ? 1 : 0;
+      if (log) fprintf(stderr, "IMG_Load %ux%u (bd=%d ct=%d) -> RGBA32\n", w, h, bd, ct); }
+done:
+    free((void *)rows);
+    { void *pp = png, *ii = info; P.destroy(&pp, &ii, NULL); }
+    if (freesrc) src->close(src);
+    return (SDL_Surface *)surf;
+}
+SDL_Surface *IMG_Load(const char *file) {
+    SDL_RWops *rw = SDL_RWFromFile(file, "rb");
+    if (!rw) { SDL_SetError("IMG_Load: can't open %s", file); return NULL; }
+    return IMG_Load_RW(rw, 1);
+}
+int IMG_isPNG(SDL_RWops *src) { (void)src; return 1; }
+const SDL_version *IMG_Linked_Version(void) {
+    static SDL_version v = { 1, 2, 12 }; return &v;
 }
 
 /* ---------------------------------------------------- extra video helpers */

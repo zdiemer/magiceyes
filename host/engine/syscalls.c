@@ -394,6 +394,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                   mf->pos += n; return n; }
         if (dev_type((int)a0) == DEV_I2C)  return i2c_read(a1, a2);  /* handset serial */
         if (dev_type((int)a0) == DEV_GPIO) return gpio_read(a1, a2); /* joystick buttons */
+        if (dev_type((int)a0)) return 0;   /* other stub devices: EOF (never host-read a fake fd) */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         long r = read((int)a0, tmp, a2);
         if (r > 0) uc_mem_write(g_uc, a1, tmp, r);

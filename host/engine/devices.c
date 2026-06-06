@@ -11,9 +11,16 @@ int dev_open(const char *path) {
     else if (!strcmp(path, "/dev/gpio") ||
              !strcmp(path, "/dev/GPIO"))      t = DEV_GPIO;   /* paeryn SDL opens "/dev/GPIO" */
     else if (!strncmp(path, "/dev/dsp", 8))   t = DEV_DSP;
+    else if (!strcmp(path, "/dev/sound/dsp"))   t = DEV_DSP;   /* Caanoo OSS alias */
     else if (!strncmp(path, "/dev/mixer", 10))t = DEV_MIXER;
+    else if (!strcmp(path, "/dev/sound/mixer")) t = DEV_MIXER; /* Caanoo OSS alias (Liar) */
     else if (!strncmp(path, "/dev/tty", 8))   t = DEV_TTY;
     else if (!strcmp(path, "/dev/i2c-0"))     t = DEV_I2C;   /* handset serial (DRM/region check) */
+    /* Caanoo (Pollux) device nodes the GLES titles open: the ISA1200 haptics motor and the
+       pollux clock-gating control. We have no hardware to drive; a benign stub (open ok,
+       ioctl->0, read->0, write discarded) lets the game proceed past the open. */
+    else if (!strcmp(path, "/dev/isa1200") ||
+             !strcmp(path, "/dev/pollux_clock")) t = DEV_OTHER;
     else if (!strcmp(path, "/dev/shm/gp2x_fb")) t = DEV_SHMFB; /* fake-SDL shim's framebuffer shm */
     else return -1;
     int i; for (i = 0; i < 64; i++) if (g_devtype[i] == 0) break;  /* reuse freed slots */

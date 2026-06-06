@@ -350,6 +350,12 @@ GP2X-specific libs (`libmedia`, etc.) come from the F100/F200 firmware patch tar
   likely unsupported (flag per-title).
 - **Caanoo** (Pollux, like Wiz): once the shim handles Pollux too, mostly mirrors Wiz
   + its own rootfs/button map (analog stick).
+  - **Touchscreen via the viewer** (TODO): Caanoo has a resistive touchscreen (tslib /
+    `libts-0.0.so.0`; titles also read `/dev/input/event`). Map native viewer mouse
+    clicks/drags to touch — feed x/y + pressed through shm (new fields), expose via a fake
+    libts (`ts_open`/`ts_read`/`ts_reload`) in the shim and/or `/dev/input/event` in the
+    device layer. Needed for touch-primary titles (e.g. Propis). For now `libts` is a
+    load-only real lib (ts returns no samples → no touch).
 
 ### Wiz raw arcade ports (Out Zone/Deicide arcade `.gpe`)
 Same root cause as GP2X — they bypass SDL and poke MMSP2 directly. The MMSP2 shim

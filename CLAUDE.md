@@ -551,6 +551,64 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
   ASan/valgrind). Next: Windows pageheap/AppVerifier or fork-source debugging of uc_close/region
   teardown with large mapped-ptr regions.
 
+## Caanoo (Pollux) + GPU emulation — IN PROGRESS (2026-06)
+
+Target titles: **Propis** + **Rhythmos** (SDL + OpenGL ES 1.1) and **Liar** (fbdev-direct VN),
+from `F:\Roms\GP2X Caanoo` (`fungp/`, `liar/`, `rythmos.part1/`). Probe findings:
+
+- **ABI is already supported.** Caanoo `.gpe` are `ARM EABI4`, interp `/lib/ld-linux.so.3`,
+  Linux 2.6.24 — the same ABI as the Wiz EABI homebrew (Patissier). The engine auto-selects
+  `assets/rootfs-eabi` per title by PT_INTERP (`me_rootfs_select`); no loader work.
+- **DRM is not a blocker** — all assets are PLAINTEXT (`liar.dat`→`char/0.bmp`, `propis.bfc`→PNG
+  names, `rhythmos.bin`→RIFF/AVI), like Deicide. The Inka gate just needs `drmstub.c`.
+- **Game classes:** Propis/Rhythmos use SDL (window/input/audio, real SDL_mixer) **plus** EGL +
+  GLES1.1 (Propis: `libopengles_lite`/`libglport`; Rhythmos: `libGLESv1_CM`/`libOpenEGL`/
+  `libMesNativeOEM`/`libDrv`) for rendering. Liar is fbdev-direct (no SDL/GL). GLES (Rhythmos's
+  `rhythmos.bin` AVI background) video decode is a separate sub-project.
+
+**GPU emulation = a software GLES1.1/EGL shim** (`guest/src/fakegles.c`), NOT Pollux GPU/HW
+emulation. It implements the ~40-symbol fixed-function subset both titles import (matrix stack,
+vertex/colour/texcoord arrays, `glDrawArrays` tris/strips/fans, `glTexImage2D`/`Compressed`,
+blend+alpha-test, texenv modulate/replace) as an affine textured-triangle rasterizer into the
+**same `/dev/shm` RGB565 framebuffer** the fake-SDL shim uses; `eglSwapBuffers` presents +
+frame-caps (`FAKESDL_FPS`). Self-contained (declares its own Khronos types; libc+libm+lrt only).
+`FAKEGLES_LOG` traces unhandled enums + the (undocumented Pollux/MES) `glCompressedTexImage2D`
+format. `host/win/stage_rootfs_eabi.sh` cross-compiles it and installs it under every GL/EGL
+soname the games NEED + empty stubs for the real driver libs (`libMesNativeOEM`/`libDrv`/etc.).
+
+**Shim/rootfs glue added for these titles** (all in `stage_rootfs_eabi.sh` + the shim):
+- **DRM stubs cross-compiled EABI** (`drmstub.c`): the GPH-built `bin/guest` copies have the
+  firmware's OABI OS-ABI byte → `ld-linux.so.3` rejects them ("ELF file OS ABI invalid").
+- **`IMG_Load`/`IMG_Load_RW` in the fake-SDL shim** (`fakesdl.c`), decoding PNG via **libpng12
+  dlopen'd lazily** (no hard NEEDED; the firmware rootfs has no libpng). Avoids the real
+  SDL_image's libjpeg/tiff/webp chain. `libSDL_image-1.2.so.0` stays a load-only stub; IMG_Load
+  resolves from the shim.
+- **SDL↔GL present-conflict fix**: hybrid titles call both `SDL_Flip` and `eglSwapBuffers` on the
+  one shm fb. `fakegles` sets exported `magiceyes_gl_active`; `fakesdl` weak-refs it and
+  suppresses its own present/scanout so the GL frame isn't overwritten.
+- **Real leaf libs** fetched (were stubs): `libpng12`, `libfreetype6`, `libid3tag0`, `libts-0.0-0`
+  (tslib, Propis NEEDs `libts-0.0.so.0`/`ts_reload`; clean deps).
+- **Pollux device-node stubs** in the engine (`devices.c`): `/dev/isa1200` (haptics),
+  `/dev/pollux_clock` → benign `DEV_OTHER` (open ok, ioctl→0, read→0, write discarded);
+  `/dev/sound/{dsp,mixer}` OSS aliases. (`syscalls.c`: stub-device reads return 0, never host-read
+  a fake fd.)
+- **Firmware system assets**: titles open absolute `/usr/gp2x/HYUni_GPH_B_V1.01.ttf` (the handset
+  Korean font, DGE/QType4). It lives only in the firmware **YAFFS2** `yaffs2_rfs.img` (not Wiz's
+  UBIFS). `host/win/extract_caanoo_fw.sh` unyaffs it (needs root) → `assets/caanoo-ref/usr/gp2x/`;
+  `stage_rootfs_eabi.sh` overlays `assets/caanoo-ref/usr` into the rootfs.
+
+**STATUS — Propis loads fully and runs its whole DGE engine init** (DRM, Display, File, Frame,
+Render, Sound, SurfaceManager, Font: `qt4_workspace_init` + `CreateFont` succeed) headless on the
+Linux engine (`bin/me_unicorn`, verified end-to-end through dynamic load + all libs). **BLOCKED**
+at QType4 `tt_font_init` → `"TTF Font File Open Failed"` then orderly teardown + exit(773).
+This is **NOT** our GPU/rootfs: the font open SUCCEEDS (fd 3 → fstat64 → close) for the genuine
+firmware font (and for a small DejaVu substitute) — QType4 still fails, so it's a QType4-internal
+check (likely a Korean cmap/table or companion resource). **Next: disassemble propis.gpe
+`tt_font_init` (xref the "TTF Font File Open Failed" string, arm objdump) to find what it really
+needs.** Rhythmos uses the same DGE/QType4 (expect the same wall + AVI video after). Liar (fbdev)
+needs the Pollux `/dev/fb0` present path (not yet wired). Test harness: run headless via
+`bin/me_unicorn ./game.gpe` from the game dir with `ME_TRACE=1 FAKEGLES_LOG=1 FAKESDL_BLIT_LOG=1`.
+
 ## Conventions
 
 - Commit straight to `main`, **no `Co-Authored-By` trailer**.
