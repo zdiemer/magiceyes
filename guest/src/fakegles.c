@@ -596,27 +596,56 @@ static void raster_tri(const Vtx *v0, const Vtx *v1, const Vtx *v2) {
     if (v2->y<miny)miny=v2->y; if (v2->y>maxy)maxy=v2->y;
     int x0=(int)floorf(minx), x1=(int)ceilf(maxx), y0=(int)floorf(miny), y1=(int)ceilf(maxy);
     if (x0<0)x0=0; if (y0<0)y0=0; if (x1>g_fbw)x1=g_fbw; if (y1>g_fbh)y1=g_fbh;
+    if (x1<=x0 || y1<=y0) return;
     float area = edge(v0, v1, v2->x, v2->y);
     if (fabsf(area) < 1e-6f) return;
+    float inv = 1.0f / area;                 /* reciprocal once, not a divide per pixel */
     const Tex *tx = (g_en_tex && g_bound_tex && g_bound_tex < MAXTEX && g_tex[g_bound_tex].used)
                   ? &g_tex[g_bound_tex] : NULL;
+    /* edge functions are linear -> step them incrementally (no per-pixel mults).
+       w0=edge(v1,v2,p): d/dx=v2.y-v1.y, d/dy=v1.x-v2.x;  w1=edge(v2,v0); w2=edge(v0,v1). */
+    float dx0=v2->y-v1->y, dy0=v1->x-v2->x;
+    float dx1=v0->y-v2->y, dy1=v2->x-v0->x;
+    float dx2=v1->y-v0->y, dy2=v0->x-v1->x;
+    float cx0=x0+0.5f, cy0=y0+0.5f;
+    float w0r=edge(v1,v2,cx0,cy0), w1r=edge(v2,v0,cx0,cy0), w2r=edge(v0,v1,cx0,cy0);
+    int pos = area > 0;
+    /* flat colour (all 3 verts equal) -> skip per-pixel colour interpolation (the common 2D quad) */
+    int flat = (v0->r==v1->r && v1->r==v2->r && v0->g==v1->g && v1->g==v2->g &&
+                v0->b==v1->b && v1->b==v2->b && v0->a==v1->a && v1->a==v2->a);
     int x, y;
+    /* hottest 2D case: flat-colour, untextured, opaque (no blend/alpha-test) -> precompute the
+       packed pixel once and store it directly (no per-pixel float clamp/pack/function call). */
+    if (flat && !tx && !g_en_blend && !g_en_atest) {
+        float cr=v0->r, cg=v0->g, cb=v0->b, ca=v0->a;
+        if (cr<0)cr=0; if (cr>1)cr=1; if (cg<0)cg=0; if (cg>1)cg=1;
+        if (cb<0)cb=0; if (cb>1)cb=1; if (ca<0)ca=0; if (ca>1)ca=1;
+        uint32_t pc = ((uint32_t)(ca*255+0.5f)<<24)|((uint32_t)(cb*255+0.5f)<<16)
+                    | ((uint32_t)(cg*255+0.5f)<<8)|(uint32_t)(cr*255+0.5f);
+        for (y = y0; y < y1; y++) {
+            float w0=w0r, w1=w1r, w2=w2r; uint32_t *row = &g_cbuf[(size_t)y*g_fbw];
+            for (x = x0; x < x1; x++, w0+=dx0, w1+=dx1, w2+=dx2) {
+                if (pos) { if (w0<0||w1<0||w2<0) continue; }
+                else     { if (w0>0||w1>0||w2>0) continue; }
+                row[x] = pc;
+            }
+            w0r+=dy0; w1r+=dy1; w2r+=dy2;
+        }
+        return;
+    }
     for (y = y0; y < y1; y++) {
-        float cy = y + 0.5f;
-        for (x = x0; x < x1; x++) {
-            float cx = x + 0.5f;
-            float w0 = edge(v1, v2, cx, cy), w1 = edge(v2, v0, cx, cy), w2 = edge(v0, v1, cx, cy);
-            /* inside if all same sign as area (covers both windings) */
-            if (area > 0) { if (w0 < 0 || w1 < 0 || w2 < 0) continue; }
-            else          { if (w0 > 0 || w1 > 0 || w2 > 0) continue; }
-            float l0 = w0/area, l1 = w1/area, l2 = w2/area;
-            float fr = l0*v0->r + l1*v1->r + l2*v2->r;
-            float fg = l0*v0->g + l1*v1->g + l2*v2->g;
-            float fb = l0*v0->b + l1*v1->b + l2*v2->b;
-            float fa = l0*v0->a + l1*v1->a + l2*v2->a;
+        float w0=w0r, w1=w1r, w2=w2r;
+        for (x = x0; x < x1; x++, w0+=dx0, w1+=dx1, w2+=dx2) {
+            if (pos) { if (w0<0||w1<0||w2<0) continue; }
+            else     { if (w0>0||w1>0||w2>0) continue; }
+            float fr, fg, fb, fa;
+            if (flat) { fr=v0->r; fg=v0->g; fb=v0->b; fa=v0->a; }
+            else { float l0=w0*inv, l1=w1*inv, l2=w2*inv;
+                   fr=l0*v0->r+l1*v1->r+l2*v2->r; fg=l0*v0->g+l1*v1->g+l2*v2->g;
+                   fb=l0*v0->b+l1*v1->b+l2*v2->b; fa=l0*v0->a+l1*v1->a+l2*v2->a; }
             if (tx) {
-                float u = l0*v0->u + l1*v1->u + l2*v2->u;
-                float vv = l0*v0->v + l1*v1->v + l2*v2->v;
+                float l0=w0*inv, l1=w1*inv, l2=w2*inv;
+                float u=l0*v0->u+l1*v1->u+l2*v2->u, vv=l0*v0->v+l1*v1->v+l2*v2->v;
                 uint32_t t = tex_sample(tx, u, vv);
                 float tr=(t&0xff)/255.f, tg=((t>>8)&0xff)/255.f, tb=((t>>16)&0xff)/255.f, ta=((t>>24)&0xff)/255.f;
                 if (g_texenv == GL_REPLACE) { fr=tr; fg=tg; fb=tb; fa=ta; }
@@ -624,16 +653,74 @@ static void raster_tri(const Vtx *v0, const Vtx *v1, const Vtx *v2) {
             }
             put_frag(x, y, fr, fg, fb, fa);
         }
+        w0r+=dy0; w1r+=dy1; w2r+=dy2;
     }
+}
+/* Fast path for the dominant 2D case: a screen-axis-aligned quad (4-vertex TRIANGLE_STRIP/FAN).
+   Fills/blits the rectangle directly -- no per-pixel edge functions, barycentric divides, or
+   attribute interpolation (which, in emulated soft-float, were the framerate killer). Returns 1
+   if it handled the draw. Falls back to raster_tri for rotated/3D geometry and smooth gradients. */
+static int fast_quad(const Vtx *v, int n, GLenum mode) {
+    if (n != 4 || (mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN)) return 0;
+    float xL=v[0].x, xR=v[0].x, yT=v[0].y, yB=v[0].y;
+    for (int i = 1; i < 4; i++) { if (v[i].x<xL)xL=v[i].x; if (v[i].x>xR)xR=v[i].x;
+                                  if (v[i].y<yT)yT=v[i].y; if (v[i].y>yB)yB=v[i].y; }
+    const float EPS = 0.02f;
+    for (int i = 0; i < 4; i++) {                 /* every vertex must sit on a rect corner */
+        int onx = fabsf(v[i].x-xL)<EPS || fabsf(v[i].x-xR)<EPS;
+        int ony = fabsf(v[i].y-yT)<EPS || fabsf(v[i].y-yB)<EPS;
+        if (!onx || !ony) return 0;
+    }
+    if (xR-xL < 0.5f || yB-yT < 0.5f) return 1;   /* degenerate -> nothing to draw */
+    int flat = (v[0].r==v[1].r && v[1].r==v[2].r && v[2].r==v[3].r &&
+                v[0].g==v[1].g && v[1].g==v[2].g && v[2].g==v[3].g &&
+                v[0].b==v[1].b && v[1].b==v[2].b && v[2].b==v[3].b &&
+                v[0].a==v[1].a && v[1].a==v[2].a && v[2].a==v[3].a);
+    const Tex *tx = (g_en_tex && g_bound_tex && g_bound_tex < MAXTEX && g_tex[g_bound_tex].used)
+                  ? &g_tex[g_bound_tex] : NULL;
+    if (!flat && !tx) return 0;                   /* smooth-shaded gradient: use the rasterizer */
+    int rx0=(int)floorf(xL), rx1=(int)ceilf(xR), ry0=(int)floorf(yT), ry1=(int)ceilf(yB);
+    if (rx0<0)rx0=0; if (ry0<0)ry0=0; if (rx1>g_fbw)rx1=g_fbw; if (ry1>g_fbh)ry1=g_fbh;
+    if (rx1<=rx0 || ry1<=ry0) return 1;
+    float cr=v[0].r, cg=v[0].g, cb=v[0].b, ca=v[0].a;
+    if (tx) {
+        float uL=0, uR=0, vT=0, vB=0;             /* axis-aligned UV: u<->x, v<->y */
+        for (int i = 0; i < 4; i++) { if (fabsf(v[i].x-xL)<EPS) uL=v[i].u; else uR=v[i].u;
+                                      if (fabsf(v[i].y-yT)<EPS) vT=v[i].v; else vB=v[i].v; }
+        float du=(uR-uL)/(xR-xL), dv=(vB-vT)/(yB-yT);
+        for (int y = ry0; y < ry1; y++) {
+            float fvv = vT + dv*((y+0.5f)-yT);
+            float fu  = uL + du*((rx0+0.5f)-xL);
+            for (int x = rx0; x < rx1; x++, fu += du) {
+                uint32_t t = tex_sample(tx, fu, fvv);
+                float tr=(t&0xff)/255.f, tg=((t>>8)&0xff)/255.f, tb=((t>>16)&0xff)/255.f, ta=((t>>24)&0xff)/255.f;
+                if (g_texenv == GL_REPLACE) put_frag(x,y,tr,tg,tb,ta);
+                else if (flat)             put_frag(x,y,tr*cr,tg*cg,tb*cb,ta*ca);   /* MODULATE */
+                else                       put_frag(x,y,tr,tg,tb,ta);
+            }
+        }
+    } else if (!g_en_blend && !g_en_atest) {      /* flat opaque fill -> direct store */
+        float r=cr,g=cg,b=cb,a=ca;
+        if(r<0)r=0; if(r>1)r=1; if(g<0)g=0; if(g>1)g=1; if(b<0)b=0; if(b>1)b=1; if(a<0)a=0; if(a>1)a=1;
+        uint32_t pc=((uint32_t)(a*255+0.5f)<<24)|((uint32_t)(b*255+0.5f)<<16)|((uint32_t)(g*255+0.5f)<<8)|(uint32_t)(r*255+0.5f);
+        for (int y = ry0; y < ry1; y++) { uint32_t *row=&g_cbuf[(size_t)y*g_fbw];
+            for (int x = rx0; x < rx1; x++) row[x]=pc; }
+    } else {                                       /* flat + blend/alpha-test */
+        for (int y = ry0; y < ry1; y++) for (int x = rx0; x < rx1; x++) put_frag(x,y,cr,cg,cb,ca);
+    }
+    return 1;
 }
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     g_n_draw++;
     ensure_cbuf();
     if (!g_cbuf || count <= 0 || !g_av.enabled) return;
+    { static int norast = -1; if (norast < 0) norast = getenv("FAKEGLES_NORAST") ? 1 : 0;
+      if (norast) return; }   /* perf probe: skip rasterization (keep transforms/present) */
     Vtx *v = (Vtx *)malloc((size_t)count * sizeof(Vtx));
     if (!v) return;
     int i;
     for (i = 0; i < count; i++) fetch_vertex(first + i, &v[i]);
+    if (fast_quad(v, count, mode)) { free(v); return; }   /* axis-aligned 2D quad fast path */
     if (mode == GL_TRIANGLES) {
         for (i = 0; i + 2 < count; i += 3) raster_tri(&v[i], &v[i+1], &v[i+2]);
     } else if (mode == GL_TRIANGLE_STRIP) {

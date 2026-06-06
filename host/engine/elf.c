@@ -120,8 +120,13 @@ uint32_t load_elf(const char *path) {
        without these (e.g. Liar) need MAGICEYES_DEVICE=caanoo set explicitly. TODO: full
        per-device profiles + remappable bindings (the user-flagged TODO). */
     g_caanoo_dev = 0;
-    { static const char *sig[] = { "libopengles_lite", "libGLESv1_CM", "libOpenEGL", "libglport",
-          "libMesNativeOEM", "libDrv.so", "libmedia.so", "librec.so", "libunicodefont" };
+    { static const char *sig[] = {
+          /* Pollux GLES/MES/media libs (Propis, Rhythmos) */
+          "libopengles_lite", "libGLESv1_CM", "libOpenEGL", "libglport",
+          "libMesNativeOEM", "libDrv.so", "libmedia.so", "librec.so", "libunicodefont",
+          /* the Caanoo "DGE" game engine (Propis, Rhythmos) + the Caanoo OSS audio dir (Liar);
+             Wiz/GP2X titles use /dev/dsp, not /dev/sound, and never link DGE. */
+          "DGE_Display", "/dev/sound/" };
       for (unsigned k = 0; k < sizeof sig / sizeof sig[0]; k++)
           if (buf_has(buf, sz, sig[k])) { g_caanoo_dev = 1; break; } }
 
@@ -182,7 +187,8 @@ uint32_t setup_stack(int argc, char **argv) {
         /* Forward shim debug toggles from the host env (the guest getenv reads only the envp we
            build here, not the host environment): ME_FAKESDL_FOO -> FAKESDL_FOO in the guest. */
         static const char *fwd[] = { "FAKESDL_BLIT_LOG", "FAKESDL_PRESENT_LOG", "FAKESDL_NO_COLORKEY",
-                                     "FAKESDL_SRC_DUMP", "FAKESDL_AUDIO_DUMP" };
+                                     "FAKESDL_SRC_DUMP", "FAKESDL_AUDIO_DUMP", "FAKEGLES_LOG",
+                                     "FAKEGLES_NORAST" };
         for (int i = 0; i < (int)(sizeof fwd / sizeof fwd[0]) && nenv < 11; i++) {
             char host[64]; snprintf(host, sizeof host, "ME_%s", fwd[i]);
             const char *v = getenv(host);
