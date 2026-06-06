@@ -49,7 +49,10 @@ typedef struct {
     volatile int16_t  touch_x;
     volatile int16_t  touch_y;
     volatile uint32_t touch_down;
-    uint32_t reserved[1];               /* keep this block 12 bytes so pixels[]/aring[] don't move */
+    /* status for the viewer header (engine sets device; the shim/engine sets backend on present) */
+    volatile uint8_t  device;           /* 0=GP2X  1=GP2X Wiz  2=GP2X Caanoo */
+    volatile uint8_t  backend;          /* 0=framebuffer  1=SDL (2D)  2=OpenGL ES */
+    uint8_t  reserved[2];               /* keep this block 12 bytes so pixels[]/aring[] don't move */
     uint8_t  pixels[GP2XSHM_FBBYTES]; /* RGB565, width*height valid */
     uint8_t  aring[GP2XSHM_ARING];    /* PCM ring buffer (shim->viewer) */
 } gp2x_shm_t;

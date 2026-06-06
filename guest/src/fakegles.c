@@ -780,6 +780,7 @@ EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read, EGLCon
     m_identity(g_mv); m_identity(g_proj);
     ensure_cbuf();
     magiceyes_gl_active = 1;
+    if (g_shm) g_shm->backend = 2;     /* OpenGL ES (viewer header) */
     GLOG("eglMakeCurrent (GL now owns the framebuffer)\n");
     return EGL_TRUE;
 }

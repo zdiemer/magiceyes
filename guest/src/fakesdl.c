@@ -223,6 +223,7 @@ SDL_Surface *SDL_GetVideoSurface(void) { return g_screen; }
 static void present(SDL_Surface *s) {
     if (!g_shm || !s) return;
     if (gl_owns_fb()) return;          /* GLES title: the fakegles shim presents the GL frame */
+    g_shm->backend = 1;                /* SDL 2D (viewer header) */
     int w = s->w, h = s->h, x, y;
     if (w > GP2XSHM_MAXW) w = GP2XSHM_MAXW;
     if (h > GP2XSHM_MAXH) h = GP2XSHM_MAXH;

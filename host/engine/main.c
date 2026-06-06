@@ -220,6 +220,10 @@ static uint32_t engine_load_game(const char *path) {
     shm_reset_for_new_game();
     uint32_t entry = load_elf(path);
     if (!entry) { uc_close(u); g_uc = NULL; return 0; }   /* bad/missing binary: caller goes idle */
+    if (g_shm) {   /* device for the viewer header (Caanoo auto-detect; EABI-dynamic = Wiz; else GP2X) */
+        g_shm->device  = g_caanoo_dev ? 2 : (g_eabi && g_is_dynamic ? 1 : 0);
+        g_shm->backend = 0;   /* the shim/engine sets the real backend once it presents a frame */
+    }
     char *av[1]; av[0] = (char *)path;
     uint32_t sp = setup_stack(1, av);
     gwrite(UC_ARM_REG_SP, sp);

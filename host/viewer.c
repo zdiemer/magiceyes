@@ -432,10 +432,17 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     SDL_Thread *ath = SDL_CreateThread(audio_thread, "gp2x-audio", NULL);
     uint32_t last_seq = ~0u;
     int running = 1;
+    int touch_x = 0, touch_y = 0, touch_down = 0;   /* touchscreen, in guest pixels */
 
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            /* mouse -> touchscreen. With SDL_RenderSetLogicalSize the EVENT coords are already in
+               guest (logical) pixels (unlike SDL_GetMouseState, which is window pixels). */
+            if (e.type == SDL_MOUSEMOTION) { touch_x = e.motion.x; touch_y = e.motion.y; }
+            else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                touch_down = 1; touch_x = e.button.x; touch_y = e.button.y; }
+            else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) touch_down = 0;
             if (e.type == SDL_QUIT) running = 0;
             if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode kc = e.key.keysym.sym; Uint16 mod = e.key.keysym.mod;
@@ -497,18 +504,34 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
         if (k[SDL_SCANCODE_W]) b |= 1u << GP2X_R;
         if (!getenv("ME_VIEWER_NOINPUT")) shm->buttons = b;  /* allow scripted input */
 
-        /* mouse -> touchscreen (Caanoo). SDL_RenderSetLogicalSize maps the cursor to guest
-           (logical) pixels, so feed it straight through; the shim turns it into SDL mouse
-           motion/button events. */
+        /* mouse -> touchscreen (Caanoo); coords come from the (logical-mapped) mouse events above. */
         if (!getenv("ME_VIEWER_NOINPUT")) {
-            int mx = 0, my = 0; Uint32 ms = SDL_GetMouseState(&mx, &my);
-            if (mx < 0) mx = 0; if (mx >= cur_w) mx = cur_w - 1;
-            if (my < 0) my = 0; if (my >= cur_h) my = cur_h - 1;
-            shm->touch_x = (int16_t)mx; shm->touch_y = (int16_t)my;
-            shm->touch_down = (ms & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1u : 0u;
+            int tx = touch_x, ty = touch_y;
+            if (tx < 0) tx = 0; if (cur_w > 0 && tx >= cur_w) tx = cur_w - 1;
+            if (ty < 0) ty = 0; if (cur_h > 0 && ty >= cur_h) ty = cur_h - 1;
+            shm->touch_x = (int16_t)tx; shm->touch_y = (int16_t)ty;
+            shm->touch_down = (uint32_t)touch_down;
         }
 
         /* audio is serviced on its own thread (see audio_thread) */
+
+        /* window header: system + rendering backend + fps (updated ~2x/sec) */
+        { static Uint32 t0 = 0; static uint32_t s0 = 0;
+          Uint32 now = SDL_GetTicks();
+          if (t0 == 0) { t0 = now; s0 = shm->frame_seq; }
+          else if (now - t0 >= 500) {
+              double fps = (double)(shm->frame_seq - s0) * 1000.0 / (double)(now - t0);
+              static const char *dev[] = { "GP2X", "GP2X Wiz", "GP2X Caanoo" };
+              static const char *bk[]  = { "FB", "SDL", "GL" };
+              int di = shm->device  < 3 ? shm->device  : 0;
+              int bi = shm->backend < 3 ? shm->backend : 0;
+              char title[160];
+              snprintf(title, sizeof title, "magiceyes  |  %s  |  %s  |  %.0f fps",
+                       dev[di], bk[bi], fps);
+              SDL_SetWindowTitle(win, title);
+              t0 = now; s0 = shm->frame_seq;
+          }
+        }
 
         /* resize texture if the game changed mode */
         if ((int)shm->width != cur_w || (int)shm->height != cur_h) {
