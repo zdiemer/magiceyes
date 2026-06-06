@@ -37,6 +37,20 @@ else
   echo "WARNING: no shim at $SHIM (build it with guest/build_guest.sh); dynamic SDL games won't render"
 fi
 
+# Stage the DRM gate stubs over the firmware's real libinkadrm/libdrmcode. The real
+# libinkadrm getserial() reads the handset serial from /dev/i2c-0 and, with no device,
+# the title bails straight back to gp2xmenu ("crashes instantly", e.g. Deicide 3). Our
+# stubs satisfy the boot gate. Cover every soname the games' DT_NEEDED can ask for.
+for base in libinkadrm libdrmcode; do
+  STUB="$REPO/bin/guest/$base.so.0"
+  [ -f "$STUB" ] || { echo "WARNING: no DRM stub at $STUB (build with guest/build_guest.sh)"; continue; }
+  for name in "$base.so" "$base.so.0" "$base.so.0.0.0"; do
+    [ -e "$DST/lib/$name" ] && cp -f "$STUB" "$DST/lib/$name"
+  done
+  cp -f "$STUB" "$DST/lib/$base.so.0"   # ensure the canonical soname exists
+done
+echo "staged DRM gate stubs (libinkadrm/libdrmcode)"
+
 echo "done. files:"
 ls "$DST/lib" | wc -l
 echo "ME_GP2X_ROOTFS=$DST"

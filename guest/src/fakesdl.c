@@ -518,6 +518,29 @@ Uint8 SDL_JoystickGetButton(SDL_Joystick *j, int btn) {
 Sint16 SDL_JoystickGetAxis(SDL_Joystick *j, int axis) { (void)j; (void)axis; return 0; }
 Uint8 SDL_JoystickGetHat(SDL_Joystick *j, int hat) { (void)j; (void)hat; return 0; }
 
+/* ----------------------------------------------- GP2X/Wiz SDL extensions
+ * The GPH fork of SDL 1.2 adds device-specific entry points (LCD update mode,
+ * TV-out, the handset's RTC/USB/battery info hung off the joystick). Commercial
+ * Wiz titles link these directly (e.g. Her Knights calls SDL_SetLcdMode +
+ * SDL_SYS_JoystickGp2xInfo), so the shim must export them or ld.so aborts with
+ * "undefined symbol". On a PC there's no LCD controller / RTC / battery to talk
+ * to, so these are benign success stubs that report a healthy, idle handset. */
+void SDL_SetLcdMode(int mode) { (void)mode; }              /* fast/quality LCD refresh select */
+int  SDL_GetLcdMode(void) { return 0; }
+int  SDL_SetLcdChange(unsigned int subCmd, unsigned int value) { (void)subCmd; (void)value; return 0; }
+int  SDL_TvConfig(FB_TVCONF *tv_cfg) { (void)tv_cfg; return 0; } /* no TV-out -> no-op */
+/* Battery/charge info buffer. Real Wiz fills the first bytes with the gauge
+ * reading; report "full, not charging" so titles don't pop a low-battery warning.
+ * Keep the touched range tiny -- the buffer size isn't in the ABI. */
+void SDL_SYS_JoystickGp2xInfo(SDL_Joystick *j, unsigned char *pInfo) {
+    (void)j; if (pInfo) { pInfo[0] = 4; pInfo[1] = 0; pInfo[2] = 0; pInfo[3] = 0; }
+}
+int SDL_SYS_JoystickGetExtRtc(SDL_Joystick *j, void *dt) { (void)j; (void)dt; return 0; }
+int SDL_SYS_JoystickSetExtRtc(SDL_Joystick *j, void *dt) { (void)j; (void)dt; return 0; }
+int SDL_SYS_JoystickSetPowerOff(SDL_Joystick *j) { (void)j; return 0; }
+int SDL_SYS_JoystickUsbConCheck(SDL_Joystick *j) { (void)j; return 0; }   /* USB not connected */
+int SDL_SYS_JoystickUsbDisconnect(SDL_Joystick *j) { (void)j; return 0; }
+
 /* ------------------------------------------------------------------ mouse */
 Uint8 SDL_GetMouseState(int *x, int *y) { if (x) *x = 0; if (y) *y = 0; return 0; }
 Uint8 SDL_GetRelativeMouseState(int *x, int *y) { if (x) *x = 0; if (y) *y = 0; return 0; }
