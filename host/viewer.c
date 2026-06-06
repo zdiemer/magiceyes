@@ -95,6 +95,7 @@ static int audio_thread(void *arg) {
             uint32_t target = bps / 5;            /* keep ~200ms queued */
             uint32_t queued = SDL_GetQueuedAudioSize(adev);
             uint32_t avail = shm->a_write - shm->a_read;
+            /* Top the device queue up to ~200ms with REAL audio. */
             if (queued < target) {
                 uint32_t n = target - queued; if (n > avail) n = avail; n -= n % frame;
                 if (n) {
@@ -104,14 +105,21 @@ static int audio_thread(void *arg) {
                     if (n > first) queue_scaled(adev, shm->aring, n - first);
                     shm->a_read += n; g_consumed += n; g_fed += n;
                 }
-                /* pad with silence on a producer gap so the device never underruns */
-                uint32_t still = target - SDL_GetQueuedAudioSize(adev); still -= still % frame;
-                if (still) {
-                    static uint8_t zeros[8192];
-                    for (uint32_t z = still; z; ) { uint32_t c = z > sizeof(zeros) ? sizeof(zeros) : z;
-                        SDL_QueueAudio(adev, zeros, c); z -= c; }
-                    g_fed += still;
-                }
+            }
+            /* Silence-fill ONLY a genuine underrun (queue nearly dry) -- NOT every cycle. A
+               small-chunk producer (Blazar/Quartz2 stream ~20ms / 3528-byte writes vs Payback's
+               ~93ms / 16384) briefly leaves avail==0 between writes; padding to target on those
+               gaps injects silence clicks AND advances the queue with silence so the real audio
+               backs up in the ring and gets dropped -> static. The ~200ms real-audio queue rides
+               out the brief gaps; only bridge a true underrun so the device never hard-stops. */
+            { uint32_t q = SDL_GetQueuedAudioSize(adev), floor = bps / 50; /* ~20ms cushion */
+              if (q < frame) {
+                  uint32_t still = floor - q; still -= still % frame;
+                  static uint8_t zeros[8192];
+                  for (uint32_t z = still; z; ) { uint32_t c = z > sizeof(zeros) ? sizeof(zeros) : z;
+                      SDL_QueueAudio(adev, zeros, c); z -= c; }
+                  g_fed += still;
+              }
             }
             /* watchdog on PLAYED = fed - queued (advances even through silence). A
                reopen here only blocks THIS thread, not rendering. */

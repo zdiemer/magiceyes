@@ -487,8 +487,13 @@ uint32_t dsp_pace_us(void) {
     double now = host_now();
     if (!g_prod_on) { g_prod_on = 1; g_prod_t0 = now; g_prod_bytes = 0; }
     double allowed = (now - g_prod_t0) * bps;
-    if ((double)g_prod_bytes > allowed)
-        return (uint32_t)(((double)g_prod_bytes - allowed) / bps * 1e6);
+    /* Allow the producer to run ~80ms ahead of real time before throttling, so a small-chunk
+       streamer (Blazar/Quartz2 write ~20ms chunks) banks a real-audio cushion in the ring; the
+       viewer then keeps a deep REAL queue instead of staying ~1 chunk ahead and underrunning
+       into silence/static. (Big-chunk producers like Payback already bank a chunk's worth.) */
+    double lead = bps * 0.08;
+    if ((double)g_prod_bytes > allowed + lead)
+        return (uint32_t)(((double)g_prod_bytes - allowed - lead) / bps * 1e6);
     if (allowed > (double)g_prod_bytes + bps * 0.25) { g_prod_t0 = now; g_prod_bytes = 0; }
     return 0;
 }
