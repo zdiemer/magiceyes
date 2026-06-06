@@ -105,6 +105,10 @@ the [roadmap](#planned).
 
 - **Firmware support** — bundle or auto-stage a device root filesystem so dynamically
   linked GP2X *and* Wiz titles run on the native build without manual setup.
+- **Embed the generated rootfs in the binary** — bake the redistributable, generated
+  (Debian-derived) EABI/glibc rootfs plus our SDL/DRM shim directly into `magiceyes.exe`
+  so dynamically-linked titles run with zero setup and no separate download. (Proprietary
+  device firmware is still never shipped — see [Legal](#legal).)
 - **Broader SDL / syscall coverage** — more device features and emulated syscalls so more
   titles run unmodified.
 - **macOS and Linux release binaries** — native builds for all three desktop platforms
