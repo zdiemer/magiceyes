@@ -97,7 +97,7 @@ extern int g_pal_have;
    (320 B/row, LUT'd to RGB565). No palette => native RGB565 (640 B/row). See gp2x_mmio_palette. */
 void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
-    int nz = 0;
+    int nz = 0; long nzc = 0;   /* nzc: # of non-zero indices this frame (accumulation diag) */
     if (g_pal_have) {                       /* 8-bit indexed -> RGB565 via the captured palette */
         uint16_t lut[256];
         for (int i = 0; i < 256; i++)
@@ -107,7 +107,7 @@ void present_guest(uint32_t g) {
         for (int y = 0; y < 240; y++) {
             uint8_t *src = guest_to_host(g + (uint32_t)y * 320); if (!src) break;
             uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
-            for (int x = 0; x < 320; x++) { dp[x] = lut[src[x]]; if (src[x]) nz = 1; }
+            for (int x = 0; x < 320; x++) { dp[x] = lut[src[x]]; if (src[x]) { nz = 1; nzc++; } }
         }
     } else {                                /* native RGB565 */
         uint8_t row[320 * 2];
@@ -121,8 +121,8 @@ void present_guest(uint32_t g) {
     g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
     if (getenv("ME_GP2X_PRESENTLOG")) {   /* diagnose black-screen: black frames vs viewer issue */
         static int n = 0, nb = 0; n++; if (!nz) nb++;
-        if (n % 60 == 0) fprintf(stderr, "PRESENT %d frames (%d black) guest=%08x seq=%u\n",
-                                 n, nb, g, g_shm->frame_seq);
+        if (n % 60 == 0) fprintf(stderr, "PRESENT %d frames (%d black) guest=%08x seq=%u nz_px=%ld\n",
+                                 n, nb, g, g_shm->frame_seq, nzc);
     }
 }
 /* Once the game page-flips to a real fb address (double-buffering), lock the display to that

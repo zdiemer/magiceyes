@@ -30,6 +30,10 @@ python3 "$HERE/parallel_cflags.py" "$FORK"
 git add -A
 git commit -q -m "gp2x: CF_PARALLEL for real host atomics (native-threads swp)" && echo "  committed CF_PARALLEL" || true
 
+python3 "$HERE/fpa_resume.py" "$FORK"
+git add -A
+git commit -q -m "gp2x: resume in place after a handled invalid insn (FPA emulation perf)" && echo "  committed FPA-resume" || true
+
 echo "== build fork (force re-bundle) =="
 cd "$FORK/build"
 if ! ninja 2>build.err; then echo "BUILD FAILED:"; grep -E "error:|FAILED:" build.err | head; exit 1; fi

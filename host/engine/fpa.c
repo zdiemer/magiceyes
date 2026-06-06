@@ -26,6 +26,7 @@
 #include <math.h>
 
 __thread int g_fpa_resume = 0;          /* set by the hook: guarded_emu_start must restart */
+unsigned long g_fpa_n = 0, g_fpa_ops = 0;   /* diag: hook invocations + emulated-op count */
 static __thread double g_fpa[8];        /* the 8 FPA registers (host doubles) */
 static __thread uint32_t g_fpsr = 0;    /* FPA status register (WFS/RFS; flags cosmetic here) */
 
@@ -226,8 +227,20 @@ bool fpa_invalid_cb(uc_engine *uc, void *user) {
     uc_reg_read(uc, UC_ARM_REG_PC, &pc);
     if (uc_mem_read(uc, pc, &insn, 4) != UC_ERR_OK) return false;
     if (!fpa_emulate(uc, pc, insn)) return false;      /* genuinely invalid: let Unicorn error */
-    uint32_t npc = pc + 4;
-    uc_reg_write(uc, UC_ARM_REG_PC, &npc);
+    g_fpa_n++; g_fpa_ops++;
+    pc += 4;
+    /* Unicorn stops the CPU on a handled invalid-insn, so each FPA op otherwise costs a full
+       uc_emu_start exit+restart. FP-heavy code (Odonata's bullet trig) runs FPA ops in runs, so
+       emulate every CONSECUTIVE FPA instruction here -> one restart per run, not per op. We only
+       advance over instructions fpa_emulate recognises as FPA (it no-ops + returns 0 otherwise),
+       so the first non-FPA instruction stays for the CPU to execute. */
+    for (int i = 0; i < 8192; i++) {
+        if (uc_mem_read(uc, pc, &insn, 4) != UC_ERR_OK) break;
+        if (!fpa_emulate(uc, pc, insn)) break;         /* not FPA: let the CPU run it */
+        g_fpa_ops++;
+        pc += 4;
+    }
+    uc_reg_write(uc, UC_ARM_REG_PC, &pc);
     g_fpa_resume = 1;
     return true;
 }
