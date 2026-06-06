@@ -85,6 +85,13 @@ extern uint32_t g_at_base;   /* AT_BASE: interpreter (ld.so) load base; 0 = stat
 extern int g_is_dynamic;     /* 1 once load_elf has loaded a dynamically-linked title */
 extern int g_eabi;           /* current syscall ABI: 1 = EABI (svc #0), 0 = legacy OABI */
 extern int g_caanoo_dev;     /* 1 if the loaded binary is a Caanoo title (Pollux/DGE sonames) */
+extern int g_device;         /* viewer-header device: 0=GP2X 1=GP2X Wiz 2=GP2X Caanoo (set in load_elf) */
+
+/* ---- glraster.c: native GL render offload (the shim forwards draws via syscalls) ---- */
+void glr_resize(int w, int h);
+void glr_clear(uint32_t packed_rgba);
+void glr_draw(uint32_t desc_guest_ptr);   /* struct gl_draw in guest memory */
+void glr_present(void);
 
 /* ---- syscalls.c: device rootfs for the dynamic-linker path ---- */
 void me_rootfs_init(void);   /* pick the rootfs (ME_GP2X_ROOTFS or a default); idempotent */

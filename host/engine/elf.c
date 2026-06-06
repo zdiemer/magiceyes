@@ -91,6 +91,16 @@ static uint32_t load_interp(const char *guest_interp) {
 /* Returns the entry PC (the interpreter's, for a dynamic binary), or 0 on a recoverable
    failure (bad path/format) so the caller can go idle instead of killing the GUI process. */
 int g_caanoo_dev = 0;   /* set in load_elf: binary links Pollux/Caanoo GLES libs -> Caanoo device */
+int g_device = 0;       /* viewer-header device, set in load_elf: 0=GP2X 1=GP2X Wiz 2=GP2X Caanoo */
+
+/* case-insensitive equality (MinGW lacks a portable strcasecmp in <string.h> here). */
+static int eq_ci(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) { int ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return 0; }
+    return *a == *b;
+}
 
 /* substring search over a byte buffer (portable; MinGW has no memmem). */
 static int buf_has(const uint8_t *buf, long sz, const char *s) {
@@ -115,20 +125,59 @@ uint32_t load_elf(const char *path) {
         if (ph[i].p_type == PT_INTERP && ph[i].p_filesz < sizeof interp)
             memcpy(interp, buf + ph[i].p_offset, ph[i].p_filesz);
 
-    /* Caanoo auto-detect (for the shim's per-device joystick map): Caanoo .gpe link Pollux
-       GLES/MES/media libs that no Wiz/GP2X title uses. Zero false positives on Wiz; titles
-       without these (e.g. Liar) need MAGICEYES_DEVICE=caanoo set explicitly. TODO: full
-       per-device profiles + remappable bindings (the user-flagged TODO). */
-    g_caanoo_dev = 0;
-    { static const char *sig[] = {
-          /* Pollux GLES/MES/media libs (Propis, Rhythmos) */
-          "libopengles_lite", "libGLESv1_CM", "libOpenEGL", "libglport",
-          "libMesNativeOEM", "libDrv.so", "libmedia.so", "librec.so", "libunicodefont",
-          /* the Caanoo "DGE" game engine (Propis, Rhythmos) + the Caanoo OSS audio dir (Liar);
-             Wiz/GP2X titles use /dev/dsp, not /dev/sound, and never link DGE. */
-          "DGE_Display", "/dev/sound/" };
-      for (unsigned k = 0; k < sizeof sig / sizeof sig[0]; k++)
-          if (buf_has(buf, sz, sig[k])) { g_caanoo_dev = 1; break; } }
+    /* ---- Device classification (viewer header + the shim's per-device input map) ----
+       Worked out by probing 44 real ROMs (tools/probe_elf.py + probe_strings.py). The key
+       finding: the ELF *toolchain generation* does NOT map to the device. Two examples that
+       break the obvious heuristics:
+         - the EABI Wiz title Patissier (rg_ura) is byte-identical to a Caanoo binary
+           (ld-linux.so.3 / EABI v4 / OSABI=SysV), and
+         - old-toolchain Wiz titles (Cave Story, Deicide, Her Knights) are indistinguishable
+           from GP2X (ld-linux.so.2 / EABI ver 0 / OSABI=ARM-EABI).
+       So we use only signals that are actually reliable, and -- per the project decision --
+       default the unavoidable GP2X<->Wiz ambiguity to GP2X. An explicit MAGICEYES_DEVICE
+       always wins. Priority:
+         1. explicit MAGICEYES_DEVICE env;
+         2. static binary (no PT_INTERP) -> GP2X (every Wiz/Caanoo title in the wild is dynamic;
+            GP2X's static GPEComp payloads are the only static .gpe);
+         3. a positive Caanoo marker (Pollux SoC sonames/device nodes, or a _Pollux filename)
+            -> Caanoo (these never appear on GP2X or Wiz);
+         4. a positive Wiz marker (the GPH Wiz SDL extensions / the Wiz toolkit lib) -> Wiz;
+         5. otherwise -> GP2X.
+       (Note: an ld-linux.so.3 binary is never GP2X -- GP2X firmware is ld.so.2 only -- but
+       without a Pollux marker we can't tell EABI-Wiz from Caanoo, so it falls to GP2X like any
+       other ambiguous case; set MAGICEYES_DEVICE for those.) */
+    int dev = -1;
+    const char *envdev = getenv("MAGICEYES_DEVICE");
+    if (envdev) {
+        if (eq_ci(envdev, "caanoo")) dev = 2;
+        else if (eq_ci(envdev, "wiz")) dev = 1;
+        else if (eq_ci(envdev, "gp2x") || eq_ci(envdev, "f100") || eq_ci(envdev, "f200")) dev = 0;
+    }
+    if (dev < 0 && !interp[0]) dev = 0;   /* static ELF -> GP2X */
+    if (dev < 0) {
+        /* Pollux/Caanoo-only sonames + device nodes (probed: present on no GP2X/Wiz title). */
+        static const char *caanoo_sig[] = {
+            "libopengles_lite", "libGLESv1_CM", "libOpenEGL", "libglport", "libMesNativeOEM",
+            "libDrv.so", "libmedia.so", "librec.so", "libdge20.so", "libdgt20.so", "libdgx20.so",
+            "/dev/pollux", "pollux_clock", "/dev/isa1200" };
+        int caanoo = 0;
+        for (unsigned k = 0; k < sizeof caanoo_sig / sizeof caanoo_sig[0]; k++)
+            if (buf_has(buf, sz, caanoo_sig[k])) { caanoo = 1; break; }
+        if (!caanoo && (buf_has(buf, sz, "pollux") || buf_has(buf, sz, "Pollux"))) caanoo = 1;
+        if (!caanoo && (strstr(path, "_Pollux") || strstr(path, "_pollux"))) caanoo = 1;
+        /* Wiz-only markers: the GPH Wiz SDL extensions (Her Knights) + the Wiz toolkit lib. */
+        static const char *wiz_sig[] = { "libtngp2xtk.so", "SDL_SetLcdMode", "SetLcdMode",
+                                         "SDL_TvConfig" };
+        int wiz = 0;
+        for (unsigned k = 0; k < sizeof wiz_sig / sizeof wiz_sig[0]; k++)
+            if (buf_has(buf, sz, wiz_sig[k])) { wiz = 1; break; }
+        dev = caanoo ? 2 : (wiz ? 1 : 0);
+    }
+    g_device = dev;
+    g_caanoo_dev = (dev == 2);   /* the shim's per-device joystick map keys on this */
+    if (g_trace) fprintf(stderr, "  device=%d (%s) interp=%s\n", dev,
+                         dev == 2 ? "Caanoo" : dev == 1 ? "Wiz" : "GP2X",
+                         interp[0] ? interp : "(static)");
 
     /* The program loads at its fixed vaddrs (ET_EXEC, bias 0). PIE (ET_DYN main) isn't a GP2X
        case, so we don't relocate the main image. */
