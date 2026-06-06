@@ -48,26 +48,63 @@ void rewrite_guest_path(const char *in, char *out, size_t cap) {
    device libs + our fake-SDL shim shadowing libSDL (host/win/stage_rootfs.sh). Game assets
    are opened relative to the game's own cwd, so they don't go through here. */
 static char g_rootfs[PATH_MAX]; static int g_rootfs_ok = -1;
+
+/* Candidate rootfs dirs. There can be more than one with DIFFERENT ABIs: the firmware
+   rootfs is glibc-2.3.6 / ld-linux.so.2 (commercial titles: Deicide 3, Her Knights,
+   Odonata...), while CodeSourcery-built homebrew (Patissier/rg_ura) is EABI with
+   ld-linux.so.3 + a newer glibc (assets/rootfs-eabi). We can't merge them (conflicting
+   libc.so.6), so we keep them side by side and SELECT one per title by its PT_INTERP. */
+static char g_cands[16][PATH_MAX]; static int g_ncand = -1;
+static int cand_has(int i, const char *suffix) {
+    char p[PATH_MAX]; struct stat s;
+    snprintf(p, sizeof p, "%s%s", g_cands[i], suffix);
+    return stat(p, &s) == 0;
+}
+static void rootfs_build_cands(void) {
+    if (g_ncand >= 0) return;
+    g_ncand = 0;
+    const char *env  = getenv("ME_GP2X_ROOTFS");
+    const char *env3 = getenv("ME_GP2X_ROOTFS_EABI");
+    if (env  && g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env);
+    if (env3 && g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env3);
+    static const char *names[] = { "rootfs", "rootfs-win", "rootfs-eabi" };
+    if (g_exe_dir[0]) for (size_t n = 0; n < 3; n++) {
+        if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/%s", g_exe_dir, names[n]);
+        if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/assets/%s", g_exe_dir, names[n]);
+        if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/../assets/%s", g_exe_dir, names[n]);
+    }
+    if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-win");
+    if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-eabi");
+    if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs/0/rootfs");
+}
 void me_rootfs_init(void) {
     if (g_rootfs_ok >= 0) return;
+    rootfs_build_cands();
     g_rootfs_ok = 0;
-    char cands[6][PATH_MAX]; int nc = 0;
-    const char *env = getenv("ME_GP2X_ROOTFS");
-    if (env) snprintf(cands[nc++], PATH_MAX, "%s", env);
-    if (g_exe_dir[0]) {   /* shipped beside the executable: <exedir>/rootfs or assets/rootfs-win */
-        snprintf(cands[nc++], PATH_MAX, "%s/rootfs", g_exe_dir);
-        snprintf(cands[nc++], PATH_MAX, "%s/assets/rootfs-win", g_exe_dir);
-        snprintf(cands[nc++], PATH_MAX, "%s/../assets/rootfs-win", g_exe_dir);
-    }
-    snprintf(cands[nc++], PATH_MAX, "assets/rootfs-win");
-    snprintf(cands[nc++], PATH_MAX, "assets/rootfs/0/rootfs");
-    for (int i = 0; i < nc; i++) {
-        char probe[PATH_MAX]; snprintf(probe, sizeof probe, "%s/lib/ld-linux.so.2", cands[i]);
-        struct stat s;
-        if (!stat(probe, &s)) { snprintf(g_rootfs, sizeof g_rootfs, "%s", cands[i]); g_rootfs_ok = 1;
-                                if (g_trace) fprintf(stderr, "  [rootfs] %s\n", g_rootfs); return; }
-    }
+    /* default active rootfs = first candidate providing any dynamic linker */
+    for (int i = 0; i < g_ncand; i++)
+        if (cand_has(i, "/lib/ld-linux.so.2") || cand_has(i, "/lib/ld-linux.so.3")) {
+            snprintf(g_rootfs, sizeof g_rootfs, "%s", g_cands[i]); g_rootfs_ok = 1;
+            if (g_trace) fprintf(stderr, "  [rootfs] default %s\n", g_rootfs); return;
+        }
     if (g_trace) fprintf(stderr, "  [rootfs] none found (set ME_GP2X_ROOTFS for dynamic titles)\n");
+}
+/* Choose the rootfs whose /lib holds this program's interpreter (ld-linux.so.2 vs .3),
+   so an EABI title gets the newer-glibc rootfs and a firmware title the 2.3.6 one.
+   Returns 1 if a matching rootfs was found+selected. Called from load_elf (all entry
+   points) before the interpreter/libs are opened. */
+int me_rootfs_select(const char *interp) {
+    if (!interp || !interp[0]) return g_rootfs_ok == 1;
+    rootfs_build_cands();
+    const char *b = strrchr(interp, '/'); b = b ? b + 1 : interp;
+    char suffix[PATH_MAX]; snprintf(suffix, sizeof suffix, "/lib/%s", b);
+    for (int i = 0; i < g_ncand; i++)
+        if (cand_has(i, suffix)) {
+            snprintf(g_rootfs, sizeof g_rootfs, "%s", g_cands[i]); g_rootfs_ok = 1;
+            if (g_trace) fprintf(stderr, "  [rootfs] selected %s for %s\n", g_rootfs, interp);
+            return 1;
+        }
+    return 0;
 }
 int me_rootfs_resolve(const char *guest, char *out, size_t cap) {
     me_rootfs_init();
@@ -125,8 +162,32 @@ void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
      st_dev@0(8) __st_ino@12(4) st_mode@16 st_nlink@20 st_uid@24 st_gid@28
      st_rdev@32(8) st_size@44(8,packed) st_blksize@52 st_blocks@56(8) st_ino@88(8). */
 void fill_stat64(uint32_t gbuf, struct stat *hs) {
-    uint8_t b[96]; memset(b, 0, sizeof b);
     uint64_t sz = (uint64_t)hs->st_size, blk = (uint64_t)((hs->st_size + 511) / 512);
+    if (g_eabi) {
+        /* Mainline ARM **EABI** `struct stat64` -- sizeof **104**, `long long` 8-byte aligned:
+           st_dev@0(8) __st_ino@12 st_mode@16 st_nlink@20 st_uid@24 st_gid@28 st_rdev@32(8)
+           st_size@48(8) st_blksize@56 st_blocks@64(8) ... st_ino@96(8). Used by CodeSourcery
+           homebrew (Patissier) on the EABI rootfs. Writing the OABI 96B layout here gives the
+           EABI ld.so a garbage st_size -> it refuses to mmap libc.so.6 -> "version GLIBC_2.4
+           not defined" at relocation. */
+        uint8_t b[104]; memset(b, 0, sizeof b);
+        *(uint64_t *)(b + 0)  = (uint64_t)hs->st_dev;
+        *(uint32_t *)(b + 12) = (uint32_t)hs->st_ino;
+        *(uint32_t *)(b + 16) = (uint32_t)hs->st_mode;
+        *(uint32_t *)(b + 20) = (uint32_t)(hs->st_nlink ? hs->st_nlink : 1);
+        *(uint32_t *)(b + 24) = (uint32_t)hs->st_uid;
+        *(uint32_t *)(b + 28) = (uint32_t)hs->st_gid;
+        *(uint64_t *)(b + 32) = (uint64_t)hs->st_rdev;
+        *(uint64_t *)(b + 48) = sz;                        /* st_size @48 (8-byte aligned) */
+        *(uint32_t *)(b + 56) = 4096;                      /* st_blksize @56 */
+        *(uint64_t *)(b + 64) = blk;                       /* st_blocks @64 */
+        *(uint64_t *)(b + 96) = (uint64_t)hs->st_ino;      /* 64-bit st_ino @96 */
+        uc_mem_write(g_uc, gbuf, b, sizeof b);
+        return;
+    }
+    /* GP2X OABI glibc-2.3.6 `struct stat64` -- sizeof **96** (long long 4-byte aligned): see
+       the _IO_file_doallocate proof in the header above; st_size@44, st_blksize@52, st_ino@88. */
+    uint8_t b[96]; memset(b, 0, sizeof b);
     *(uint64_t *)(b + 0)  = (uint64_t)hs->st_dev;
     *(uint32_t *)(b + 12) = (uint32_t)hs->st_ino;          /* legacy 32-bit __st_ino */
     *(uint32_t *)(b + 16) = (uint32_t)hs->st_mode;
@@ -258,7 +319,7 @@ static int sysfile_open(const char *p) {
     if (!strcmp(p, "/proc/sys/kernel/version"))
         return memfd_make("#1 PREEMPT Mon Jan 1 00:00:00 UTC 2008\n");
     if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))
-        return memfd_make("2.6.24\n");
+        return memfd_make("2.6.32\n");
     if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab"))
         return memfd_make("/dev/root / ext2 rw 0 0\nnone /proc proc rw 0 0\n"
                           "none /tmp tmpfs rw 0 0\n/dev/mmcsd/disc0/part1 /mnt/sd vfat rw 0 0\n");
@@ -516,9 +577,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return (long)l;
     }
     case 149:  return LERR(ENOSYS);  /* _sysctl (glibc tolerates) */
-    case 122: { /* uname -> minimal Linux/armv5tel 2.6.24 */
+    case 122: { /* uname -> minimal Linux/armv5tel 2.6.32 (>= eglibc 2.11 min-kernel for EABI titles) */
         char u[6 * 65]; memset(u, 0, sizeof u);
-        strcpy(u + 0 * 65, "Linux"); strcpy(u + 2 * 65, "2.6.24");
+        strcpy(u + 0 * 65, "Linux"); strcpy(u + 2 * 65, "2.6.32");
         strcpy(u + 3 * 65, "#1"); strcpy(u + 4 * 65, "armv5tel");
         uc_mem_write(g_uc, a0, u, sizeof u); return 0;
     }
@@ -586,6 +647,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? LERR(errno) : r; }
     case 93:   /* ftruncate(fd, len): the shim ftruncates the gp2x_fb shm (a device fd) -> accept;
                   a real host fd is truncated for real. */
+        if (dev_type((int)a0) || (int)a0 >= MEMFD_BASE) return 0;
+        return ftruncate((int)a0, (off_t)a1) == 0 ? 0 : LERR(errno);
+    case 194:  /* ftruncate64(fd, len_lo, len_hi): EABI shim sizing the shm; high word unused here. */
         if (dev_type((int)a0) || (int)a0 >= MEMFD_BASE) return 0;
         return ftruncate((int)a0, (off_t)a1) == 0 ? 0 : LERR(errno);
     case 33: {  /* access(path, mode): exists? (ld.so/glibc probe libs + locale dirs) */
@@ -699,10 +763,13 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         BIGLOCK_LOCK();
         return 0;
     }
-    case 240: { /* futex(uaddr, op, val, ...) */
+    case 240: { /* futex(uaddr, op, val, ...) — mask off PRIVATE_FLAG(0x80)+CLOCK_REALTIME(0x100) */
         int op = (int)(a1 & 0x7f);
-        if (op == 0) return futex_wait(a0, a2);          /* FUTEX_WAIT */
-        if (op == 1) return futex_wake(a0, (int)a2);     /* FUTEX_WAKE */
+        /* WAIT_BITSET(9)/WAKE_BITSET(10) behave like WAIT/WAKE for our purposes (we ignore the
+           bitset + abs timeout). Mapping WAIT_BITSET to futex_wait also makes glibc's NPTL-init
+           FUTEX_CLOCK_REALTIME probe return -EAGAIN (value mismatch) as it asserts it must. */
+        if (op == 0 || op == 9)  return futex_wait(a0, a2);       /* FUTEX_WAIT[_BITSET] */
+        if (op == 1 || op == 10) return futex_wake(a0, (int)a2);  /* FUTEX_WAKE[_BITSET] */
         return 0;
     }
     case 120: { /* clone(flags, child_stack, ptid, tls, ctid) -> a native host thread */

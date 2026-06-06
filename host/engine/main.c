@@ -27,6 +27,7 @@ int g_reload_chdir = 0;   /* File->Open: chdir to the new game's dir; GPEComp re
 char g_reload_path[PATH_MAX] = {0};   /* non-empty -> the main loop resets + loads this binary */
 int g_trace = 0;
 int g_scret = 0;   /* ME_SCRET: log every syscall + return value per thread (divergence diff) */
+int g_eabi  = 0;   /* current syscall ABI: 1 = EABI (svc #0), 0 = legacy OABI (swi #0x9000xx) */
 char g_exe_dir[PATH_MAX] = {0};   /* dir of our own executable (default rootfs search) */
 __thread int g_setpc = 0;   /* a syscall set PC (signal entry / sigreturn): skip R0 write */
 
@@ -101,6 +102,10 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     uint32_t imm = insn & 0x00ffffffu;
     uint32_t nr = (imm == 0) ? gread(UC_ARM_REG_R7)
                 : (imm >= 0x900000u) ? (imm - 0x900000u) : imm;
+    /* svc #0 (imm==0) = EABI; swi #(0x900000+nr) = legacy OABI. The whole process is one ABI,
+       so this global (set every syscall, same value from every thread) tells ABI-sensitive
+       syscalls which kernel struct layout to write (e.g. struct stat64: OABI 96B vs EABI 104B). */
+    g_eabi = (imm == 0);
     if (g_self) g_self->last_pc = pc;   /* diagnostics: where this thread last syscalled */
     BIGLOCK_LOCK();
     g_setpc = 0;
@@ -303,16 +308,20 @@ int main(int argc, char **argv) {
         if (!bin) return 2;
         int cls = classify_elf(bin);
         if (cls < 0) return 2;
-        if (cls == 1) {   /* dynamically-linked title (Odonata, W&W, RetroVirus): load the guest
-                             ld.so + NEEDED libs from the device rootfs (load_elf handles it). */
-            char probe[PATH_MAX];
-            if (!me_rootfs_resolve("/lib/ld-linux.so.2", probe, sizeof probe)) {
-                fprintf(stderr, "magiceyes: '%s' is dynamically linked but no device rootfs was found.\n"
-                                "  Set ME_GP2X_ROOTFS to a dereferenced rootfs (build it with\n"
-                                "  host/win/stage_rootfs.sh) or place one at <exe>/rootfs.\n", bin);
+        if (cls == 1) {   /* dynamically-linked title (Odonata, W&W, RetroVirus, Patissier): load the
+                             guest ld.so + NEEDED libs from the matching device rootfs. Pick it by the
+                             binary's PT_INTERP -- ld-linux.so.2 (firmware glibc-2.3.6) vs .so.3 (EABI). */
+            char interp[256];
+            if (!read_elf_interp(bin, interp, sizeof interp))
+                snprintf(interp, sizeof interp, "/lib/ld-linux.so.2");
+            if (!me_rootfs_select(interp)) {
+                fprintf(stderr, "magiceyes: '%s' needs interpreter '%s' but no device rootfs provides it.\n"
+                                "  Build one with host/win/stage_rootfs.sh (firmware, ld-linux.so.2) or the\n"
+                                "  EABI rootfs (ld-linux.so.3), and set ME_GP2X_ROOTFS / place it at <exe>/rootfs.\n",
+                                bin, interp);
                 return 3;
             }
-            if (g_trace) fprintf(stderr, "magiceyes: '%s' dynamically linked -> rootfs %s\n", bin, probe);
+            if (g_trace) fprintf(stderr, "magiceyes: '%s' dynamically linked (%s)\n", bin, interp);
         }
     } else {
 #ifndef ME_BUNDLED

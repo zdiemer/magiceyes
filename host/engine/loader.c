@@ -223,3 +223,28 @@ int classify_elf(const char *path) {
     }
     return 0;
 }
+
+/* Read a dynamic ELF's PT_INTERP string (e.g. "/lib/ld-linux.so.3") into out.
+   Returns 1 if found, 0 otherwise. Used to pick the right device rootfs up front. */
+int read_elf_interp(const char *path, char *out, size_t cap) {
+    if (cap) out[0] = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    Elf32_Ehdr eh;
+    int ok = 0;
+    if (fread(&eh, 1, sizeof eh, f) == sizeof eh && !memcmp(eh.e_ident, ELFMAG, SELFMAG) &&
+        eh.e_phoff && eh.e_phnum && eh.e_phentsize >= sizeof(Elf32_Phdr)) {
+        for (int i = 0; i < eh.e_phnum; i++) {
+            Elf32_Phdr ph;
+            if (fseek(f, (long)eh.e_phoff + (long)i * eh.e_phentsize, SEEK_SET)) break;
+            if (fread(&ph, 1, sizeof ph, f) != sizeof ph) break;
+            if (ph.p_type == PT_INTERP && ph.p_filesz && ph.p_filesz < cap) {
+                if (!fseek(f, (long)ph.p_offset, SEEK_SET) &&
+                    fread(out, 1, ph.p_filesz, f) == ph.p_filesz) { out[ph.p_filesz - 1] = 0; ok = 1; }
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return ok;
+}

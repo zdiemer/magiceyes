@@ -122,6 +122,7 @@ uint32_t load_elf(const char *path) {
 
     uint32_t entry = eh->e_entry;
     if (interp[0]) {                         /* dynamic: load + start the interpreter */
+        me_rootfs_select(interp);            /* so.2 firmware vs so.3 EABI rootfs */
         uint32_t ie = load_interp(interp);
         if (!ie) { free(buf); return 0; }
         g_at_base = ie ? INTERP_BASE : 0;

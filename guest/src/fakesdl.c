@@ -938,9 +938,13 @@ int SDL_WM_ToggleFullScreen(SDL_Surface *s) { (void)s; return 1; }
 char *SDL_GetKeyName(SDLKey key) { (void)key; return (char *)""; }
 
 /* ----------------------------------------------------------------- loadso */
-void *SDL_LoadObject(const char *name) { return dlopen(name, RTLD_NOW | RTLD_GLOBAL); }
-void *SDL_LoadFunction(void *handle, const char *name) { return dlsym(handle, name); }
-void SDL_UnloadObject(void *handle) { if (handle) dlclose(handle); }
+/* Runtime plugin loading via libdl. No GP2X/Wiz title we target uses SDL_LoadObject,
+ * and pulling in libdl forces a glibc-version-specific dlopen reference (e.g.
+ * __dlopen / dlopen@GLIBC_2.34 with a modern EABI cross toolchain) that won't resolve
+ * against an older device glibc. Stub them out so the shim depends on libc alone. */
+void *SDL_LoadObject(const char *name) { (void)name; SDL_SetError("SDL_LoadObject unsupported"); return 0; }
+void *SDL_LoadFunction(void *handle, const char *name) { (void)handle; (void)name; return 0; }
+void SDL_UnloadObject(void *handle) { (void)handle; }
 
 /* version */
 const SDL_version *SDL_Linked_Version(void) {

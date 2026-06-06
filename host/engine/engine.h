@@ -66,6 +66,7 @@ void syscalls_reset(void);                          /* close host fds, free memf
 /* ---- loader.c: resolve folder/.zip/.gpe -> a runnable binary, classify static/dynamic ---- */
 const char *resolve_input(const char *in, char *out, size_t cap);  /* NULL + message on error */
 int classify_elf(const char *path);   /* 0 = static ET_EXEC ok, 1 = dynamic (deferred), -1 = error */
+int read_elf_interp(const char *path, char *out, size_t cap);  /* PT_INTERP string; 1 if found */
 
 /* ---- path redirect: /mnt/tmp,/tmp -> host temp on Windows (identity on Linux), syscalls.c ---- */
 void rewrite_guest_path(const char *in, char *out, size_t cap);
@@ -82,10 +83,12 @@ uint32_t load_elf(const char *path);
 uint32_t setup_stack(int argc, char **argv);
 extern uint32_t g_at_base;   /* AT_BASE: interpreter (ld.so) load base; 0 = static binary */
 extern int g_is_dynamic;     /* 1 once load_elf has loaded a dynamically-linked title */
+extern int g_eabi;           /* current syscall ABI: 1 = EABI (svc #0), 0 = legacy OABI */
 
 /* ---- syscalls.c: device rootfs for the dynamic-linker path ---- */
 void me_rootfs_init(void);   /* pick the rootfs (ME_GP2X_ROOTFS or a default); idempotent */
 int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* 1 = host path in out */
+int  me_rootfs_select(const char *interp);  /* pick the rootfs holding this PT_INTERP (so.2 vs .3) */
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER };
