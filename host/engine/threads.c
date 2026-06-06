@@ -57,6 +57,7 @@ static void pchook_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
 void uc_hook_std(uc_engine *u) {
     uc_hook h;
     uc_hook_add(u, &h, UC_HOOK_INTR, intr_cb, NULL, 1, 0);
+    uc_hook_add(u, &h, UC_HOOK_INSN_INVALID, fpa_invalid_cb, NULL, 1, 0);  /* FPA float emulation */
     if (!g_pchook) { const char *e = getenv("ME_PCHOOK"); if (e) g_pchook = strtoul(e, NULL, 0); }
     if (g_pchook) uc_hook_add(u, &h, UC_HOOK_CODE, pchook_cb, NULL, g_pchook, g_pchook);
     uc_hook_add(u, &h, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED

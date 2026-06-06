@@ -25,6 +25,21 @@ void guard_release_biglock(void) {
     if (g_holds_biglock) { g_holds_biglock = 0; pthread_mutex_unlock(&g_biglock); }
 }
 
+/* Run uc from `entry`, restarting after each FPA instruction the invalid-insn hook emulates.
+   Unicorn stops emulation when an invalid-instruction hook reports "handled" (it can't resume
+   in place), so the hook advances PC + sets g_fpa_resume and we re-enter from the new PC. A
+   real return (game exit, uc_emu_stop, or a genuine invalid insn) leaves g_fpa_resume clear. */
+static int emu_run(uc_engine *uc, uint32_t entry) {
+    uint32_t pc = entry;
+    int e;
+    do {
+        g_fpa_resume = 0;
+        e = (int)uc_emu_start(uc, pc, 0, 0, 0);
+        if (g_fpa_resume) uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    } while (g_fpa_resume && e == UC_ERR_OK && !g_exit && !g_shutdown);
+    return e;
+}
+
 #ifdef _WIN32
 #include <windows.h>
 /* NB: MinGW GCC does NOT support the MSVC __try/__except statement, so we can't use lexical SEH.
@@ -72,7 +87,7 @@ int guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f) {
         return -1;
     }
     g_armed = 1;
-    int e = (int)uc_emu_start(uc, entry, 0, 0, 0);
+    int e = emu_run(uc, entry);
     g_armed = 0;
     return e;
 }
@@ -129,7 +144,7 @@ int guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f) {
         return -1;
     }
     g_armed = 1;
-    int e = (int)uc_emu_start(uc, entry, 0, 0, 0);
+    int e = emu_run(uc, entry);
     g_armed = 0;
     return e;
 }

@@ -80,9 +80,15 @@ void gwrite(uint32_t reg, uint32_t v);
 /* ---- elf.c ---- */
 uint32_t load_elf(const char *path);
 uint32_t setup_stack(int argc, char **argv);
+extern uint32_t g_at_base;   /* AT_BASE: interpreter (ld.so) load base; 0 = static binary */
+extern int g_is_dynamic;     /* 1 once load_elf has loaded a dynamically-linked title */
+
+/* ---- syscalls.c: device rootfs for the dynamic-linker path ---- */
+void me_rootfs_init(void);   /* pick the rootfs (ME_GP2X_ROOTFS or a default); idempotent */
+int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* 1 = host path in out */
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
-enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_OTHER };
+enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER };
 #define DEVFD_BASE 0x10000000   /* far above real host fds (avoid aliasing) */
 struct memmap { uint32_t phys, guest, len; };
 
@@ -144,6 +150,7 @@ enum { BLK_NONE = 0, BLK_FUTEX, BLK_SIG };
 #define SIG_TRAMP 0xffff0f00u   /* restorer trampoline in the kuser page */
 #define PIPEFD_R 0x10000100
 #define PIPEFD_W 0x10000101
+#define FAKESOCK_FD 0x30000001   /* glibc syslog's AF_UNIX socket (datagrams discarded) */
 
 struct thread {
     uc_engine *uc;          /* this guest thread's CPU */
@@ -209,8 +216,15 @@ extern struct freereg g_mfree[256];
 extern int g_nmfree;
 long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off);
 long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys);
+long shmfb_mmap(uint32_t len);   /* alias the shim's gp2x_fb mmap onto the engine's g_shm */
+void mem_register_external(uint32_t guest, uint32_t len, void *host);
 bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                     int size, int64_t value, void *user);
+
+/* ---- fpa.c (FPA float-unit emulation: device libstdc++/libm use legacy FPA insns) ---- */
+extern __thread int g_fpa_resume;   /* set by the invalid-insn hook -> guarded_emu_start restarts */
+bool fpa_invalid_cb(uc_engine *uc, void *user);   /* UC_HOOK_INSN_INVALID */
+void fpa_reset(void);
 
 /* ---- cpu.c (SVC entry, hooks, preemption timer) ---- */
 extern volatile int g_timer_run;
@@ -231,5 +245,6 @@ void guard_release_biglock(void);      /* unlock g_biglock iff the faulting thre
 extern volatile int g_fault_pending;
 extern volatile uintptr_t g_fault_addr;
 extern char g_cur_game[PATH_MAX];      /* the binary the engine is actually running */
+extern char g_exe_dir[PATH_MAX];       /* dir of our own executable (rootfs default search) */
 
 #endif /* MAGICEYES_ENGINE_H */

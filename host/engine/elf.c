@@ -1,49 +1,117 @@
-/* magiceyes Unicorn engine — ELF loader (static ET_EXEC) + SysV stack setup.
- * (A dynamic-linker / PT_INTERP path for Wiz titles lands here later.) */
+/* magiceyes Unicorn engine — ELF loader: static ET_EXEC + dynamically-linked
+ * (PT_INTERP) titles, plus the SysV stack (argc/argv/envp/auxv).
+ *
+ * Static GP2X games (GPEComp payloads: Payback, Blazar, Knight Lore, ...) are loaded
+ * directly. Dynamic GP2X titles (Odonata, Wind & Water, RetroVirus) are EABI ET_EXEC that
+ * link libSDL/libc and name `/lib/ld-linux.so.2` as their interpreter: we load BOTH the
+ * program (at its fixed vaddrs) AND the interpreter (at a high base), hand the interpreter
+ * an auxv pointing at the program's phdrs/entry, and start at the interpreter's entry — it
+ * then opens + relocates the NEEDED libs itself via our syscall/mmap shim (the libs come
+ * from the device rootfs; libSDL is shadowed by our fake-SDL shim). This mirrors qemu-user's
+ * loader; the difference is we redirect the lib opens at the rootfs (see syscalls.c). */
 #include "engine.h"
 
 /* program-header info for the auxv (AT_PHDR/PHENT/PHNUM) — glibc's static-TLS setup
    reads the phdrs via AT_PHDR to find PT_TLS; without it, __thread/locale/stdio init is
    left half-built (fopen'd FILE*s get a null vtable). Set by load_elf. */
 static uint32_t g_phdr_va, g_phnum, g_phent, g_elf_entry;
+/* dynamic-link state for the auxv: AT_BASE = where the interpreter (ld.so) was loaded;
+   0 for a static binary. AT_ENTRY = the program's entry (NOT the interpreter's). */
+uint32_t g_at_base = 0;
+int g_is_dynamic = 0;
 
-/* ---- ELF loader (static EXEC) ---- */
-/* Returns the entry PC, or 0 on a recoverable failure (bad path/format) so the caller can return
-   to an idle window instead of killing the process -- a game's execve to a missing/garbage path
-   must NOT take the whole GUI down. */
-uint32_t load_elf(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "magiceyes: cannot open '%s': %s\n", path, strerror(errno)); return 0; }
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fprintf(stderr, "magiceyes: '%s' is empty/invalid\n", path); fclose(f); return 0; }
-    uint8_t *buf = malloc(sz);
-    if (!buf || fread(buf, 1, sz, f) != (size_t)sz) { fprintf(stderr, "magiceyes: read '%s' failed\n", path); free(buf); fclose(f); return 0; }
-    fclose(f);
+/* The interpreter (ld-linux.so.2, ET_DYN) is loaded at this fixed base — above the mmap
+   arena (0x40000000..0x70000000) and below the stack (0x80000000-8MB). ld.so + its bss are
+   ~120KB; the NEEDED libs are mmap'd into the arena by ld.so itself. */
+#define INTERP_BASE 0x71000000u
 
-    Elf32_Ehdr *eh = (Elf32_Ehdr *)buf;
-    if ((size_t)sz < sizeof *eh ||
-        memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS32)
-        { fprintf(stderr, "magiceyes: '%s' is not a 32-bit ELF\n", path); free(buf); return 0; }
-    if (eh->e_machine != EM_ARM) { fprintf(stderr, "magiceyes: '%s' is not ARM\n", path); free(buf); return 0; }
-    if (eh->e_type != ET_EXEC) { fprintf(stderr, "magiceyes: '%s' is not a static ET_EXEC\n", path); free(buf); return 0; }
-
+/* Map every PT_LOAD of an ELF image already read into `buf` at `bias`, returning the highest
+   guest end address. BSS (memsz>filesz) reads as zero because map_region hands out fresh
+   zeroed anon host memory and we only write the filesz bytes. Perms are relaxed to RWX (ld.so
+   mprotects later, which the engine no-ops). */
+static uint32_t map_loads(uint8_t *buf, Elf32_Ehdr *eh, uint32_t bias) {
     uint32_t max_end = 0;
     Elf32_Phdr *ph = (Elf32_Phdr *)(buf + eh->e_phoff);
     for (int i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type != PT_LOAD) continue;
-        uint32_t va = ph[i].p_vaddr, fsz = ph[i].p_filesz, msz = ph[i].p_memsz;
-        uint32_t perms = UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC; /* relax for now */
-        map_region(va, msz, perms);
+        uint32_t va = bias + ph[i].p_vaddr, fsz = ph[i].p_filesz, msz = ph[i].p_memsz;
+        map_region(va, msz, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
         if (fsz) {
             uc_err e = uc_mem_write(g_uc, va, buf + ph[i].p_offset, fsz);
             if (e) die("uc_mem_write seg", e);
         }
         if (va + msz > max_end) max_end = va + msz;
-        if (g_trace) fprintf(stderr, "  PT_LOAD va=%08x filesz=%u memsz=%u\n", va, fsz, msz);
+        if (g_trace) fprintf(stderr, "  PT_LOAD va=%08x filesz=%u memsz=%u (bias=%08x)\n",
+                             va, fsz, msz, bias);
     }
+    return max_end;
+}
+
+/* Slurp a file into a malloc'd buffer (caller frees). Returns NULL+message on error. */
+static uint8_t *slurp(const char *path, long *out_sz) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "magiceyes: cannot open '%s': %s\n", path, strerror(errno)); return NULL; }
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fprintf(stderr, "magiceyes: '%s' is empty/invalid\n", path); fclose(f); return NULL; }
+    uint8_t *buf = malloc(sz);
+    if (!buf || fread(buf, 1, sz, f) != (size_t)sz) {
+        fprintf(stderr, "magiceyes: read '%s' failed\n", path); free(buf); fclose(f); return NULL; }
+    fclose(f);
+    *out_sz = sz;
+    return buf;
+}
+
+static int is_arm_elf(uint8_t *buf, long sz) {
+    Elf32_Ehdr *eh = (Elf32_Ehdr *)buf;
+    return (size_t)sz >= sizeof *eh && !memcmp(eh->e_ident, ELFMAG, SELFMAG) &&
+           eh->e_ident[EI_CLASS] == ELFCLASS32 && eh->e_machine == EM_ARM;
+}
+
+/* Load ld-linux.so.2 (the PT_INTERP) from the device rootfs at INTERP_BASE; returns its
+   entry PC, or 0 on failure. */
+static uint32_t load_interp(const char *guest_interp) {
+    char host[PATH_MAX];
+    if (!me_rootfs_resolve(guest_interp, host, sizeof host)) {
+        fprintf(stderr, "magiceyes: interpreter '%s' not found in the device rootfs "
+                        "(set ME_GP2X_ROOTFS; see host/win/stage_rootfs.sh)\n", guest_interp);
+        return 0;
+    }
+    long sz; uint8_t *buf = slurp(host, &sz);
+    if (!buf) return 0;
+    if (!is_arm_elf(buf, sz)) { fprintf(stderr, "magiceyes: interp '%s' not ARM ELF\n", host); free(buf); return 0; }
+    Elf32_Ehdr *eh = (Elf32_Ehdr *)buf;
+    map_loads(buf, eh, INTERP_BASE);
+    uint32_t entry = INTERP_BASE + eh->e_entry;
+    if (g_trace) fprintf(stderr, "  interp %s -> base=%08x entry=%08x\n", host, INTERP_BASE, entry);
+    free(buf);
+    return entry;
+}
+
+/* ---- ELF loader (static EXEC or dynamic ET_EXEC w/ PT_INTERP) ---- */
+/* Returns the entry PC (the interpreter's, for a dynamic binary), or 0 on a recoverable
+   failure (bad path/format) so the caller can go idle instead of killing the GUI process. */
+uint32_t load_elf(const char *path) {
+    long sz; uint8_t *buf = slurp(path, &sz);
+    if (!buf) return 0;
+    if (!is_arm_elf(buf, sz)) { fprintf(stderr, "magiceyes: '%s' is not a 32-bit ARM ELF\n", path); free(buf); return 0; }
+    Elf32_Ehdr *eh = (Elf32_Ehdr *)buf;
+    if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) {
+        fprintf(stderr, "magiceyes: '%s' is not an executable ELF (e_type=%u)\n", path, eh->e_type); free(buf); return 0; }
+
+    /* find the program interpreter, if any */
+    char interp[256] = {0};
+    Elf32_Phdr *ph = (Elf32_Phdr *)(buf + eh->e_phoff);
+    for (int i = 0; i < eh->e_phnum; i++)
+        if (ph[i].p_type == PT_INTERP && ph[i].p_filesz < sizeof interp)
+            memcpy(interp, buf + ph[i].p_offset, ph[i].p_filesz);
+
+    /* The program loads at its fixed vaddrs (ET_EXEC, bias 0). PIE (ET_DYN main) isn't a GP2X
+       case, so we don't relocate the main image. */
+    uint32_t max_end = map_loads(buf, eh, 0);
     g_brk_start = g_brk = ALIGN_UP(max_end);
-    map_region(g_brk, PAGE, UC_PROT_READ | UC_PROT_WRITE); /* initial brk page */
-    /* where the phdrs ended up in guest memory (the PT_LOAD covering e_phoff) */
+    map_region(g_brk, PAGE, UC_PROT_READ | UC_PROT_WRITE);  /* initial brk page */
+
+    /* AT_PHDR: where the phdrs landed in guest memory (the PT_LOAD covering e_phoff). */
     g_phdr_va = 0;
     for (int i = 0; i < eh->e_phnum; i++)
         if (ph[i].p_type == PT_LOAD && eh->e_phoff >= ph[i].p_offset &&
@@ -51,15 +119,40 @@ uint32_t load_elf(const char *path) {
             g_phdr_va = ph[i].p_vaddr + (eh->e_phoff - ph[i].p_offset); break;
         }
     g_phnum = eh->e_phnum; g_phent = eh->e_phentsize; g_elf_entry = eh->e_entry;
+
     uint32_t entry = eh->e_entry;
+    if (interp[0]) {                         /* dynamic: load + start the interpreter */
+        uint32_t ie = load_interp(interp);
+        if (!ie) { free(buf); return 0; }
+        g_at_base = ie ? INTERP_BASE : 0;
+        g_is_dynamic = 1;
+        entry = ie;                          /* start in ld.so; it jumps to the program */
+        if (g_trace) fprintf(stderr, "  dynamic: prog entry=%08x phdr=%08x interp_base=%08x\n",
+                             g_elf_entry, g_phdr_va, g_at_base);
+    } else {
+        g_at_base = 0; g_is_dynamic = 0;
+    }
     free(buf);
     return entry;
 }
 
 /* ---- stack: argc, argv[], NULL, envp[], NULL, auxv[], NULL ---- */
+/* For dynamic binaries we also push a small envp (LD_LIBRARY_PATH so the rootfs libs resolve,
+   FAKESDL_FPS for the shim's frame cap) — a static GP2X game ignores env, so it's harmless. */
 uint32_t setup_stack(int argc, char **argv) {
     map_region(STACK_TOP - STACK_SIZE, STACK_SIZE, UC_PROT_READ | UC_PROT_WRITE);
     uint32_t sp = STACK_TOP;
+
+    /* env strings (dynamic only) */
+    const char *envs[4]; int nenv = 0;
+    if (g_is_dynamic) {
+        envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib";
+        envs[nenv++] = "HOME=/tmp";
+        static char fps[32];
+        const char *f = getenv("ME_GP2X_FPS"); snprintf(fps, sizeof fps, "FAKESDL_FPS=%s", f ? f : "60");
+        envs[nenv++] = fps;
+    }
+    uint32_t envp[4];
 
     /* push strings, collect guest pointers */
     uint32_t argp[64]; int n = argc < 63 ? argc : 63;
@@ -68,6 +161,12 @@ uint32_t setup_stack(int argc, char **argv) {
         sp -= l; sp &= ~3u;
         uc_mem_write(g_uc, sp, argv[i], l);
         argp[i] = sp;
+    }
+    for (int i = nenv - 1; i >= 0; i--) {
+        size_t l = strlen(envs[i]) + 1;
+        sp -= l; sp &= ~3u;
+        uc_mem_write(g_uc, sp, envs[i], l);
+        envp[i] = sp;
     }
     /* 16 random bytes for AT_RANDOM */
     sp -= 16; sp &= ~15u; uint32_t at_random = sp;
@@ -78,13 +177,14 @@ uint32_t setup_stack(int argc, char **argv) {
     uc_mem_write(g_uc, sp, "v5l", 4);
 
     /* Full auxv, mirroring qemu-user's create_elf_tables() so glibc's static-TLS +
-       stdio/C++ init complete (AT_PHDR is the critical one for PT_TLS). */
+       stdio/C++ init complete (AT_PHDR is the critical one for PT_TLS; AT_BASE/AT_ENTRY
+       drive the dynamic linker). */
     uint32_t aux[][2] = {
         {3 /*AT_PHDR*/,    g_phdr_va},
         {4 /*AT_PHENT*/,   g_phent},
         {5 /*AT_PHNUM*/,   g_phnum},
         {6 /*AT_PAGESZ*/,  PAGE},
-        {7 /*AT_BASE*/,    0},
+        {7 /*AT_BASE*/,    g_at_base},
         {8 /*AT_FLAGS*/,   0},
         {9 /*AT_ENTRY*/,   g_elf_entry},
         {11/*AT_UID*/,     0}, {12/*AT_EUID*/, 0},
@@ -98,8 +198,8 @@ uint32_t setup_stack(int argc, char **argv) {
         {0 /*AT_NULL*/,    0},
     };
     int naux = sizeof(aux) / sizeof(aux[0]);
-    /* total words: argc(1) + argv(n) + null(1) + envp null(1) + aux(2*naux) */
-    int words = 1 + n + 1 + 1 + 2 * naux;
+    /* total words: argc(1) + argv(n) + null(1) + envp(nenv) + null(1) + aux(2*naux) */
+    int words = 1 + n + 1 + nenv + 1 + 2 * naux;
     uint32_t block = sp - words * 4;
     block &= ~7u;
     uint32_t p = block;
@@ -107,6 +207,7 @@ uint32_t setup_stack(int argc, char **argv) {
     w = n;        uc_mem_write(g_uc, p, &w, 4); p += 4;
     for (int i = 0; i < n; i++) { uc_mem_write(g_uc, p, &argp[i], 4); p += 4; }
     w = 0;        uc_mem_write(g_uc, p, &w, 4); p += 4;   /* argv NULL */
+    for (int i = 0; i < nenv; i++) { uc_mem_write(g_uc, p, &envp[i], 4); p += 4; }
     w = 0;        uc_mem_write(g_uc, p, &w, 4); p += 4;   /* envp NULL */
     for (int i = 0; i < naux; i++) {
         uc_mem_write(g_uc, p, &aux[i][0], 4); p += 4;

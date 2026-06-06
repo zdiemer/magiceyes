@@ -56,7 +56,18 @@ void me_usleep(unsigned us) {
    GP2X assets have no symlinks, so lstat == stat. */
 ssize_t pread(int fd, void *buf, size_t count, off_t off) {
     if (_lseeki64(fd, off, SEEK_SET) < 0) return -1;
-    return _read(fd, buf, (unsigned)count);
+    /* _read can short-read large requests on Windows; loop so a file-backed mmap of a big
+       library segment (libc's ~645KB text) isn't left half-zeroed -> corrupt .dynsym/version
+       tables -> guest ld.so "undefined symbol ... version GLIBC_2.0". */
+    size_t done = 0;
+    while (done < count) {
+        unsigned chunk = (count - done > 0x10000000u) ? 0x10000000u : (unsigned)(count - done);
+        int n = _read(fd, (char *)buf + done, chunk);
+        if (n < 0) return done ? (ssize_t)done : -1;
+        if (n == 0) break;                 /* EOF */
+        done += (size_t)n;
+    }
+    return (ssize_t)done;
 }
 int lstat(const char *path, struct stat *st) { return stat(path, st); }
 int setenv(const char *name, const char *val, int overwrite) {

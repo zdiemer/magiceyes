@@ -9,7 +9,9 @@ struct freereg g_mfree[256]; int g_nmfree = 0;
  * so additional uc instances (one per native guest thread, the native-threads model)
  * can share the SAME memory by mapping the same host pointers. The registry records
  * each region for that factory (uc_map_all). */
-struct gregion { uint32_t addr, len; int perms; void *host; };
+/* external=1: host backing is owned elsewhere (the shm framebuffer is the engine's g_shm,
+   shared with the viewer) -> map it into every uc but NEVER munmap it on mem_reset. */
+struct gregion { uint32_t addr, len; int perms; void *host; int external; };
 static struct gregion g_reg[2048];
 static int g_nreg = 0;
 static pthread_mutex_t g_reg_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -44,7 +46,7 @@ void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms) {
             uc_err e = uc_mem_map_ptr(u, p, len, perms, host);
             if (e && e != UC_ERR_MAP) die("uc_mem_map_ptr", e);
             if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
-                g_reg[g_nreg++] = (struct gregion){p, len, perms, host};
+                g_reg[g_nreg++] = (struct gregion){p, len, perms, host, 0};
             p = run;
         }
     }
@@ -69,10 +71,25 @@ void *guest_to_host(uint32_t gaddr) {
    AFTER all worker ucs and the main uc are closed -- nothing maps these pointers anymore. */
 void mem_reset(void) {
     pthread_mutex_lock(&g_reg_lock);
-    for (int i = 0; i < g_nreg; i++) munmap(g_reg[i].host, g_reg[i].len);
+    for (int i = 0; i < g_nreg; i++) if (!g_reg[i].external) munmap(g_reg[i].host, g_reg[i].len);
     g_nreg = 0;
     pthread_mutex_unlock(&g_reg_lock);
     g_nmfree = 0;
+}
+
+/* Map [guest,guest+len) onto an EXTERNAL host buffer (not engine-owned) into the current uc and
+   record it so every worker uc (uc_map_all) sees the same memory; mem_reset won't free it. Used
+   to alias the shim's gp2x_fb mmap onto the engine's g_shm (zero-copy shared framebuffer). */
+void mem_register_external(uint32_t guest, uint32_t len, void *host) {
+    uint32_t l = ALIGN_UP(len);
+    pthread_mutex_lock(&g_reg_lock);
+    if (!find_region(guest)) {
+        uc_err e = uc_mem_map_ptr(g_uc, guest, l, UC_PROT_READ | UC_PROT_WRITE, host);
+        if (e && e != UC_ERR_MAP) die("uc_mem_map_ptr external", e);
+        if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
+            g_reg[g_nreg++] = (struct gregion){guest, l, UC_PROT_READ | UC_PROT_WRITE, host, 1};
+    }
+    pthread_mutex_unlock(&g_reg_lock);
 }
 
 /* Map every recorded region into a fresh uc — the native-thread factory. */

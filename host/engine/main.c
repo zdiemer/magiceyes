@@ -27,6 +27,7 @@ int g_reload_chdir = 0;   /* File->Open: chdir to the new game's dir; GPEComp re
 char g_reload_path[PATH_MAX] = {0};   /* non-empty -> the main loop resets + loads this binary */
 int g_trace = 0;
 int g_scret = 0;   /* ME_SCRET: log every syscall + return value per thread (divergence diff) */
+char g_exe_dir[PATH_MAX] = {0};   /* dir of our own executable (default rootfs search) */
 __thread int g_setpc = 0;   /* a syscall set PC (signal entry / sigreturn): skip R0 write */
 
 /* synchronous fork state (system()/popen child; see syscalls.c) */
@@ -264,6 +265,12 @@ int main(int argc, char **argv) {
     me_platform_init();   /* Windows: 1ms timer + opt out of EcoQoS throttling (else a backgrounded
                              window is CPU/timer-throttled -> ~4x slower load; Linux never throttles) */
     guard_init();         /* install the host-fault guard so a bad game can't crash the GUI */
+    if (argc > 0 && argv[0][0]) {   /* remember the executable's dir (default device-rootfs search) */
+        snprintf(g_exe_dir, sizeof g_exe_dir, "%s", argv[0]);
+        char *s1 = strrchr(g_exe_dir, '/'), *s2 = strrchr(g_exe_dir, '\\'), *s = s1 > s2 ? s1 : s2;
+        if (s) *s = 0; else g_exe_dir[0] = 0;
+    }
+    me_rootfs_init();     /* locate the device rootfs (dynamic-linked titles); env ME_GP2X_ROOTFS */
     /* ---- CLI: parse flags; the first non-flag positional is the game ---- */
     const char *input = NULL;
     for (int i = 1; i < argc; i++) {
@@ -295,11 +302,16 @@ int main(int argc, char **argv) {
         if (!bin) return 2;
         int cls = classify_elf(bin);
         if (cls < 0) return 2;
-        if (cls == 1) {
-            fprintf(stderr, "magiceyes: '%s' is a dynamically-linked ELF (not a GPEComp self-extractor, "
-                            "which is decompressed automatically). Native dynamic-linked titles need a "
-                            "runtime linker + rootfs -- run them via the Wiz/qemu path for now.\n", bin);
-            return 3;
+        if (cls == 1) {   /* dynamically-linked title (Odonata, W&W, RetroVirus): load the guest
+                             ld.so + NEEDED libs from the device rootfs (load_elf handles it). */
+            char probe[PATH_MAX];
+            if (!me_rootfs_resolve("/lib/ld-linux.so.2", probe, sizeof probe)) {
+                fprintf(stderr, "magiceyes: '%s' is dynamically linked but no device rootfs was found.\n"
+                                "  Set ME_GP2X_ROOTFS to a dereferenced rootfs (build it with\n"
+                                "  host/win/stage_rootfs.sh) or place one at <exe>/rootfs.\n", bin);
+                return 3;
+            }
+            if (g_trace) fprintf(stderr, "magiceyes: '%s' dynamically linked -> rootfs %s\n", bin, probe);
         }
     } else {
 #ifndef ME_BUNDLED
@@ -348,8 +360,12 @@ int main(int argc, char **argv) {
                 g_fault_addr = flt.addr; g_fault_pending = 1;   /* viewer pops a MessageBox */
             }
             if (!g_reload_path[0]) {           /* game ended on its own (exit/return/error) */
-                if (e != UC_ERR_OK && !g_exit && !flt.faulted)
-                    fprintf(stderr, "me_unicorn: main emu err %s pc=%08x\n", uc_strerror(e), gread(UC_ARM_REG_PC));
+                if (e != UC_ERR_OK && !g_exit && !flt.faulted) {
+                    uint32_t pc = gread(UC_ARM_REG_PC), insn = 0, cpsr = gread(UC_ARM_REG_CPSR);
+                    uc_mem_read(g_th[0].uc, pc, &insn, 4);
+                    fprintf(stderr, "me_unicorn: main emu err %s pc=%08x insn=%08x cpsr=%08x(T=%d) lr=%08x\n",
+                            uc_strerror(e), pc, insn, cpsr, (cpsr >> 5) & 1, gread(UC_ARM_REG_LR));
+                }
 #ifdef ME_BUNDLED
                 engine_stop_all_threads();     /* halt lingering workers; keep last frame + window */
                 g_exit = 0; g_exit_code = 0;   /* return to an idle window (menu still open) */

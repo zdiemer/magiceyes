@@ -41,6 +41,54 @@ void rewrite_guest_path(const char *in, char *out, size_t cap) {
     snprintf(out, cap, "%s", in);
 }
 
+/* ---- device rootfs (dynamic-linker path) -----------------------------------
+   Dynamically-linked GP2X titles (Odonata, Wind & Water, RetroVirus) name
+   /lib/ld-linux.so.2 and link libc/libSDL; the guest ld.so opens those absolute paths.
+   Redirect them at a host "rootfs" dir (like qemu-user's -L): a dereferenced copy of the
+   device libs + our fake-SDL shim shadowing libSDL (host/win/stage_rootfs.sh). Game assets
+   are opened relative to the game's own cwd, so they don't go through here. */
+static char g_rootfs[PATH_MAX]; static int g_rootfs_ok = -1;
+void me_rootfs_init(void) {
+    if (g_rootfs_ok >= 0) return;
+    g_rootfs_ok = 0;
+    char cands[6][PATH_MAX]; int nc = 0;
+    const char *env = getenv("ME_GP2X_ROOTFS");
+    if (env) snprintf(cands[nc++], PATH_MAX, "%s", env);
+    if (g_exe_dir[0]) {   /* shipped beside the executable: <exedir>/rootfs or assets/rootfs-win */
+        snprintf(cands[nc++], PATH_MAX, "%s/rootfs", g_exe_dir);
+        snprintf(cands[nc++], PATH_MAX, "%s/assets/rootfs-win", g_exe_dir);
+        snprintf(cands[nc++], PATH_MAX, "%s/../assets/rootfs-win", g_exe_dir);
+    }
+    snprintf(cands[nc++], PATH_MAX, "assets/rootfs-win");
+    snprintf(cands[nc++], PATH_MAX, "assets/rootfs/0/rootfs");
+    for (int i = 0; i < nc; i++) {
+        char probe[PATH_MAX]; snprintf(probe, sizeof probe, "%s/lib/ld-linux.so.2", cands[i]);
+        struct stat s;
+        if (!stat(probe, &s)) { snprintf(g_rootfs, sizeof g_rootfs, "%s", cands[i]); g_rootfs_ok = 1;
+                                if (g_trace) fprintf(stderr, "  [rootfs] %s\n", g_rootfs); return; }
+    }
+    if (g_trace) fprintf(stderr, "  [rootfs] none found (set ME_GP2X_ROOTFS for dynamic titles)\n");
+}
+int me_rootfs_resolve(const char *guest, char *out, size_t cap) {
+    me_rootfs_init();
+    if (g_rootfs_ok != 1 || !guest || guest[0] != '/') return 0;
+    /* Skip the loader cache/preload so ld.so falls back to the LD_LIBRARY_PATH (/lib:/usr/lib)
+       search -- the cache could pin a host-unreadable symlink name; the default search finds
+       our deref'd libs (and the shim shadowing libSDL). */
+    if (!strcmp(guest, "/etc/ld.so.cache") || !strcmp(guest, "/etc/ld.so.preload")) return 0;
+    char hp[PATH_MAX]; snprintf(hp, sizeof hp, "%s%s", g_rootfs, guest);
+    struct stat s;
+    if (stat(hp, &s) != 0) return 0;
+    snprintf(out, cap, "%s", hp);
+    return 1;
+}
+/* Map a guest path to the host path to actually open/stat: rootfs first (dynamic libs), then
+   the /mnt/tmp redirect (GPEComp temps on Windows), else identity. */
+static void resolve_path(const char *guest, char *out, size_t cap) {
+    if (me_rootfs_resolve(guest, out, cap)) return;
+    rewrite_guest_path(guest, out, cap);
+}
+
 void read_cstr(uint32_t gaddr, char *out, size_t cap) {
     size_t i;
     if (cap == 0) return;
@@ -165,11 +213,26 @@ static int memfd_make(const char *s) { return memfd_make_bin(s, (uint32_t)strlen
    most of them, but a game that exits/reloads mid-load leaks the rest; over many hot reloads
    that exhausts the msvcrt/posix fd table. syscalls_reset closes any still open. */
 #define HOSTFD_MAX 512
-static int g_hostfd[HOSTFD_MAX]; static int g_nhostfd = 0;
-static void hostfd_track(int fd) {
+static int g_hostfd[HOSTFD_MAX]; static uint32_t g_hostfd_ino[HOSTFD_MAX]; static int g_nhostfd = 0;
+/* A stable, file-unique synthetic inode from the host path (FNV-1a, forced nonzero). On Windows
+   MinGW's fstat/stat report st_ino==0 for EVERY file; the guest ld.so dedups shared objects by
+   (st_dev,st_ino), so identical inodes make it treat libc/libm/... as duplicates of the first lib
+   and never map them -> "undefined symbol __ctype_tolower" at relocation. A path hash gives each
+   distinct file a distinct inode (and the same file the same one). Identity-irrelevant on Linux,
+   where the real inode is already unique -- we only substitute when st_ino==0. */
+static uint32_t path_ino(const char *hp) {
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)hp; *p; p++) { h ^= *p; h *= 16777619u; }
+    return h ? h : 1u;
+}
+static void hostfd_track(int fd, uint32_t ino) {
     if (fd < 0) return;
-    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] < 0) { g_hostfd[i] = fd; return; }
-    if (g_nhostfd < HOSTFD_MAX) g_hostfd[g_nhostfd++] = fd;
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] < 0) { g_hostfd[i] = fd; g_hostfd_ino[i] = ino; return; }
+    if (g_nhostfd < HOSTFD_MAX) { g_hostfd[g_nhostfd] = fd; g_hostfd_ino[g_nhostfd] = ino; g_nhostfd++; }
+}
+static uint32_t hostfd_ino(int fd) {
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) return g_hostfd_ino[i];
+    return 0;
 }
 static void hostfd_untrack(int fd) {
     for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) { g_hostfd[i] = -1; return; }
@@ -244,6 +307,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (g_trace) fprintf(stderr, "  [REAL EXIT] code=%u nr=%u\n", a0, nr);
         g_exit = 1; g_exit_code = a0; uc_emu_stop(g_uc); return 0;
     case 4: {  /* write(fd, buf, count) */
+        if ((int)a0 == FAKESOCK_FD) return a2;   /* syslog write to its socket: discard */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         uc_mem_read(g_uc, a1, tmp, a2);
         if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
@@ -285,11 +349,13 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 90: { /* old_mmap(ptr->{addr,len,prot,flags,fd,offset_bytes}) */
         uint32_t m[6]; uc_mem_read(g_uc, a0, m, sizeof m);
         int fd = (m[4] == 0xffffffffu) ? -1 : (int)m[4], t = dev_type(fd);
+        if (t == DEV_SHMFB) return shmfb_mmap(m[1]);
         if (t) return dev_mmap(t, m[0], m[1], m[3], m[5]);
         return do_mmap(m[0], m[1], m[3], fd, m[5]);
     }
     case 192: { /* mmap2: a4=fd, a5=pgoff (4096 units) */
         int fd = (a4 == 0xffffffffu) ? -1 : (int)a4, t = dev_type(fd);
+        if (t == DEV_SHMFB) return shmfb_mmap(a1);
         if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
         return do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
     }
@@ -408,8 +474,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint32_t t = (uint32_t)time(NULL);
         if (a0) uc_mem_write(g_uc, a0, &t, 4); return t;
     }
-    case 99: case 100: { /* statfs/fstatfs: report a roomy filesystem */
+    case 99: case 100: { /* statfs/fstatfs: report a roomy tmpfs */
         uint8_t b[64]; memset(b, 0, sizeof b);
+        *(uint32_t *)(b + 0)  = 0x01021994;  /* f_type = TMPFS_MAGIC -- glibc shm_open statfs's
+                                                /dev/shm and rejects it unless it's tmpfs/ramfs;
+                                                without this the fake-SDL shim's shm_open fails
+                                                -> no shm framebuffer/audio/input. */
         *(uint32_t *)(b + 4)  = 4096;        /* f_bsize   */
         *(uint32_t *)(b + 8)  = 0x00100000;  /* f_blocks  */
         *(uint32_t *)(b + 12) = 0x00080000;  /* f_bfree   */
@@ -478,11 +548,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            replaces it. */
         { int mf = sysfile_open(p); if (mf) { if (g_trace) fprintf(stderr, "  [fake %s]\n", p);
                                               return mf; } }
-        char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
         long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
         if (getenv("ME_OPENLOG")) { char b[1100]; snprintf(b, sizeof b,
             "OPEN '%s' flags=%x -> %ld%s\n", p, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
-        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track((int)r); return r; }
+        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track((int)r, path_ino(hp)); return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
         if (e2 == ENOENT && ++g_self->enoent_streak > 3) {
@@ -497,13 +567,13 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a1, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         int mf = sysfile_open(p); if (mf) return mf;
-        char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
         long r = open(hp, host_open_flags((int)a2), a3);
-        if (r >= 0) { hostfd_track((int)r); return r; }
+        if (r >= 0) { hostfd_track((int)r, path_ino(hp)); return r; }
         return LERR(errno);
     }
     case 6:    /* close */
-        if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W) return 0;
+        if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W || (int)a0 == FAKESOCK_FD) return 0;
         { struct memfile *mf = memfd_get((int)a0);
           if (mf) { free(mf->data); mf->used = 0; mf->data = NULL; return 0; } }
         if (dev_type((int)a0)) { dev_close((int)a0); return 0; }  /* free the device slot */
@@ -514,6 +584,28 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (mf) { uint32_t base = ((int)a2 == 1) ? mf->pos : ((int)a2 == 2) ? mf->len : 0;
                   mf->pos = base + a1; if (mf->pos > mf->len) mf->pos = mf->len; return mf->pos; }
         long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? LERR(errno) : r; }
+    case 93:   /* ftruncate(fd, len): the shim ftruncates the gp2x_fb shm (a device fd) -> accept;
+                  a real host fd is truncated for real. */
+        if (dev_type((int)a0) || (int)a0 >= MEMFD_BASE) return 0;
+        return ftruncate((int)a0, (off_t)a1) == 0 ? 0 : LERR(errno);
+    case 33: {  /* access(path, mode): exists? (ld.so/glibc probe libs + locale dirs) */
+        char p[1024]; read_cstr(a0, p, sizeof p);
+        if (!strncmp(p, "/dev/", 5)) return 0;          /* devices always "exist" */
+        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        struct stat s; return stat(hp, &s) == 0 ? 0 : LERR(ENOENT);
+    }
+    case 85: {  /* readlink(path, buf, bufsiz): we don't expose host symlinks; report "not a
+                   symlink" so glibc path-canonicalisation falls back to the literal path. */
+        (void)a1; (void)a2; return LERR(EINVAL);
+    }
+    case 263:   /* clock_gettime(clk, ts) */
+    case 266: { /* clock_gettime64 */
+        struct timeval tv; gettimeofday(&tv, NULL);
+        uint32_t ts[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec * 1000 };
+        if (a1) uc_mem_write(g_uc, a1, ts, 8);
+        return 0;
+    }
+    case 186:  return 0;  /* sigaltstack (libpthread sets one; we run handlers on the guest stack) */
     case 125:  return 0;  /* mprotect (we map RWX) */
     case 20:   return g_self->tid;  /* getpid (LinuxThreads: 1 pid per thread) */
     case 224:  return g_self->tid;  /* gettid */
@@ -681,7 +773,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 369:  return 0;  /* prlimit64 */
     case 106: { /* stat(path, buf) */
         char p[1024]; read_cstr(a0, p, sizeof p);
-        char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
         struct stat s; if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
@@ -697,17 +789,21 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
                       ms.st_size = mf->len; fill_stat64(a1, &ms); return 0; }
             ok = fstat((int)a0, &s);
+            if (!ok && s.st_ino == 0) s.st_ino = hostfd_ino((int)a0);   /* Win: synth unique inode */
         }
         else { read_cstr(a0, p, sizeof p);
                int mf = sysfile_open(p);   /* a faked path: report it as a regular file */
                if (mf) { struct memfile *m = memfd_get(mf); struct stat ms; memset(&ms, 0, sizeof ms);
                          ms.st_mode = S_IFREG | 0644; ms.st_size = m->len; free(m->data); m->used = 0;
                          fill_stat64(a1, &ms); return 0; }
-               char hp[1024]; rewrite_guest_path(p, hp, sizeof hp);
-               ok = (nr == 196) ? lstat(hp, &s) : stat(hp, &s); }
+               char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+               ok = (nr == 196) ? lstat(hp, &s) : stat(hp, &s);
+               if (!ok && s.st_ino == 0) s.st_ino = path_ino(hp);       /* Win: synth unique inode */
+        }
         if (g_trace && nr != 197) fprintf(stderr, "  stat64 '%s' -> %s\n", p, ok ? "FAIL" : "ok");
         if (ok) return LERR(errno);
-        fill_stat64(a1, &s); return 0;  /* EABI struct stat64 (st_size@48, 104B) */
+        if (s.st_dev == 0) s.st_dev = 1;                                /* ld.so keys on (dev,ino) */
+        fill_stat64(a1, &s); return 0;
     }
     case 146: { /* writev(fd, iov, cnt) */
         long tot = 0;
@@ -731,6 +827,27 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (ok) cpsr |= 0x20000000u; else cpsr &= ~0x20000000u;
         gwrite(UC_ARM_REG_CPSR, cpsr);
         return ok ? 0 : ~0u;
+    }
+    case 102: { /* socketcall(call, args[]). The only socket use seen is glibc syslog() opening an
+                   AF_UNIX/SOCK_DGRAM socket to /dev/log. We give it a fake socket and SWALLOW the
+                   datagrams (printing them under ME_SYSLOG) so syslog succeeds instead of failing
+                   -- a failed socket() made the guest abort. No real networking is emulated. */
+        uint32_t args[6] = {0}; if (a1) uc_mem_read(g_uc, a1, args, 24);
+        switch (a0) {
+        case 1:  return FAKESOCK_FD;                       /* SYS_SOCKET */
+        case 2: case 3: case 4: case 14: return 0;         /* bind/connect/listen/setsockopt: ok */
+        case 9: case 11: case 16: {                        /* send/sendto/sendmsg: discard */
+            if (getenv("ME_SYSLOG")) {
+                if (a0 != 16) { uint32_t buf = args[1], len = args[2];
+                    if (len > 512) len = 512; char m[513];
+                    if (buf && len) { uc_mem_read(g_uc, buf, m, len); m[len] = 0;
+                                      fprintf(stderr, "  [syslog] %s\n", m); } }
+            }
+            return (long)args[2];                          /* claim we sent it all */
+        }
+        case 10: case 12: case 17: return 0;               /* recv*: nothing to read */
+        default: return 0;
+        }
     }
     default:
         fprintf(stderr, "me_unicorn: UNIMPLEMENTED syscall %u (r0=%08x r1=%08x r2=%08x)\n",

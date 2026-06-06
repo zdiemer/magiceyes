@@ -1,6 +1,7 @@
 bin/
 dist/
 rootfs/
+tmp_dyn/
 *.o
 *.so*
 

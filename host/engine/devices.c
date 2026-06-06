@@ -14,6 +14,7 @@ int dev_open(const char *path) {
     else if (!strncmp(path, "/dev/mixer", 10))t = DEV_MIXER;
     else if (!strncmp(path, "/dev/tty", 8))   t = DEV_TTY;
     else if (!strcmp(path, "/dev/i2c-0"))     t = DEV_I2C;   /* handset serial (DRM/region check) */
+    else if (!strcmp(path, "/dev/shm/gp2x_fb")) t = DEV_SHMFB; /* fake-SDL shim's framebuffer shm */
     else return -1;
     int i; for (i = 0; i < 64; i++) if (g_devtype[i] == 0) break;  /* reuse freed slots */
     if (i == 64) return -1;
@@ -34,9 +35,13 @@ void shm_setup(void) {
     /* Single-process bundle: the viewer runs in this same process (a worker thread, see
        main.c), so g_shm is plain in-process memory -- no cross-process named mapping to
        mismatch on launch order/namespace/DACL. This is the intended single-process end state
-       (the cross-platform plan); the native-Windows render fixes are in host/win/. */
-    g_shm = calloc(1, sizeof(gp2x_shm_t));
-    if (!g_shm) return;
+       (the cross-platform plan); the native-Windows render fixes are in host/win/.
+       mmap (not calloc) so the buffer is page-aligned + a whole number of pages -- a dynamic
+       SDL game's fake-SDL shim mmaps this exact object and the engine aliases its guest pages
+       straight onto it (uc_mem_map_ptr needs both ends page-aligned). */
+    size_t sz = ALIGN_UP(sizeof(gp2x_shm_t));
+    g_shm = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (g_shm == MAP_FAILED) { g_shm = NULL; return; }
     g_shm->buttons = 0; g_shm->quit = 0; g_shm->frame_seq = 0;
     g_shm->magic = GP2XSHM_MAGIC;
     return;
@@ -50,6 +55,20 @@ void shm_setup(void) {
     g_shm = p; g_shm->buttons = 0; g_shm->quit = 0; g_shm->frame_seq = 0;
     g_shm->magic = GP2XSHM_MAGIC;
 #endif
+}
+
+/* The fake-SDL shim does shm_open("/gp2x_fb") -> open("/dev/shm/gp2x_fb"), ftruncate, then
+   mmap(sizeof(gp2x_shm_t)). Alias those guest pages directly onto the engine's g_shm so the
+   shim renders into the very buffer the viewer shows (the in-process version of the qemu
+   /dev/shm bridge). Fixed guest base above the interpreter (0x71000000) and below the stack. */
+#define SHMFB_BASE 0x72000000u
+long shmfb_mmap(uint32_t len) {
+    if (!g_shm) return -12 /*ENOMEM*/;
+    uint32_t l = ALIGN_UP(len ? len : sizeof(gp2x_shm_t));
+    if (l > ALIGN_UP(sizeof(gp2x_shm_t))) l = ALIGN_UP(sizeof(gp2x_shm_t));
+    mem_register_external(SHMFB_BASE, l, g_shm);
+    if (g_trace) fprintf(stderr, "  [shmfb] mmap len=%u -> guest=%08x (g_shm)\n", len, SHMFB_BASE);
+    return SHMFB_BASE;
 }
 
 /* /dev/mem mmap tracking so MMSP2 framebuffer phys addresses resolve to guest. */

@@ -636,8 +636,15 @@ int SDL_BuildAudioCVT(SDL_AudioCVT *cvt, Uint16 sf, Uint8 sc, int sr,
     cvt->src_format = sf; cvt->dst_format = df;
     cvt->rate_incr = (double)dr / (double)sr;
     int sbps = (sf & 0xFF) / 8; if (sbps < 1) sbps = 1;
-    int dbps = (df & 0xFF) / 8; if (dbps < 1) dbps = 1;
-    double ratio = ((double)dbps * dc) / ((double)sbps * sc) * ((double)dr / sr);
+    (void)df;
+    /* SDL_ConvertAudio (below) ALWAYS emits S16 mono -- 2 bytes per output frame, 1 channel --
+       regardless of the nominal dst format. So len_mult/len_ratio must size the buffer for that
+       actual output (2 bytes/frame), NOT for (dbps*dc). The old (dbps*dc) basis under-allocated
+       whenever the destination was 8-bit: e.g. an 8-bit WAV -> 8-bit device gave len_mult=1, but
+       the S16 output is 2x the input -> a heap overflow in ConvertAudio (it surfaced as a glibc
+       "malloc(): memory corruption" abort, e.g. Odonata, which opens the device as S8). */
+    double out_bytes_per_in_frame = 2.0;   /* S16 mono out */
+    double ratio = (out_bytes_per_in_frame / ((double)sbps * sc)) * ((double)dr / sr);
     int mult = 1; while ((double)mult < ratio) mult++;
     cvt->len_mult = mult;
     cvt->len_ratio = ratio;
