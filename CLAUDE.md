@@ -513,11 +513,18 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
     an active-high 32-bit button word from /dev/GPIO (PEPC_VK_* layout, mapped from `gp2xshm.h`);
     Vektar reads the handset serial via `I2C_RDWR`(0x707) in a retry loop that only exits once
     bytes come back (a success-but-empty stub made it spin forever — supply a fixed serial).
-  - **Result:** Blazar, Quartz2, Vektar render with input/audio on native Windows + Linux.
-    **Knight Lore** (a *static* paeryn-SDL 8bpp 4-thread title) now loads far past the 142 spam
-    — SDL init, 320×240×8bpp video mode, HW-surface manager, 4 LinuxThreads workers — but does
-    not yet render a frame (main loop busy-waits on `gettimeofday`/`select`/`/dev/GPIO` and never
-    flips OADR or sets the palette): needs further paeryn-SDL-on-engine investigation.
+  - **MLC EADR scanout (`mmsp2_write_cb`):** the MLC has TWO scanout-address regs — EADR (even/
+    primary, 0x2912/0x2914) and OADR (odd, 0x290e/0x2910). Double-buffered titles flip via OADR
+    (Payback via cacheflush); **single-buffered paeryn-SDL titles (Knight Lore) set EADR once and
+    draw in place** — we now watch EADR too (route it through the async present path by setting
+    `g_fb_guest`). *This was Knight Lore's black/no-present screen.*
+  - **Result:** Blazar, Quartz2, Vektar, **and Knight Lore** render + play with input/audio on
+    native Windows + Linux. **Knight Lore gotchas:** (1) it reads `/dev/GPIO` **raw** (not via
+    paeryn's SDL_Joystick), expecting the standard GP2X button word == our `gp2xshm.h` order, so
+    `gpio_read` hands back `shm->buttons` directly — an earlier PEPC_VK remap rotated
+    DOWN/LEFT/RIGHT (the "funky d-pad"). (2) It shows a dismissable (press B) red error screen
+    because `timidity.cfg` (TiMidity MIDI config + GUS patches) isn't present — missing asset,
+    not an engine bug; no MIDI music, gameplay proceeds.
 - **Hot-reload (File→Open) crash — partially resolved.** A single reload (open game A, then open
   game B) now works for every tested static title (the original report was tied to Blazar/Quartz2
   *exiting* to gp2xmenu, now fixed). **Remaining (Windows-only):** reloading TWICE to *different*

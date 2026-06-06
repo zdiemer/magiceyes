@@ -267,16 +267,16 @@ long i2c_ioctl(uint32_t cmd, uint32_t arg) {
     return (long)nmsgs;
 }
 
-/* ---- /dev/GPIO joystick (paeryn SDL) --------------------------------------
-   paeryn SDL's joystick driver reads a 32-bit active-high button word per poll
-   (PEPC_VK_* layout). Map our shm button bitmap (gp2xshm.h order) into it. */
+/* ---- /dev/GPIO joystick ----------------------------------------------------
+   GP2X games read a 32-bit ACTIVE-HIGH button word from /dev/GPIO (read returns 4 bytes).
+   The bit layout is the standard GP2X button word — UP=0x1, UP_LEFT=0x2, LEFT=0x4,
+   DOWN_LEFT=0x8, DOWN=0x10, DOWN_RIGHT=0x20, RIGHT=0x40, UP_RIGHT=0x80, START=0x100, …,
+   A=0x1000, B=0x2000, X=0x4000, Y=0x8000, VOL_UP/DOWN, STICK_PUSH — which is exactly our
+   `gp2xshm.h`/shm->buttons order (the same order the mmio GPIO path uses), so just hand back
+   shm->buttons directly. (Knight Lore reads /dev/GPIO raw, NOT via paeryn's SDL_Joystick; an
+   earlier PEPC_VK remap rotated DOWN/LEFT/RIGHT -> the "funky d-pad".) */
 long gpio_read(uint32_t gbuf, uint32_t n) {
-    static const uint8_t map[19] = {           /* shm bit -> PEPC_VK bit */
-        0, 1, 6, 4, 3, 5, 7, 2,                /* UP UPLEFT LEFT DOWNLEFT DOWN DOWNRIGHT RIGHT UPRIGHT */
-        15, 14, 12, 13, 8, 9, 10, 11,          /* START SELECT L R A B X Y */
-        16, 17, 18 };                          /* VOLUP VOLDOWN CLICK */
-    uint32_t b = g_shm ? g_shm->buttons : 0, v = 0;
-    for (int i = 0; i < 19; i++) if (b & (1u << i)) v |= (1u << map[i]);
+    uint32_t v = g_shm ? g_shm->buttons : 0;   /* active-high; gp2xshm.h == GP2X button word */
     uint32_t k = n < 4 ? n : 4;
     if (gbuf && k) uc_mem_write(g_uc, gbuf, &v, k);
     return (long)k;
@@ -525,9 +525,15 @@ long dsp_ioctl(uint32_t cmd, uint32_t arg) {
     return 0;
 }
 
-/* MMSP2 framebuffer-address registers (byte offsets in the 0xC0000000 block) */
+/* MMSP2 MLC framebuffer-address registers (byte offsets in the 0xC0000000 block).
+   The MLC has TWO scanout-address registers per layer: EADR (even field / primary) and OADR
+   (odd field). Double-buffered titles page-flip via OADR (Payback uses cacheflush instead);
+   single-buffered ones (paeryn-SDL: Knight Lore) set EADR once to the scanout base and draw
+   in place. We watch both. */
 #define MMSP2_OADRL 0x290e
 #define MMSP2_OADRH 0x2910
+#define MMSP2_EADRL 0x2912
+#define MMSP2_EADRH 0x2914
 void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                            int size, int64_t value, void *user) {
     (void)type; (void)user;
@@ -537,6 +543,18 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  MMSP2 wr %04x sz%d=%08x\n", off, size, (uint32_t)value); }
     if (off == MMSP2_PALLT_A || off == MMSP2_PALLT_D) { gp2x_mmio_palette(off, (uint32_t)value); return; }
+    if (off == MMSP2_EADRL || off == MMSP2_EADRH) {   /* MLC primary scanout base (single-buffer) */
+        uint16_t lo = 0, hi = 0;
+        uc_mem_read(uc, g_mmsp2_guest + MMSP2_EADRL, &lo, 2);
+        uc_mem_read(uc, g_mmsp2_guest + MMSP2_EADRH, &hi, 2);
+        if (off == MMSP2_EADRL) { lo = value & 0xffff; if (size == 4) hi = (value >> 16) & 0xffff; }
+        else hi = value & 0xffff;
+        uint32_t phys = ((uint32_t)hi << 16) | lo, g;
+        /* Route through the async present path (helper + present_active): the game draws in place
+           and never re-writes EADR, so don't gate present on a per-frame flip (g_oadr_driven). */
+        if (phys && phys_to_guest(phys, &g)) g_fb_guest = g;
+        return;
+    }
     if (off != MMSP2_OADRL && off != MMSP2_OADRH) return;
     uint16_t lo = 0, hi = 0;
     uc_mem_read(uc, g_mmsp2_guest + MMSP2_OADRL, &lo, 2);
