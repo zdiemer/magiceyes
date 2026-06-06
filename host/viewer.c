@@ -412,7 +412,13 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     SDL_Window *win = SDL_CreateWindow("magiceyes",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         w * scale, h * scale, wflags);
-    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
+    /* Prefer a GPU-accelerated renderer so the per-frame scale/present is offloaded to the GPU
+       (on a low-spec machine a software renderer's CPU present competes with the emulator). Fall
+       back through accelerated-without-vsync, then any renderer, if the GPU path is unavailable. */
+    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+    if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
+    if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);   /* black clear/letterbox (avoid an unpainted strip) */
     SDL_RenderSetLogicalSize(ren, w, h);
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB565,
