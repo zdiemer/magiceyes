@@ -550,6 +550,25 @@ static Sint16 caanoo_axis(int axis) {
 static void pump(void) {
     if (!g_shm) return;
     if (g_shm->quit) { SDL_Event e; memset(&e, 0, sizeof(e)); e.type = SDL_QUIT; push_event(&e); }
+    /* touchscreen -> SDL mouse events (Caanoo games read the resistive panel as the SDL mouse).
+       The viewer writes touch_x/y (guest pixels) + touch_down. */
+    { static int px = -1, py = -1, pd = 0;
+      int tx = g_shm->touch_x, ty = g_shm->touch_y, td = g_shm->touch_down ? 1 : 0;
+      if (tx != px || ty != py) {
+          SDL_Event e; memset(&e, 0, sizeof e); e.type = SDL_MOUSEMOTION;
+          e.motion.x = (Uint16)tx; e.motion.y = (Uint16)ty;
+          e.motion.xrel = (Sint16)(px < 0 ? 0 : tx - px); e.motion.yrel = (Sint16)(py < 0 ? 0 : ty - py);
+          e.motion.state = (Uint8)(td ? SDL_BUTTON_LMASK : 0);
+          push_event(&e); px = tx; py = ty;
+      }
+      if (td != pd) {
+          SDL_Event e; memset(&e, 0, sizeof e);
+          e.type = td ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+          e.button.button = SDL_BUTTON_LEFT; e.button.state = (Uint8)(td ? SDL_PRESSED : SDL_RELEASED);
+          e.button.x = (Uint16)tx; e.button.y = (Uint16)ty;
+          push_event(&e); pd = td;
+      }
+    }
     unsigned int b = g_shm->buttons, changed = b ^ g_prev_buttons, i;
     if (joymap_caanoo()) {
         /* analog-stick motion events from the d-pad bits */
@@ -668,7 +687,11 @@ int SDL_SYS_JoystickUsbConCheck(SDL_Joystick *j) { (void)j; return 0; }   /* USB
 int SDL_SYS_JoystickUsbDisconnect(SDL_Joystick *j) { (void)j; return 0; }
 
 /* ------------------------------------------------------------------ mouse */
-Uint8 SDL_GetMouseState(int *x, int *y) { if (x) *x = 0; if (y) *y = 0; return 0; }
+Uint8 SDL_GetMouseState(int *x, int *y) {
+    if (g_shm) { if (x) *x = g_shm->touch_x; if (y) *y = g_shm->touch_y;
+                 return (Uint8)(g_shm->touch_down ? SDL_BUTTON_LMASK : 0); }
+    if (x) *x = 0; if (y) *y = 0; return 0;
+}
 Uint8 SDL_GetRelativeMouseState(int *x, int *y) { if (x) *x = 0; if (y) *y = 0; return 0; }
 void SDL_WarpMouse(Uint16 x, Uint16 y) { (void)x; (void)y; }
 

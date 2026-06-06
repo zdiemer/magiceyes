@@ -43,7 +43,13 @@ typedef struct {
     volatile uint32_t viewer_heartbeat; /* viewer bumps each loop; lets the producer
                                            tell "viewer attached" (it owns a_read) from
                                            "headless" (producer must drain a_read itself) */
-    uint32_t reserved[3];
+    /* touchscreen (Caanoo): viewer writes the cursor in guest pixels + a pressed flag; the
+       fake-SDL shim turns these into SDL mouse motion/button events (how Caanoo games read
+       the resistive touchscreen). */
+    volatile int16_t  touch_x;
+    volatile int16_t  touch_y;
+    volatile uint32_t touch_down;
+    uint32_t reserved[1];               /* keep this block 12 bytes so pixels[]/aring[] don't move */
     uint8_t  pixels[GP2XSHM_FBBYTES]; /* RGB565, width*height valid */
     uint8_t  aring[GP2XSHM_ARING];    /* PCM ring buffer (shim->viewer) */
 } gp2x_shm_t;

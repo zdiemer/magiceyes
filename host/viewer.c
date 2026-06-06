@@ -497,6 +497,17 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
         if (k[SDL_SCANCODE_W]) b |= 1u << GP2X_R;
         if (!getenv("ME_VIEWER_NOINPUT")) shm->buttons = b;  /* allow scripted input */
 
+        /* mouse -> touchscreen (Caanoo). SDL_RenderSetLogicalSize maps the cursor to guest
+           (logical) pixels, so feed it straight through; the shim turns it into SDL mouse
+           motion/button events. */
+        if (!getenv("ME_VIEWER_NOINPUT")) {
+            int mx = 0, my = 0; Uint32 ms = SDL_GetMouseState(&mx, &my);
+            if (mx < 0) mx = 0; if (mx >= cur_w) mx = cur_w - 1;
+            if (my < 0) my = 0; if (my >= cur_h) my = cur_h - 1;
+            shm->touch_x = (int16_t)mx; shm->touch_y = (int16_t)my;
+            shm->touch_down = (ms & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1u : 0u;
+        }
+
         /* audio is serviced on its own thread (see audio_thread) */
 
         /* resize texture if the game changed mode */
