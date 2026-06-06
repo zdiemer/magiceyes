@@ -163,6 +163,69 @@ long bisect — tools: `mon.py`, `cpuprobe.sh`, `find_spin.sh`, `profile_main.sh
 - Fold the Unicorn backend onto the shared `gp2x_device.c` (it still has its own copy of
   the device logic) so there's one implementation; low priority (fallback, and it works).
 
+## Wiz/GP2X titles on the NATIVE WINDOWS engine — status + known issues (2026-06)
+
+The native engine (`bin/magiceyes.exe`, Unicorn backend + dynamic-ELF loader + fake-SDL shim)
+runs a growing set of titles with no WSL/qemu at run time. Detail: CLAUDE.md + the memories
+`wiz-titles-revival`, `dynamic-gp2x-games-unicorn`, `gp2x-static-titles-and-reload-crash`.
+
+**Working (boot to gameplay):**
+- **Wiz — Cave Story / NXEngine**: clean (video/audio/input).
+- **Wiz — Deicide 3** (`d3return_en.gpe`, Inka DRM): runs, **audio clean**. `stage_rootfs.sh`
+  stages our DRM gate stubs over the firmware libinkadrm/libdrmcode.
+- **Wiz — Her Knights** (`knights.gpe`): runs, gameplay perfect — **BGM static (OPEN, below)**.
+  Needed the GPH-fork Wiz SDL extensions in the shim (SDL_SetLcdMode etc.).
+- **Wiz — Patissier** (`rg_ura/rg.gpe`, CodeSourcery **EABI**): runs (render+audio). Uses the
+  second **EABI rootfs** (`host/win/stage_rootfs_eabi.sh` → `assets/rootfs-eabi`, Debian Wheezy
+  armel + EABI-cross-built shim), selected per-title by PT_INTERP.
+- **GP2X static** — Payback, Blazar, Quartz2, Vektar, Knight Lore: render + play (FB ioctls,
+  _newselect, MESG blitter, 8bpp palette, EADR scanout).
+- **GP2X dynamic** — Odonata, Wind & Water: render/run (dyn loader + rootfs + FPA emu).
+
+**KNOWN ISSUES — open, per title:**
+- **Her Knights — BGM is radio static** (gameplay otherwise perfect). The PCM is already noise
+  in the ring (zcr≈0.5) *before* our SDL conversion layer. Diagnosed: HK's BGM is an **8-bit
+  (U8 22050) custom sound bank** fed through the firmware `libSDL_mixer`; the on-disk
+  `her/bgm/**/*.wav` are clean U8 but the chunks actually loaded (≠ the 26 `SDL_LoadWAV` calls,
+  which are 11025/16-bit SE) come back as noise. Root cause is inside HK's / SDL_mixer's 8-bit
+  pipeline, not our SDL format layer. Real SDL bugs fixed along the way (commit 4f22714,
+  necessary but not sufficient): `SDL_ConvertAudio` now emits the requested dst format (was
+  always S16 → S16-played-as-S8 = static) and `SDL_MixAudio` honours the opened format.
+  **Next:** run HK under reference `qemu-arm` long enough to reach the menu music — static there
+  too ⇒ shim/SDL_mixer bug (fixable); clean ⇒ engine CPU/DSP-emulation bug (deep). Trace HK's
+  custom BGM loader (no symbols). Debug env: host `ME_FAKESDL_AUDIO_DUMP=/tmp/x.pcm` → guest
+  ring PCM; analyse with zcr (≈0.5 static, <0.15 clean music).
+- **Odonata — gameplay object-pool crash** (PARKED): title+menu render in true colour, but a
+  few seconds into gameplay it hits the game's own assert (object.cpp:297, `!instance_list.empty()`)
+  — dead sprite objects never freed → pool empties + framerate collapses. FPA word-swap fixed
+  motion, not freeing. Undiagnosed (residual FPA value bug? native-threads race? timing?).
+  Decisive next test: compare under the qemu backend (correct nwfpe FPA + cooperative threads).
+- **RetroVirus — white rectangles**: content reaches the viewer (continuous-scanout fallback)
+  but every blit has an EMPTY src surface (SDL_image/ttf produce 0x0@0bpp) — likely a PNG-decode
+  (libpng dlopen) failure or an SDL_Surface/PixelFormat ABI mismatch (shim SDK headers vs the
+  rootfs SDL_image/ttf). Debug: `ME_FAKESDL_BLIT_LOG=1`.
+- **Knight Lore — red error screen (dismissable, press B)**: `timidity.cfg` (TiMidity MIDI config
+  + GUS patches) missing → no MIDI music; gameplay proceeds. Missing asset, not an engine bug.
+- **Blazar — guest SIGSEGV at si_addr=0x15** (qemu backend note): inits gfx + audio for ~2s then
+  null+offset deref (a device/syscall returned 0 where a pointer was expected). NOTE: Blazar runs
+  fine as a *static* title on the native engine; this is the qemu-backend status. Re-confirm.
+- **Windows multi-reload crash**: reloading TWICE to *different* games after a memory-heavy FIRST
+  game (Vektar/Knight Lore) hard-crashes the process (access violation, unguarded). Clean under
+  Linux+ASan ⇒ a fork-internal / Windows-mem teardown issue, not shared-engine logic. Repro with
+  `ME_GP2X_NOBLIT` (not the device code). Diagnostics: `ME_FAULTLOG`, `ME_TEST_RELOAD="a;b"`.
+
+**KNOWN ISSUES — general:**
+- **Wiz raw arcade ports** (Out Zone / Demons World / Snow Bros 2 / Twin Cobra / Zero Wing,
+  shipped in the "Deicide 3" pack) bypass SDL and poke MMSP2/Pollux directly → the dynamic-libSDL
+  shim path doesn't cover them; need the MMSP2 device emulation (see "Wiz raw arcade ports" below).
+  Untested but expected unsupported via the shim.
+- **EABI rootfs is an extra asset**: `assets/rootfs-eabi` is gitignored and rebuilt from Debian
+  Wheezy armel by `host/win/stage_rootfs_eabi.sh` (needs `arm-linux-gnueabi-gcc`, `dpkg-deb`,
+  network to archive.debian.org). Other EABI homebrew should "just work" once it's staged.
+- **8-bit audio in general**: the shim now honours 8-bit device formats (S8/U8) in
+  ConvertAudio/MixAudio, but the Her Knights case shows 8-bit titles can still have upstream
+  issues — re-check any other 8-bit-audio title.
+
 ## In progress (Unicorn backend — now a fallback; see CLAUDE.md for full state)
 
 ### GP2X via the Unicorn backend — boots Payback to menus; ~6fps (Unicorn-speed-bound)
