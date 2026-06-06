@@ -107,6 +107,19 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
        syscalls which kernel struct layout to write (e.g. struct stat64: OABI 96B vs EABI 104B). */
     g_eabi = (imm == 0);
     if (g_self) g_self->last_pc = pc;   /* diagnostics: where this thread last syscalled */
+    /* gettimeofday/clock_gettime fast path: read-only + thread-safe (host clock + a write to the
+       caller's own buffer), and hammered in tight timing loops (Liar busy-polls gettimeofday
+       ~850k/s). Serve it WITHOUT the biglock or per-syscall housekeeping -- that overhead both
+       tanked fps and starved the game's frame pacing. */
+    if (!g_exit && (nr == 78 || nr == 263 || nr == 266)) {
+        struct timeval tv; gettimeofday(&tv, NULL);
+        if (nr == 78) { uint32_t tvp = gread(UC_ARM_REG_R0);
+            if (tvp) { uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec }; uc_mem_write(uc, tvp, t, 8); } }
+        else { uint32_t tsp = gread(UC_ARM_REG_R1);   /* clock_gettime(clk, timespec) */
+            if (tsp) { uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec * 1000 }; uc_mem_write(uc, tsp, t, 8); } }
+        gwrite(UC_ARM_REG_R0, 0);
+        return;
+    }
     BIGLOCK_LOCK();
     g_setpc = 0;
     uint32_t a0 = gread(UC_ARM_REG_R0), a1 = gread(UC_ARM_REG_R1), a2 = gread(UC_ARM_REG_R2);
