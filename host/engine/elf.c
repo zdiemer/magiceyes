@@ -92,6 +92,14 @@ static uint32_t load_interp(const char *guest_interp) {
    failure (bad path/format) so the caller can go idle instead of killing the GUI process. */
 int g_caanoo_dev = 0;   /* set in load_elf: binary links Pollux/Caanoo GLES libs -> Caanoo device */
 
+/* substring search over a byte buffer (portable; MinGW has no memmem). */
+static int buf_has(const uint8_t *buf, long sz, const char *s) {
+    long n = (long)strlen(s);
+    for (long i = 0; i + n <= sz; i++)
+        if (buf[i] == (uint8_t)s[0] && memcmp(buf + i, s, (size_t)n) == 0) return 1;
+    return 0;
+}
+
 uint32_t load_elf(const char *path) {
     long sz; uint8_t *buf = slurp(path, &sz);
     if (!buf) return 0;
@@ -115,7 +123,7 @@ uint32_t load_elf(const char *path) {
     { static const char *sig[] = { "libopengles_lite", "libGLESv1_CM", "libOpenEGL", "libglport",
           "libMesNativeOEM", "libDrv.so", "libmedia.so", "librec.so", "libunicodefont" };
       for (unsigned k = 0; k < sizeof sig / sizeof sig[0]; k++)
-          if (memmem(buf, sz, sig[k], strlen(sig[k]))) { g_caanoo_dev = 1; break; } }
+          if (buf_has(buf, sz, sig[k])) { g_caanoo_dev = 1; break; } }
 
     /* The program loads at its fixed vaddrs (ET_EXEC, bias 0). PIE (ET_DYN main) isn't a GP2X
        case, so we don't relocate the main image. */
