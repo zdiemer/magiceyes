@@ -25,15 +25,18 @@ Quick start
 
 Options   -s/--scale N   -f/--fullscreen   --mute   --volume N   --help   --version
 Controls  D-pad = arrows;  A/B/X/Y = Z/X/A/S;  Start = Enter;  Select = Backspace;
-          L/R = Q/W;  Fullscreen = F11;  Quit = Esc.
+          L/R = Q/W;  Fullscreen = F11;  Screenshot = F12;  Quit = Esc.
 
 Notes
   - Keep SDL2.dll next to magiceyes.exe.
+  - F12 saves a screenshot to screenshots\\ next to magiceyes.exe.
   - GP2X static games and GPEComp self-extractors are supported. Dynamically-linked
     titles (e.g. Wiz) are detected but not yet runnable in this native build.
 
-magiceyes is free software under the GNU GPL v2 (see LICENSE); it statically links a fork
-of the Unicorn CPU emulator (qemu TCG). SDL2 is under the zlib license.
+magiceyes is free software under the GNU GPL v2 (see LICENSE); the complete source is at
+https://github.com/zdiemer/magiceyes . It statically links a fork of the Unicorn CPU
+emulator (qemu TCG). SDL2 is under the zlib license. magiceyes ships no firmware or game
+data -- supply your own, legally obtained.
 EOF
 
 ( cd "$DIST" && rm -f "$NAME.zip" && python3 -m zipfile -c "$NAME.zip" "$NAME" )

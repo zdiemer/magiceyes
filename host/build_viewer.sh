@@ -7,7 +7,7 @@ ME="$(cd "$HERE/.." && pwd)"
 OUT="$ME/bin"
 mkdir -p "$OUT"
 CC="${CC:-cc}"
-"$CC" -O2 -Wall -o "$OUT/viewer" "$HERE/viewer.c" -I "$ME/guest/src" \
+"$CC" -O2 -Wall -o "$OUT/viewer" "$HERE/viewer.c" "$HERE/png_write.c" -I "$ME/guest/src" \
   $(pkg-config --cflags --libs sdl2) -lrt
 echo "built -> $OUT/viewer"
 file "$OUT/viewer" 2>/dev/null || true

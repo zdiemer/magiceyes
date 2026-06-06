@@ -308,6 +308,75 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
 }
 #endif /* ME_WINMENU */
 
+/* ---- Screenshot (F12): grab the live RGB565 framebuffer -> screenshots/magiceyes_<N>.png ---- */
+#include "png_write.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
+/* Directory the executable lives in (so screenshots land in a predictable place, not the game's
+   working dir). Returns 0 on success. */
+static int exe_dir(char *out, size_t cap) {
+#ifdef _WIN32
+    DWORD n = GetModuleFileNameA(NULL, out, (DWORD)cap);
+    if (n == 0 || n >= cap) return -1;
+    char *a = strrchr(out, '\\'), *b = strrchr(out, '/'), *s = a > b ? a : b;
+    if (!s) return -1;
+    *s = 0;
+    return 0;
+#else
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) return -1;
+    out[n] = 0;
+    char *s = strrchr(out, '/');
+    if (!s) return -1;
+    *s = 0;
+    return 0;
+#endif
+}
+
+static void save_screenshot(int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    uint8_t *rgb = (uint8_t *)malloc((size_t)w * h * 3);
+    if (!rgb) return;
+    /* RGB565 -> RGB888 (bit-replicate the low bits), top-to-bottom; shm rows are GP2XSHM_MAXW wide. */
+    const uint16_t *src = (const uint16_t *)shm->pixels;
+    for (int y = 0; y < h; y++) {
+        const uint16_t *row = src + (size_t)y * GP2XSHM_MAXW;
+        uint8_t *d = rgb + (size_t)y * w * 3;
+        for (int x = 0; x < w; x++) {
+            uint16_t v = row[x];
+            unsigned r5 = (v >> 11) & 0x1f, g6 = (v >> 5) & 0x3f, b5 = v & 0x1f;
+            *d++ = (r5 << 3) | (r5 >> 2);
+            *d++ = (g6 << 2) | (g6 >> 4);
+            *d++ = (b5 << 3) | (b5 >> 2);
+        }
+    }
+    char dir[1024], sdir[1100], path[1200];
+    if (exe_dir(dir, sizeof dir) != 0) snprintf(dir, sizeof dir, ".");
+    snprintf(sdir, sizeof sdir, "%s/screenshots", dir);
+#ifdef _WIN32
+    _mkdir(sdir);
+#else
+    mkdir(sdir, 0755);
+#endif
+    /* Next free magiceyes_<N>.png -- never overwrite, and no wall-clock needed. */
+    static int next = 0;
+    int rc = -1;
+    for (int tries = 0; tries < 100000; tries++) {
+        snprintf(path, sizeof path, "%s/magiceyes_%d.png", sdir, next++);
+        FILE *probe = fopen(path, "rb");
+        if (probe) { fclose(probe); continue; }   /* already exists -> skip */
+        rc = png_write_rgb(path, rgb, w, h);
+        break;
+    }
+    free(rgb);
+    fprintf(stderr, rc == 0 ? "[screenshot] saved %s\n" : "[screenshot] FAILED to write %s\n", path);
+}
+
 /* Run the viewer on an already-mapped shm. In the two-process build `main` maps the shm and
    calls this; in the single-process bundle the engine passes its in-process g_shm here from a
    worker thread (host/engine/main.c) -- same pointer the engine writes, so input/audio/frames
@@ -373,6 +442,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
                 if (kc == SDLK_ESCAPE) running = 0;
                 else if (kc == SDLK_F11 || (kc == SDLK_RETURN && (mod & KMOD_ALT)))
                     toggle_fullscreen(win);
+                else if (kc == SDLK_F12) save_screenshot(cur_w, cur_h);
 #ifdef ME_WINMENU
                 else if (kc == SDLK_o && (mod & KMOD_CTRL) && hwnd) do_open_dialog(hwnd);
 #endif

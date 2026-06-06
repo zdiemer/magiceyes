@@ -1,114 +1,129 @@
 # magiceyes
 
-Run Game Park Holdings handheld games — **GP2X** (F100/F200), **GP2X Wiz**, and
-**GP2X Caanoo** — on a PC, including DRM-locked commercial titles. Named for the
-MagicEyes SoCs in those devices (MMSP2 in the GP2X, Pollux in Wiz/Caanoo).
+**Play Game Park Holdings handheld games on your PC.** magiceyes runs games written for
+the **GP2X** (F100/F200), **GP2X Wiz**, and **GP2X Caanoo** — including DRM-locked
+commercial titles — by emulating the device's ARM CPU and reimplementing its video,
+audio, input, and DRM hardware. On Windows it's a single self-contained `.exe`: no
+emulator setup, no virtual machine, no firmware flashing.
 
-These handhelds run a customized ARM Linux; their games are ordinary ARM-Linux
-userland ELF executables (`.gpe`) that talk to SDL 1.2 and some device-specific
-hardware. magiceyes runs the unmodified `.gpe` by emulating the ARM CPU and
-**replacing the device's SDL + DRM with our own implementations** that render to
-a normal window, instead of trying to emulate the whole SoC.
+The name comes from the **MagicEyes** SoCs inside those handhelds (MMSP2 in the GP2X,
+Pollux in the Wiz/Caanoo).
 
-> Status:
-> - **Wiz: working** — verified end-to-end on Deicide 3 (commercial, Inka DRM) and
->   Cave Story/NXEngine (homebrew): correct video, audio, input, timing (qemu-user + shim).
-> - **GP2X (F100/F200): in progress** — a from-scratch Unicorn backend boots a static
->   commercial title (Payback) to its interactive menus with input + audio, but runs ~6 fps
->   (Unicorn JIT-speed-bound). **Pivoting the GP2X backend to a forked qemu-user** for speed
->   + native threading — see `CLAUDE.md` ("the QEMU pivot") and `TODOS.md`.
+<!-- Screenshots: add captures to docs/img/ and they'll render here -->
+<!--
+<p align="center">
+  <img src="docs/img/payback.png"  width="45%" alt="Payback">
+  <img src="docs/img/knightlore.png" width="45%" alt="Knight Lore">
+</p>
+-->
 
-## Architecture
+## Download & run (Windows)
 
-```
-host (x86-64 / arm64)
- └─ qemu-user-arm                  ARM CPU emulation + Linux syscall translation
-     └─ <game>.gpe                 the unmodified GP2X/Wiz/Caanoo binary
-         ├─ libSDL-1.2.so.0   (ours)  → renders into a /dev/shm RGB565 framebuffer
-         ├─ libinkadrm/libdrmcode (ours)  → stubs the device-serial DRM gate
-         └─ glibc / SDL_image / SDL_mixer / libpng / libz  (from device firmware)
- └─ viewer  (native SDL2)          mmaps the shm framebuffer, shows a window,
-                                   maps keyboard/pad → GP2X buttons
-```
+1. Download the latest `magiceyes-<version>-win64.zip` from the
+   [Releases page](https://github.com/zdiemer/magiceyes/releases) and unzip it.
+2. Keep **`SDL2.dll` next to `magiceyes.exe`** (both are in the zip).
+3. Launch a game one of two ways:
+   - **Double-click `magiceyes.exe`** → an empty window opens → **File ▸ Open** and pick
+     a game (a `.gpe` file, a game folder, or a `.zip`).
+   - **From a terminal:** `magiceyes.exe <game.gpe | folder | game.zip>`
 
-Two clean halves:
+You supply the games yourself (see [Legal](#legal)). magiceyes accepts raw `.gpe`
+binaries, GPEComp self-extracting `.gpe`, game folders, and `.zip` archives.
 
-- **`guest/`** — OS-agnostic ARM artifacts that run *inside* the emulator. Built
-  once with the device toolchain; identical on every host.
-- **`host/`** — the per-platform backend: the CPU emulator (qemu-user today) and
-  the native SDL2 viewer. This is the only platform-specific part.
-
-## Layout
+### Command-line options
 
 ```
-magiceyes/
-  README.md
-  guest/
-    src/fakesdl.c     our libSDL-1.2.so.0 (video→shm, input←shm, audio mixer)
-    src/drmstub.c     our libinkadrm.so.0 / libdrmcode.so.0 (DRM gate stub)
-    src/gp2xshm.h     shared shm contract (included by host viewer too)
-    build_guest.sh    builds the ARM .so's with the GPH SDK toolchain
-  host/
-    viewer.c          native SDL2 viewer (framebuffer + input + audio out)
-    build_viewer.sh   builds the viewer for the host OS
-  tools/
-    extract_dat.py    unpack Deicide-style packed .dat archives (per-game asset step)
-  magiceyes.sh        launcher: magiceyes.sh <game.gpe>
-  bin/                build outputs (gitignored)
+magiceyes.exe [options] [game]
+  -s, --scale N      integer window scale (default 3)
+  -f, --fullscreen   start fullscreen
+      --mute         start muted
+      --volume N      audio volume 0–100
+      --help          show all options
+      --version       print version
 ```
 
-## Requirements
+### Controls
 
-- **Host runtime:** `qemu-user-static` (Linux). On Windows use WSL2; on macOS a
-  Linux container/VM. (A future native backend removes this — see Roadmap.)
-- **Build the guest libs:** the GPH SDK toolchain (`gcc-4.0.2-glibc-2.3.6`,
-  32-bit x86 — needs `i386` multilib) + the SDK's SDL 1.2 headers.
-- **Build the viewer:** a C compiler + SDL2 dev libs for the host OS.
-- **Device runtime (rootfs):** the device firmware's root filesystem (glibc, SDL
-  stack, real DRM libs) — operator-supplied from a firmware dump, not redistributed
-  here. Point `MAGICEYES_ROOTFS` at it.
+| Action       | Key                       |
+|--------------|---------------------------|
+| D-pad        | Arrow keys                |
+| A / B / X / Y| Z / X / A / S             |
+| Start        | Enter                     |
+| Select       | Backspace or Right-Shift  |
+| L / R        | Q / W                     |
+| Fullscreen   | F11 (or Alt+Enter)        |
+| **Screenshot** | **F12** (saved as PNG in `screenshots/`) |
+| Quit         | Esc                       |
 
-## Build
+## Supported games
 
-```sh
-# guest ARM libs (once); needs MAGICEYES_SDK pointing at the GPH SDK
-guest/build_guest.sh
-# native viewer for this host
-host/build_viewer.sh
-```
+magiceyes is under active development; coverage grows as device features and games are
+exercised. Highlights of what runs today:
 
-## Usage
+| Device | Game | Status |
+|--------|------|--------|
+| GP2X | **Payback** (commercial) | ✅ Full gameplay — video, audio, input, 30 fps |
+| GP2X | **Blazar**, **Quartz 2**, **Vektar** | ✅ Render + play with audio/input |
+| GP2X | **Knight Lore** | ✅ Plays (MIDI music needs a `timidity.cfg` you supply) |
+| GP2X | **Odonata**, **Wind & Water** | ⚠️ Render/run; need a device rootfs (dynamically linked) |
+| Wiz | **Deicide 3** (commercial, Inka DRM) | ✅ Video, audio, input, timing |
+| Wiz | **Cave Story / NXEngine** | ✅ Full |
+| Wiz | **Her Knights**, **Patissier** | ⚠️ Boot to render + audio (Her Knights BGM imperfect) |
 
-```sh
-MAGICEYES_ROOTFS=/path/to/wiz-rootfs ./magiceyes.sh /path/to/game.gpe
-```
+The native Windows build runs **statically-linked GP2X titles** out of the box.
+**Dynamically-linked titles** (most Wiz games and a few GP2X games) additionally need a
+device *root filesystem* (the firmware's shared libraries) — see
+[Build from source](#build-from-source--developer-notes); a packaged firmware path is on
+the [roadmap](#planned).
 
-Controls (default): arrows = D-pad, Z/X/A/S = A/B/X/Y, Enter = Start,
-R-Shift/Backspace = Select, Q/W = L/R, Esc = quit.
+## Known issues
 
-## Platform support
+- **Hot-loading games can crash on Windows.** Opening a second or third *different* game
+  in one session, after a memory-heavy title (e.g. Vektar or Knight Lore), can crash the
+  app. Workaround: relaunch magiceyes between heavy games. (Single loads are fine.)
+- **Imperfect emulation.** Some titles render or run only partially, or rely on assets
+  that aren't present (e.g. Knight Lore's MIDI needs `timidity.cfg`; some dynamic titles
+  draw incompletely). Audio can stutter under WSL/WSLg specifically — that's a known
+  Microsoft WSLg audio-sink bug, not magiceyes; the native Windows build is unaffected.
 
-| Host        | Backend                          | Status |
-|-------------|----------------------------------|--------|
-| Linux x86-64| qemu-user + native viewer        | ✅ works |
-| Linux arm64 | (can skip qemu — run armhf natively) | planned |
-| Windows     | WSL2 + WSLg (qemu-user + viewer) | ✅ works |
-| macOS       | Linux container/VM               | works via VM |
-| native Win/macOS (no VM) | Unicorn-based backend | roadmap |
+## Planned
 
-## Roadmap
+- **Firmware support** — bundle or auto-stage a device root filesystem so dynamically
+  linked GP2X *and* Wiz titles run on the native build without manual setup.
+- **Broader SDL / syscall coverage** — more device features and emulated syscalls so more
+  titles run unmodified.
+- **macOS and Linux release binaries** — native builds for all three desktop platforms
+  alongside Windows.
 
-- **Native cross-platform backend:** replace qemu-user with a portable ARM CPU
-  emulator (Unicorn Engine) + a small ELF loader and Linux-syscall shim. Because
-  the guest side already owns the SDL/audio/video/DRM surface, the remaining
-  syscall surface is modest (file I/O, mmap, ioctl, time, shm). Yields true native
-  Windows/macOS/Linux binaries with no VM. Slots into `host/` without touching `guest/`.
-- **GP2X (MMSP2) + Caanoo** profiles alongside Wiz (different button maps / SoC quirks).
-- Optional: bundle the viewer + qemu into a single launcher per OS.
+## Build from source / developer notes
 
-## Licensing
+magiceyes has two halves: an OS-agnostic **guest** side (ARM artifacts that run *inside*
+the emulator) and a per-platform **host** side (the CPU engine + the SDL2 viewer).
 
-magiceyes' own code (shim, DRM stub, viewer, scripts) is the redistributable part.
-The device **firmware libraries** (glibc, SDL, the real `libinkadrm`/`libdrmcode`)
-and any **game data** are NOT included — supply them from your own device/firmware
-and legally-dumped games.
+- **Native Windows build** (the released `.exe`): cross-compiled from WSL/Linux with
+  MinGW-w64. See [`host/win/README.md`](host/win/README.md). In short:
+  `host/win/build_fork_win.sh` (the forked Unicorn CPU core) → `host/win/get_sdl2.sh` →
+  `host/win/build_bundle_win.sh` → `bin/magiceyes.exe`. `host/win/build_release.sh`
+  reproduces the whole chain and packages a release zip.
+- **Linux / WSL build** (qemu-user backend, needed today for most Wiz/dynamic titles):
+  builds the guest libs with the GPH SDK toolchain and a native SDL2 viewer. See
+  `guest/build_guest.sh`, `host/build_viewer.sh`, and `host/qemu/`.
+
+The full architecture, the device hardware contract, and every hard-won gotcha live in
+[`CLAUDE.md`](CLAUDE.md); the roadmap is in [`TODOS.md`](TODOS.md).
+
+## Legal
+
+magiceyes is a clean-room reimplementation of the GP2X/Wiz/Caanoo SDL, DRM, and device
+hardware surface, written for **interoperability and game preservation**. It is **not** a
+piracy tool and a release contains **no firmware and no game data**:
+
+- **No device firmware** (glibc, the real SDL stack, the genuine DRM libraries) is
+  included — supply it yourself from a device or firmware image you own.
+- **No games** are included — supply your own, legally obtained, dumped from hardware or
+  media you own.
+
+magiceyes' own code is free software under the **GNU GPL v2** (see [`LICENSE`](LICENSE)).
+The complete corresponding source is at <https://github.com/zdiemer/magiceyes>. It
+statically links a fork of the [Unicorn](https://www.unicorn-engine.org/) CPU emulator
+(qemu's TCG core); SDL2 is under the zlib license.

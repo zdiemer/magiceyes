@@ -35,6 +35,15 @@ typedef struct _PROCESS_POWER_THROTTLING_STATE {
 } PROCESS_POWER_THROTTLING_STATE;
 #endif
 void me_platform_init(void) {
+    /* The bundle is built -mwindows (GUI subsystem) so double-clicking spawns NO console window.
+       But when launched from a terminal we still want --help/--version/diagnostics to show: attach
+       to the parent's console (if any) and rebind stdio to it. No-op (no parent console) on a
+       double-click, so no window appears either way. Must run before the first printf/fprintf. */
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+        freopen("CONIN$",  "r", stdin);
+    }
     timeBeginPeriod(1);
     /* Opt out of BOTH EcoQoS execution-speed throttling AND background timer-resolution coarsening.
        StateMask bit clear (with the bit set in ControlMask) = that throttling is DISABLED. */
