@@ -62,6 +62,7 @@ static unsigned long g_audio_rate_bps = 0; /* bytes per second */
 static int g_audio_opened = 0, g_audio_paused = 1, g_audio_lock = 0;
 static unsigned long g_audio_last_ms = 0;
 static int g_audio_freq_v = 22050, g_audio_ch_v = 2, g_audio_silence = 0;
+static Uint16 g_audio_format = AUDIO_S16SYS;   /* obtained device format (for SDL_MixAudio) */
 static long g_test_phase = 0;
 static void pump_audio(void);
 
@@ -615,7 +616,7 @@ int SDL_OpenAudio(SDL_AudioSpec *desired, SDL_AudioSpec *obtained) {
     g_audio_chunk = sp.samples * sp.channels * g_audio_bps;
     sp.size = g_audio_chunk;
     g_audio_rate_bps = (unsigned long)sp.freq * sp.channels * g_audio_bps;
-    g_audio_freq_v = sp.freq; g_audio_ch_v = sp.channels;
+    g_audio_freq_v = sp.freq; g_audio_ch_v = sp.channels; g_audio_format = sp.format;
     g_audio_silence = (sp.format == AUDIO_U8) ? 0x80 : 0;  /* SDL silence byte */
     sp.silence = (Uint8)g_audio_silence;
     g_audio_cb = sp.callback; g_audio_ud = sp.userdata;
@@ -638,10 +639,32 @@ void SDL_PauseAudio(int p) {
 }
 void SDL_LockAudio(void) { g_audio_lock++; }
 void SDL_UnlockAudio(void) { if (g_audio_lock > 0) g_audio_lock--; }
+/* Mix src onto dst at the OPENED device format. The real SDL_MixAudio honours the device's
+ * sample format; hardcoding 16-bit corrupts an 8-bit device (e.g. Her Knights opens AUDIO_S8),
+ * which is exactly the "radio static" symptom -- it reinterprets pairs of S8 samples as one
+ * S16, doubling pitch and injecting noise. Handle S8/U8/S16 per g_audio_format. */
 void SDL_MixAudio(Uint8 *dst, const Uint8 *src, Uint32 len, int volume) {
     if (volume <= 0) return;
     if (volume > SDL_MIX_MAXVOLUME) volume = SDL_MIX_MAXVOLUME;
-    Uint32 i, n = len / 2;                       /* assume 16-bit signed */
+    Uint32 i;
+    if ((g_audio_format & 0xFF) == 8) {
+        if (g_audio_format == AUDIO_U8) {                 /* unsigned 8-bit, centred at 128 */
+            for (i = 0; i < len; i++) {
+                int v = (int)dst[i] - 128 + (((int)src[i] - 128) * volume) / SDL_MIX_MAXVOLUME;
+                if (v > 127) v = 127; else if (v < -128) v = -128;
+                dst[i] = (Uint8)(v + 128);
+            }
+        } else {                                          /* signed 8-bit, centred at 0 */
+            Sint8 *d = (Sint8 *)dst; const Sint8 *s = (const Sint8 *)src;
+            for (i = 0; i < len; i++) {
+                int v = d[i] + (s[i] * volume) / SDL_MIX_MAXVOLUME;
+                if (v > 127) v = 127; else if (v < -128) v = -128;
+                d[i] = (Sint8)v;
+            }
+        }
+        return;
+    }
+    Uint32 n = len / 2;                          /* 16-bit signed */
     Sint16 *d = (Sint16 *)dst; const Sint16 *s = (const Sint16 *)src;
     for (i = 0; i < n; i++) {
         int v = d[i] + (s[i] * volume) / SDL_MIX_MAXVOLUME;
@@ -675,14 +698,12 @@ int SDL_BuildAudioCVT(SDL_AudioCVT *cvt, Uint16 sf, Uint8 sc, int sr,
     cvt->src_format = sf; cvt->dst_format = df;
     cvt->rate_incr = (double)dr / (double)sr;
     int sbps = (sf & 0xFF) / 8; if (sbps < 1) sbps = 1;
-    (void)df;
-    /* SDL_ConvertAudio (below) ALWAYS emits S16 mono -- 2 bytes per output frame, 1 channel --
-       regardless of the nominal dst format. So len_mult/len_ratio must size the buffer for that
-       actual output (2 bytes/frame), NOT for (dbps*dc). The old (dbps*dc) basis under-allocated
-       whenever the destination was 8-bit: e.g. an 8-bit WAV -> 8-bit device gave len_mult=1, but
-       the S16 output is 2x the input -> a heap overflow in ConvertAudio (it surfaced as a glibc
-       "malloc(): memory corruption" abort, e.g. Odonata, which opens the device as S8). */
-    double out_bytes_per_in_frame = 2.0;   /* S16 mono out */
+    int dbps = (df & 0xFF) / 8; if (dbps < 1) dbps = 1;
+    /* SDL_ConvertAudio (below) emits the requested dst format/channels. Size the buffer for that
+       output (dbps*dc bytes/frame, at the dst rate). Getting this wrong both ways has bitten us:
+       the buffer must be big enough for an enlarging conversion (8-bit->16-bit, upsample) or
+       ConvertAudio overruns it (a glibc "malloc(): memory corruption" abort, e.g. Odonata). */
+    double out_bytes_per_in_frame = (double)dbps * dc;
     double ratio = (out_bytes_per_in_frame / ((double)sbps * sc)) * ((double)dr / sr);
     int mult = 1; while ((double)mult < ratio) mult++;
     cvt->len_mult = mult;
@@ -717,17 +738,33 @@ int SDL_ConvertAudio(SDL_AudioCVT *cvt) {
         }
         g_cvt_mono[f] = (short)(acc / sc);
     }
+    /* Resample the mono S16 intermediate to the dst rate, then emit in the REQUESTED dst format
+       and channel count. Emitting S16 unconditionally was the "radio static" bug: SDL_mixer asks
+       for an S8 device (e.g. Her Knights: S16 11025 -> S8 22050), got S16 bytes, and played them
+       as S8 -> noise. dc>1 duplicates the mono signal across channels. */
+    int dbps = (p.df & 0xFF) / 8; if (dbps < 1) dbps = 1;
+    int d_signed = (p.df & 0x8000) ? 1 : 0;
+    int dc = p.dc ? p.dc : 1;
     double ratio = (double)p.dr / (double)p.sr;        /* resample -> dst rate */
     int out_frames = (int)(in_frames * ratio);
-    short *out = (short *)cvt->buf;
+    Uint8 *ob = cvt->buf;
     int o;
     for (o = 0; o < out_frames; o++) {
         double sp = o / ratio;
         int i0 = (int)sp, i1 = i0 + 1; if (i1 >= in_frames) i1 = in_frames - 1;
         double fr = sp - i0;
-        out[o] = (short)(g_cvt_mono[i0] * (1.0 - fr) + g_cvt_mono[i1] * fr);
+        int s16 = (int)(g_cvt_mono[i0] * (1.0 - fr) + g_cvt_mono[i1] * fr);
+        for (c = 0; c < dc; c++) {
+            int idx = o * dc + c;
+            if (dbps == 2) {                            /* S16 (assume signed little-endian) */
+                ob[idx * 2] = (Uint8)(s16 & 0xff); ob[idx * 2 + 1] = (Uint8)((s16 >> 8) & 0xff);
+            } else {                                    /* 8-bit: S16 -> high byte */
+                int v8 = s16 >> 8;
+                ob[idx] = d_signed ? (Uint8)(signed char)v8 : (Uint8)(v8 + 128);
+            }
+        }
     }
-    cvt->len_cvt = out_frames * 2;                     /* S16 mono */
+    cvt->len_cvt = out_frames * dc * dbps;
     return 0;
 }
 
