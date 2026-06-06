@@ -155,7 +155,7 @@ static void *test_reload_thread(void *arg) {
     for (char *p = strtok(list, ";"); p && !g_shutdown; p = strtok(NULL, ";")) {
         for (int i = 0; i < secs * 10 && !g_shutdown; i++) usleep(100000);
         char bin[PATH_MAX]; const char *r = resolve_input(p, bin, sizeof bin);
-        if (!r || classify_elf(r) != 0) { fprintf(stderr, "[test-reload] skip '%s'\n", p); continue; }
+        if (!r || classify_elf(r) < 0) { fprintf(stderr, "[test-reload] skip '%s'\n", p); continue; }
         fprintf(stderr, "[test-reload] -> %s\n", r);
         engine_request_reload(r);
     }

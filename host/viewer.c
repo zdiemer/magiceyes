@@ -27,6 +27,7 @@
 /* engine entry points (plain C signatures -- avoid including engine.h / unicorn here) */
 const char *resolve_input(const char *in, char *out, size_t cap);
 int  classify_elf(const char *path);
+int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* dynamic title -> rootfs? */
 void engine_request_reload(const char *host_path);
 #define ME_WINMENU 1
 #endif
@@ -247,9 +248,16 @@ static void start_game(const char *path) {
     if (!r) { MessageBoxA(NULL, "No .gpe found, or the folder/zip is ambiguous.\nSee the console for details.",
                           "magiceyes", MB_ICONERROR); return; }
     int c = classify_elf(r);
-    if (c == 1) { MessageBoxA(NULL, "That title is a dynamically-linked ELF (not a GPEComp self-extractor, "
-                             "which is decompressed automatically).\nThe native build runs GP2X static + "
-                             "GPEComp games; dynamic titles need the Wiz/qemu path.", "magiceyes", MB_ICONWARNING); return; }
+    if (c == 1) {   /* dynamically-linked title (Odonata, Wind & Water, RetroVirus): runnable as
+                       long as the device rootfs is present (load_elf loads the guest ld.so). */
+        char probe[MAX_PATH];
+        if (!me_rootfs_resolve("/lib/ld-linux.so.2", probe, sizeof probe)) {
+            MessageBoxA(NULL, "That title is dynamically linked and needs the device rootfs.\n"
+                              "Set ME_GP2X_ROOTFS to a dereferenced rootfs (host/win/stage_rootfs.sh),\n"
+                              "or place one at <exe>\\rootfs.", "magiceyes", MB_ICONWARNING);
+            return;
+        }
+    }
     if (c < 0) { MessageBoxA(NULL, "Not a usable GP2X ARM binary.\nSee the console for details.",
                             "magiceyes", MB_ICONERROR); return; }
     snprintf(g_last_game, sizeof g_last_game, "%s", path);
