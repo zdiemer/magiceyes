@@ -48,8 +48,10 @@ static volatile int g_view_volume = 100;    /* Audio->Volume / --volume (0..100)
 
 /* Queue PCM applying mute/volume. At 100% and unmuted, queue straight from the ring (fast
    path). Otherwise scale into a scratch buffer: S16 samples scale linearly; U8 around 128. */
+static FILE *g_adump = NULL;   /* ME_AUDIODUMP: raw capture of the exact stream queued to SDL */
 static void queue_scaled(SDL_AudioDeviceID dev, const uint8_t *src, uint32_t n) {
     int vol = g_view_mute ? 0 : g_view_volume;
+    if (g_adump) fwrite(src, 1, n, g_adump);
     if (vol >= 100) { SDL_QueueAudio(dev, src, n); return; }
     int s16 = ((shm->audio_format & 0xff) == 16);
     static uint8_t buf[16384];
@@ -73,6 +75,7 @@ static int audio_thread(void *arg) {
     (void)arg;
     SDL_AudioDeviceID adev = 0; int audio_open = 0;
     unsigned long long wd_played = 0; Uint32 wd_t = 0, stat_t = 0;
+    if (getenv("ME_AUDIODUMP")) g_adump = fopen(getenv("ME_AUDIODUMP"), "wb");
     while (!shm->quit) {
         if (!audio_open && shm->audio_active && shm->audio_freq) {
             SDL_AudioSpec want, have;
@@ -117,6 +120,7 @@ static int audio_thread(void *arg) {
                   uint32_t still = floor - q; still -= still % frame;
                   static uint8_t zeros[8192];
                   for (uint32_t z = still; z; ) { uint32_t c = z > sizeof(zeros) ? sizeof(zeros) : z;
+                      if (g_adump) fwrite(zeros, 1, c, g_adump);
                       SDL_QueueAudio(adev, zeros, c); z -= c; }
                   g_fed += still;
               }

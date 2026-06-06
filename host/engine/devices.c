@@ -438,10 +438,24 @@ double g_tcount_t0 = 0;            /* TCOUNT free-running-timer epoch */
 double host_now(void) {
     struct timeval tv; gettimeofday(&tv, NULL); return tv.tv_sec + tv.tv_usec * 1e-6;
 }
-/* advance the read cursor as if played in real time, so the ring drains and the
-   game keeps producing at the right rate even with no viewer attached. */
+/* Advance the read cursor as if played in real time, so the ring drains and the game keeps
+   producing at the right rate even with NO viewer attached. When a viewer IS attached it owns
+   a_read (it advances it as it feeds SDL); draining here too makes BOTH move a_read and they
+   fight -- if our wall-clock estimate races ahead of the viewer it jumps a_read past audio the
+   viewer hasn't read yet, so the viewer skips chunks -> clicks/dropouts ("radio static"). This
+   was masked while the viewer kept a deep (silence-padded) queue ahead of wall-clock. Detect an
+   attached viewer via its heartbeat and leave a_read entirely to it. */
+double g_last_hb_t = 0; uint32_t g_last_hb = 0;
+int viewer_attached(void) {
+    if (!g_shm) return 0;
+    uint32_t hb = g_shm->viewer_heartbeat;
+    double now = host_now();
+    if (hb != g_last_hb) { g_last_hb = hb; g_last_hb_t = now; }
+    return (g_last_hb_t != 0) && (now - g_last_hb_t < 0.5);   /* beat within 500ms = live viewer */
+}
 void aud_drain(void) {
     if (!g_shm) return;
+    if (viewer_attached()) { g_aud_on = 0; return; }   /* viewer owns a_read; rebase our clock */
     if (!g_aud_on) { g_aud_t0 = host_now(); g_aud_on = 1; }
     uint32_t bps = g_aud_freq * g_aud_ch * (g_aud_bits / 8);
     if (!bps) return;
