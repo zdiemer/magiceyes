@@ -640,10 +640,26 @@ st_ino-overflow fstat bug (fixed below), and IMG_Load needed BMP support (Liar's
 and the libSDL_image stub carries a DT_NEEDED on libpng12 so titles using IMG_Load without linking
 libpng pull it in.
 
-**Rhythmos** is much further too (the st_ino fix cleared its QType4 font wall: DGE_Display
-eglInitialize/eglMakeCurrent OK), but crashes on UNIMPLEMENTED syscall 141 (getdents) scanning its
-song directory. Next for Rhythmos: getdents/getdents64, then its AVI-video background
-(`rhythmos.bin`, decoded via libmedia/librec).
+**Rhythmos now RUNS** too (all three Caanoo titles run): the st_ino fix cleared its QType4 font
+wall, and adding **portable directory enumeration + getdents/getdents64** (`syscalls.c`: open(dir)
+-> a DIRFD backed by opendir()+entry snapshot; works on Linux + MinGW) let it scan `./package/`
+for songs. It completes DGE init (all EGL steps OK, Mix_OpenAudio), enumerates + parses every song
+chart, and runs its loop presenting frames. Remaining for Rhythmos gameplay: its AVI-video
+background (`rhythmos.bin`, decoded via libmedia/librec) — separate sub-project.
+
+**Input (per-device) + touchscreen — DONE.** The shim has a per-device joystick map
+(`fakesdl.c`): GP2X/Wiz keep the GP2X 19-button order; **Caanoo** maps the d-pad to analog AXES
+0/1 and the face buttons to the Caanoo native order (A,X,B,Y,L,R,START,HOLD,I,II,TAT). Selected by
+`MAGICEYES_DEVICE` — auto-detected for Caanoo GLES titles from their Pollux sonames
+(`elf.c`); set it explicitly for non-GLES Caanoo titles (Liar). **Touchscreen**: viewer mouse →
+`shm.touch_{x,y,down}` (guest pixels via `SDL_RenderSetLogicalSize`) → the shim emits SDL mouse
+motion/button events (how Caanoo games read the resistive panel). TODO (user-flagged): real
+per-device profiles + user-remappable bindings; tslib `ts_read` / raw `/dev/input/event` touch.
+
+**Perf note:** Propis ~14fps headless Linux (was ~11.5; the `SDL_UpperBlit` same-format fast-path
+helped). Pure CPU-emulation-bound (zero FPA-hook/SMC-fault overhead). Windows is ~3.5x slower than
+Linux — a Windows-build-specific gap to chase (MinGW Unicorn codegen / EcoQoS / viewer overhead);
+the fork is ours to optimize.
 
 Test harness: run headless via `bin/me_unicorn ./game.gpe` from the game dir with
 `ME_TRACE=1 FAKEGLES_LOG=1 FAKESDL_BLIT_LOG=1`. (F: is `/mnt/f` in WSL; build/run via

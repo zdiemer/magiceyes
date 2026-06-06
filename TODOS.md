@@ -359,12 +359,11 @@ GP2X-specific libs (`libmedia`, etc.) come from the F100/F200 firmware patch tar
     bool) covering button names + the viewer key/gamepad bindings, and **user-remappable**
     bindings (a config file / in-app remap UI). The shim map lives in `guest/src/fakesdl.c`
     (`joymap_caanoo`, `g_caanoo_btn`, `caanoo_axis`).
-  - **Touchscreen via the viewer** (TODO): Caanoo has a resistive touchscreen (tslib /
-    `libts-0.0.so.0`; titles also read `/dev/input/event`). Map native viewer mouse
-    clicks/drags to touch — feed x/y + pressed through shm (new fields), expose via a fake
-    libts (`ts_open`/`ts_read`/`ts_reload`) in the shim and/or `/dev/input/event` in the
-    device layer. Needed for touch-primary titles (e.g. Propis). For now `libts` is a
-    load-only real lib (ts returns no samples → no touch).
+  - **Touchscreen via the viewer** (DONE): viewer mouse → `shm.touch_{x,y,down}` (guest pixels,
+    via `SDL_RenderSetLogicalSize` mapping) → the fake-SDL shim emits SDL mouse motion/button
+    events + `SDL_GetMouseState`. Covers the three target titles (they read the touchscreen as
+    the SDL mouse; none poll tslib `ts_read`). Still TODO if a title reads touch via tslib
+    `ts_read` or raw `/dev/input/event` directly: back those with the same shm fields.
 
 ### Wiz raw arcade ports (Out Zone/Deicide arcade `.gpe`)
 Same root cause as GP2X — they bypass SDL and poke MMSP2 directly. The MMSP2 shim
