@@ -229,11 +229,26 @@ static void present(SDL_Surface *s) {
     g_shm->width = w; g_shm->height = h;
     g_shm->frame_seq++;
 }
+/* Continuous-scanout fallback. Real GP2X SDL gives the game a HARDWARE screen surface whose
+   memory the MMSP2 scans out continuously, so some titles (RetroVirus's intro logos) draw to
+   the screen and NEVER call SDL_Flip/SDL_UpdateRect -- on our shim they'd be invisible. We
+   present the screen from the game's poll/delay loop, but ONLY when it hasn't flipped recently,
+   so flip-driven titles (Wind & Water) are untouched (they refresh g_last_flip_ms every flip). */
+static unsigned long g_last_flip_ms = 0, g_last_scan_ms = 0;
+static void scanout_maybe(void) {
+    if (!g_screen) return;
+    unsigned long t = now_ms();
+    if (t - g_last_flip_ms < 200) return;   /* the game is actively flipping: leave it alone */
+    if (t - g_last_scan_ms < 16) return;    /* else emulate ~60Hz scanout */
+    g_last_scan_ms = t;
+    present(g_screen);
+}
 /* GP2X SDL_Flip blocks for vsync (~60Hz); ours is instant, so games run at
    thousands of fps and their per-frame timing (incl. music/sfx pacing) breaks.
    Emulate vsync by capping flip rate (FAKESDL_FPS, default 60). */
 int SDL_Flip(SDL_Surface *s) {
     present(s ? s : g_screen);
+    g_last_flip_ms = now_ms();   /* explicit flip: suppress the scanout fallback */
     pump_audio();
     static unsigned long last = 0;
     static long frame_ms = -1;
@@ -255,9 +270,9 @@ int SDL_Flip(SDL_Surface *s) {
     return 0;
 }
 void SDL_UpdateRect(SDL_Surface *s, Sint32 x, Sint32 y, Uint32 w, Uint32 h) {
-    (void)x;(void)y;(void)w;(void)h; present(s ? s : g_screen);
+    (void)x;(void)y;(void)w;(void)h; present(s ? s : g_screen); g_last_flip_ms = now_ms();
 }
-void SDL_UpdateRects(SDL_Surface *s, int n, SDL_Rect *r){ (void)n;(void)r; present(s);}
+void SDL_UpdateRects(SDL_Surface *s, int n, SDL_Rect *r){ (void)n;(void)r; present(s); g_last_flip_ms = now_ms();}
 
 SDL_Surface *SDL_CreateRGBSurface(Uint32 flags, int w, int h, int depth,
                                   Uint32 R, Uint32 G, Uint32 B, Uint32 A) {
@@ -466,9 +481,9 @@ static void pump(void) {
     }
     g_prev_buttons = b;
 }
-void SDL_PumpEvents(void) { pump(); }
+void SDL_PumpEvents(void) { pump(); scanout_maybe(); }
 int SDL_PollEvent(SDL_Event *event) {
-    pump();
+    pump(); scanout_maybe();
     if (g_evq_head == g_evq_tail) return 0;
     if (event) *event = g_evq[g_evq_head];
     g_evq_head = (g_evq_head + 1) % EVQ_SIZE;
@@ -509,9 +524,10 @@ Uint8 SDL_GetRelativeMouseState(int *x, int *y) { if (x) *x = 0; if (y) *y = 0; 
 void SDL_WarpMouse(Uint16 x, Uint16 y) { (void)x; (void)y; }
 
 /* ------------------------------------------------------------------- time */
-Uint32 SDL_GetTicks(void) { return (Uint32)(now_ms() - g_start_ms); }
+Uint32 SDL_GetTicks(void) { scanout_maybe(); return (Uint32)(now_ms() - g_start_ms); }
 void SDL_Delay(Uint32 ms) {
     pump_audio();
+    scanout_maybe();   /* present scanout-mode titles (no SDL_Flip) from their delay loop */
     struct timespec ts; ts.tv_sec = ms / 1000; ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
 }
