@@ -14,6 +14,18 @@ and what to do next. Read `README.md` (user-facing) and `TODOS.md` (roadmap) too
   and **Cave Story / NXEngine** both render with correct **video, audio, input, and
   timing**. Backend = qemu-user + our **fake-SDL shim** (`guest/`) + native SDL2
   **viewer** (`host/viewer.c`).
+- **More Wiz titles on the native Windows engine** (`bin/magiceyes.exe`, dyn-loader path;
+  2026-06, see the memory `wiz-titles-revival`): **Her Knights** (added the GPH-fork Wiz SDL
+  extensions to the shim: `SDL_SetLcdMode`/`SDL_SYS_Joystick*`/`SDL_TvConfig`), **Deicide 3**
+  (`stage_rootfs.sh` shadows the firmware libinkadrm/libdrmcode with our DRM gate stubs), and
+  **Patissier** (`rg_ura`, a CodeSourcery **EABI** title — interp `/lib/ld-linux.so.3`) all boot
+  to render+audio. EABI needed a SECOND rootfs (`host/win/stage_rootfs_eabi.sh` → `assets/rootfs-eabi`,
+  Debian Wheezy armel + an EABI-cross-built shim) selected per-title by PT_INTERP, plus engine
+  fixes: EABI `struct stat64` (104B, st_size@48 — `g_eabi` from the SVC ABI), futex WAIT_BITSET
+  for glibc's NPTL-init probe, uname 2.6.32. Deicide/Cave Story audio clean.
+  **OPEN: Her Knights BGM is radio static** — its 8-bit (U8 22050) custom sound bank is corrupt
+  *before* our SDL conversion layer (inside HK's/firmware libSDL_mixer's 8-bit pipeline); the
+  SDL_ConvertAudio/MixAudio format fixes (commit 4f22714) help but don't fully resolve it.
 - **GP2X, playable end-to-end @ 30fps** (qemu backend): **Payback** (commercial, static)
   boots → menus → **gameplay** with **video @ a solid 30fps (the hardware-correct rate,
   correct game speed), audio, input, native threads, and no crash**, via the **forked
