@@ -9,13 +9,18 @@ emulator setup, no virtual machine, no firmware flashing.
 The name comes from the **MagicEyes** SoCs inside those handhelds (MMSP2 in the GP2X,
 Pollux in the Wiz/Caanoo).
 
-<!-- Screenshots: add captures to docs/img/ and they'll render here -->
-<!--
-<p align="center">
-  <img src="docs/img/payback.png"  width="45%" alt="Payback">
-  <img src="docs/img/knightlore.png" width="45%" alt="Knight Lore">
-</p>
--->
+<table>
+  <tr>
+    <td align="center"><img src="docs/img/payback.png" width="250" alt="Payback"><br><sub><b>Payback</b> — GP2X (commercial)</sub></td>
+    <td align="center"><img src="docs/img/vektar.png" width="250" alt="Vektar"><br><sub><b>Vektar</b> — GP2X</sub></td>
+    <td align="center"><img src="docs/img/herknights.png" width="250" alt="Her Knights"><br><sub><b>Her Knights</b> — Wiz (commercial)</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/img/quartz2.png" width="250" alt="Quartz 2"><br><sub><b>Quartz 2</b> — GP2X</sub></td>
+    <td align="center"><img src="docs/img/blazar.png" width="250" alt="Blazar"><br><sub><b>Blazar</b> — GP2X</sub></td>
+    <td align="center"><img src="docs/img/payback-action.png" width="250" alt="Payback"><br><sub><b>Payback</b> — GP2X (commercial)</sub></td>
+  </tr>
+</table>
 
 ## Download & run (Windows)
 

@@ -1,8 +1,8 @@
 # Screenshots
 
-Drop game screenshots here (PNG). The main `README.md` references them, e.g.
-`docs/img/payback.png`, `docs/img/knightlore.png`.
+Game screenshots referenced by the main `README.md` live here (`payback.png`, `vektar.png`,
+`herknights.png`, `quartz2.png`, `blazar.png`, `payback-action.png`).
 
-Capture them in-app by pressing **F12** while a game runs — magiceyes writes
+Capture more in-app by pressing **F12** while a game runs — magiceyes writes
 `screenshots/magiceyes_<N>.png` next to the executable. Copy the ones you want into this
-folder and uncomment the screenshot block near the top of `README.md`.
+folder and reference them from the screenshot grid near the top of `README.md`.
