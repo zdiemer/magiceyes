@@ -775,6 +775,23 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 120: { /* clone(flags, child_stack, ptid, tls, ctid) -> a native host thread */
         if (g_exit) return -11 /*EAGAIN*/;   /* teardown in progress: don't spawn new workers */
+        /* clone WITHOUT CLONE_VM is fork(), not a thread: glibc fork() issues
+           clone(SIGCHLD|CHILD_SETTID|CHILD_CLEARTID, child_stack=0). Spawning a memory-sharing
+           host thread for it gives the child sp=0 (no stack) -> instant null-deref (Liar hit this
+           in init). We run a SINGLE process, so fork() picks one branch: like the OABI fork(2)
+           case 2 default, take the PARENT branch (return the child pid) so the game continues --
+           the only forks seen are glibc system()/posix_spawn whose child just execs /bin/sh
+           (a no-op here); waitpid (case 7/114) reaps it. ME_GP2X_CLONEFORK_CHILD forces the CHILD
+           branch (return 0) for a launcher-style title whose child is the real game (honours
+           CLONE_CHILD_SETTID so glibc's __libc_fork "self->tid != ppid" assert passes). */
+        if (!(a0 & ME_CLONE_VM)) {
+            int as_child = getenv("ME_GP2X_CLONEFORK_CHILD") != NULL;
+            if (g_trace) fprintf(stderr, "  [clone=fork] flags=%08x stack=%08x -> %s\n",
+                                 a0, a1, as_child ? "child (0)" : "parent (pid)");
+            if (!as_child) return (long)g_child_pid;
+            if ((a0 & ME_CLONE_CHILD_SETTID) && a4) { uint32_t t = g_child_pid; uc_mem_write(g_uc, a4, &t, 4); }
+            return 0;
+        }
         int slot = thread_alloc();
         if (slot < 0) return -11 /*EAGAIN*/;
         struct thread *c = &g_th[slot];

@@ -604,10 +604,30 @@ at QType4 `tt_font_init` → `"TTF Font File Open Failed"` then orderly teardown
 This is **NOT** our GPU/rootfs: the font open SUCCEEDS (fd 3 → fstat64 → close) for the genuine
 firmware font (and for a small DejaVu substitute) — QType4 still fails, so it's a QType4-internal
 check (likely a Korean cmap/table or companion resource). **Next: disassemble propis.gpe
-`tt_font_init` (xref the "TTF Font File Open Failed" string, arm objdump) to find what it really
-needs.** Rhythmos uses the same DGE/QType4 (expect the same wall + AVI video after). Liar (fbdev)
-needs the Pollux `/dev/fb0` present path (not yet wired). Test harness: run headless via
-`bin/me_unicorn ./game.gpe` from the game dir with `ME_TRACE=1 FAKEGLES_LOG=1 FAKESDL_BLIT_LOG=1`.
+`tt_font_init`** — note the Caanoo CodeSourcery binaries are likely **Thumb** with no mapping
+symbols, so `objdump -d` (ARM) misreads them and the "TTF Font File Open Failed" string xref
+isn't a `.word`/`movw`/`movt` literal; disassemble as Thumb. Rhythmos uses the same DGE/QType4
+(expect the same wall + AVI video after).
+
+**Liar — two binaries.** `Liar_kr.gpe` is a *launcher* (`system()` + `execlp("…/gp2xmenu")`): it
+chain-loads the real game via a shell command (a no-op here), then falls back to gp2xmenu, so it
+just quits. The real game is **`Liarno_kr.gpe`** — run it directly. Both are SDL (`libSDL`/
+`SDL_image`/`SDL_mixer`) + Inka DRM, NOT fbdev (earlier assumption wrong). Two engine fixes landed
+getting here, both general/correct: (1) the **Inka NED file API** in `drmstub.c`
+(`NED_fopen`/`fread`/`fseek`/`ftell`/`fclose` → stdio passthrough since assets are plaintext;
+`ND_Initialize`/`ND_Terminate`) — Liar reads its assets through these. (2) **clone-without-CLONE_VM
+is fork(), not a thread** (`syscalls.c` case 120): glibc fork() = `clone(SIGCHLD|CHILD_SETTID|
+CHILD_CLEARTID, stack=0)`; spawning a memory-sharing host thread gave the child sp=0 → instant
+null-deref. Now it takes the parent branch like fork(2) (child = system()/sh no-op);
+`ME_GP2X_CLONEFORK_CHILD` forces the child branch (honours CHILD_SETTID for glibc's
+`self->tid != ppid` assert). **OPEN: `Liarno_kr.gpe` crashes very early** — a tight memcpy/memset
+loop (one PC in libc) walking unmapped pages (src ~0x5f4d5000++, dst just above sp ~0x1b9fb000++),
+i.e. a huge copy from a garbage pointer, before any asset open. Next: identify the bad
+length/pointer source (candidate: an NED_*/read returning an unexpected value, or a missing mmap).
+
+Test harness: run headless via `bin/me_unicorn ./game.gpe` from the game dir with
+`ME_TRACE=1 FAKEGLES_LOG=1 FAKESDL_BLIT_LOG=1`. (F: is `/mnt/f` in WSL; build/run via
+`wsl.exe -e bash <scriptfile>` — inline `-lc` with pipes/`$()`/quotes gets mangled.)
 
 ## Conventions
 
