@@ -484,6 +484,53 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
   down. Also added benign syscalls: `chdir(12)`, `getcwd(183)`, `sync(36)`/`fsync`/`fdatasync`/
   `nice`/`sync_file_range` (no-op) — with `getcwd`/`chdir` real, Blazar/Quartz/Vektar now run
   with **zero UNIMPLEMENTED syscalls and zero crashes**.
+- **More static GP2X titles rendering on the native engine (2026-06).** Blazar, Quartz2, Vektar
+  and Knight Lore each needed engine support the qemu backend already had in `host/common/
+  gp2x_device.c` but that wasn't yet in `host/engine/`. All ported into the engine's existing
+  Unicorn-hook model (NOT the qemu mprotect-trap) — added to `devices.c`/`mem.c`/`syscalls.c`:
+  - **/dev/fb0,fb1 ioctls (`fb_ioctl`):** `FBIOGET_VSCREENINFO`(0x4600)/`FSCREENINFO`(0x4602)
+    report a 320×240 RGB565 fbdev (yres_virtual 480), accept `PUT`/`PAN_DISPLAY`/`BLANK`. *This
+    was the Blazar/Quartz2 black screen:* they query the fb geometry first, got a zeroed struct,
+    and `execve("gp2xmenu")` (quit). The fb mmap now records a synthetic phys (`0x04000000`/
+    `0x04040000`, also the `smem_start`) so an OADR/pan flip to it resolves; `FBIOPAN_DISPLAY`
+    reuses the OADR flip-lock path (`g_flip_guest = fb + yoffset*640`).
+  - **`_newselect`(142):** GP2X games use `select(0,NULL,NULL,NULL,&tv)` as a portable sleep
+    (Knight Lore's worker spun on it 3M×/6s = the "spams syscall 142, never loads"). Now a timed,
+    lock-free sleep (writefds→ready, readfds→cleared). Plus `fcntl`(55)/`fcntl64`(221)/
+    `sched_setscheduler`(156) stubs.
+  - **MESG 2D blitter (`gp2x_blitter_write`/`blit_exec`, 0xe0020000):** `UC_HOOK_MEM_WRITE` on
+    the window shadows the regs + runs the blit on the `MESGSTATUS=BUSY` trigger (solid fill +
+    video→video copy w/ colour-key, 8/16bpp). **Gotcha:** can't clear BUSY from the write hook
+    (Unicorn fires it *before* the CPU store, which writes BUSY back) → the game's
+    `while(STATUS&BUSY)` poll spins forever; instead a `UC_HOOK_MEM_READ` (`blitter_read_cb`)
+    serves `STATUS=0` (blits are synchronous). This was Vektar's black screen. `ME_GP2X_NOBLIT`
+    opts out; `ME_GP2X_BLITLOG` logs.
+  - **MLC 8-bit palette + indexed present:** `mmsp2_write_cb` captures `PALLT_A`(0x2958)/
+    `PALLT_D`(0x295a) writes (`gp2x_mmio_palette`) → 256-entry RGB888. `present_guest` infers
+    depth from `g_pal_have` (only 8-bit modes ever touch the PALLT port): present 8-bit indexed
+    (320 B/row, LUT→565) vs native RGB565 (640 B/row). For Odonata/Knight-Lore-class 8bpp.
+  - **/dev/GPIO (`gpio_read`) + /dev/i2c-0 serial (`i2c_ioctl`/`i2c_read`):** paeryn SDL reads
+    an active-high 32-bit button word from /dev/GPIO (PEPC_VK_* layout, mapped from `gp2xshm.h`);
+    Vektar reads the handset serial via `I2C_RDWR`(0x707) in a retry loop that only exits once
+    bytes come back (a success-but-empty stub made it spin forever — supply a fixed serial).
+  - **Result:** Blazar, Quartz2, Vektar render with input/audio on native Windows + Linux.
+    **Knight Lore** (a *static* paeryn-SDL 8bpp 4-thread title) now loads far past the 142 spam
+    — SDL init, 320×240×8bpp video mode, HW-surface manager, 4 LinuxThreads workers — but does
+    not yet render a frame (main loop busy-waits on `gettimeofday`/`select`/`/dev/GPIO` and never
+    flips OADR or sets the palette): needs further paeryn-SDL-on-engine investigation.
+- **Hot-reload (File→Open) crash — partially resolved.** A single reload (open game A, then open
+  game B) now works for every tested static title (the original report was tied to Blazar/Quartz2
+  *exiting* to gp2xmenu, now fixed). **Remaining (Windows-only):** reloading TWICE to *different*
+  games after a memory-heavy FIRST game (Vektar = 2 fb + blitter, or Knight Lore = 5MB /dev/mem +
+  4 threads) hard-crashes the process (access violation, **unguarded** — armed=0, pc in a DLL,
+  wild heap addr ⇒ heap corruption surfacing later). NOT caused by the new device code (repro
+  with `ME_GP2X_NOBLIT`); deterministic by game/order (Blazar-first OK, Vektar/KL-first CRASH on
+  the 2nd reload); **clean under Linux+ASan** ⇒ a fork-internal / Windows-mem teardown issue, not
+  shared-engine logic. The `_newselect` fix exposed it (KL now loads heavy enough to trigger it).
+  Diagnostics added: `ME_FAULTLOG` (guard.c logs every host fault, armed or not),
+  `ME_TEST_RELOAD="a;b"`+`ME_TEST_RELOAD_SECS` (main.c headless reload-chain harness for
+  ASan/valgrind). Next: Windows pageheap/AppVerifier or fork-source debugging of uc_close/region
+  teardown with large mapped-ptr regions.
 
 ## Conventions
 

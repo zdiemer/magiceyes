@@ -46,6 +46,12 @@ static int is_fault_code(DWORD c) {
 
 static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     DWORD c = ep->ExceptionRecord->ExceptionCode;
+    if (getenv("ME_FAULTLOG") && is_fault_code(c)) {   /* diag: log every host fault, armed or not */
+        uintptr_t fa = ep->ExceptionRecord->NumberParameters >= 2
+                     ? (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1] : 0;
+        fprintf(stderr, "FAULT code=%08lx pc=%p addr=%p armed=%d\n",
+                (unsigned long)c, ep->ExceptionRecord->ExceptionAddress, (void *)fa, g_armed);
+    }
     if (!g_armed || !is_fault_code(c))
         return EXCEPTION_CONTINUE_SEARCH;   /* not ours (incl. STACK_OVERFLOW): crash as before */
     g_armed = 0;

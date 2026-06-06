@@ -82,15 +82,17 @@ uint32_t load_elf(const char *path);
 uint32_t setup_stack(int argc, char **argv);
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
-enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_OTHER };
+enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_OTHER };
 #define DEVFD_BASE 0x10000000   /* far above real host fds (avoid aliasing) */
 struct memmap { uint32_t phys, guest, len; };
 
 extern gp2x_shm_t *g_shm;
 extern int g_devtype[64], g_devn;
+extern int g_fbnum[64];   /* per-slot fb index for DEV_FB fds */
 extern struct memmap g_mem[64];
 extern int g_nmem;
 extern uint32_t g_mmsp2_guest, g_fb_guest, g_fb_guest2;
+extern uint32_t g_blit_guest;   /* guest base of the 0xe0020000 blitter window */
 extern int g_oadr_driven;   /* game drives present via OADR writes -> async present off */
 extern int g_frame_ready;   /* OADR write -> helper thread presents this frame (off-render-thread) */
 extern uint32_t g_aud_freq, g_aud_ch, g_aud_bits;
@@ -115,6 +117,16 @@ uint32_t aud_free(void);
 long dsp_write(uint32_t gbuf, uint32_t n);
 uint32_t dsp_pace_us(void);
 long dsp_ioctl(uint32_t cmd, uint32_t arg);
+long fb_ioctl(int fd, uint32_t cmd, uint32_t arg);   /* FBIOGET_*SCREENINFO / PAN_DISPLAY */
+long gpio_read(uint32_t gbuf, uint32_t n);           /* /dev/GPIO joystick button word */
+long i2c_read(uint32_t gbuf, uint32_t n);            /* /dev/i2c-0 handset serial (read) */
+long i2c_ioctl(uint32_t cmd, uint32_t arg);          /* /dev/i2c-0 I2C_RDWR serial */
+void gp2x_mmio_palette(uint32_t off, uint32_t val);  /* MLC palette port capture (MMSP2 page) */
+void gp2x_blitter_write(uint32_t off, uint32_t val, int size);   /* MESG 2D blitter (0xe0020000) */
+void blitter_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
+                      int size, int64_t value, void *user);
+void blitter_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
+                     int size, int64_t value, void *user);
 void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                     int size, int64_t value, void *user);
 void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,

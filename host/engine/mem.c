@@ -133,8 +133,10 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
     fprintf(stderr, "  DEV mmap type=%d phys=%08x -> guest=%08x len=%08x\n",
             type, phys, at, len);
     if (type == DEV_FB) {                                 /* track up to 2 fb buffers */
-        if (!g_fb_guest) g_fb_guest = at;
-        else if (!g_fb_guest2 && at != g_fb_guest) g_fb_guest2 = at;
+        /* Advertise/record a synthetic phys per fb (matches FBIOGET_FSCREENINFO.smem_start)
+           so an MLC OADR flip — or a blitter dst — that targets that phys resolves back here. */
+        if (!g_fb_guest)       { g_fb_guest  = at; record_memmap(0x04000000u, at, len); }
+        else if (!g_fb_guest2 && at != g_fb_guest) { g_fb_guest2 = at; record_memmap(0x04040000u, at, len); }
         if (getenv("ME_FBWATCH")) {   /* TEMP: count guest writes into this fb (execution vs aliasing) */
             extern void fbwatch_cb(uc_engine*, uc_mem_type, uint64_t, int, int64_t, void*);
             static uc_hook fbh; uc_hook_add(g_uc, &fbh, UC_HOOK_MEM_WRITE, fbwatch_cb, NULL,
@@ -149,6 +151,15 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
             uc_hook_add(g_uc, &hh, UC_HOOK_MEM_WRITE, mmsp2_write_cb, NULL,
                         at, at + len - 1);
             uc_hook_add(g_uc, &hr, UC_HOOK_MEM_READ, mmsp2_read_cb, NULL,
+                        at, at + len - 1);
+        }
+        if (phys == 0xE0020000u && !getenv("ME_GP2X_NOBLIT")) {   /* MMSP2 2D blitter window: trap
+                                        writes -> run blits; reads -> serve STATUS=idle (synchronous) */
+            g_blit_guest = at;
+            static uc_hook bh, br;
+            uc_hook_add(g_uc, &bh, UC_HOOK_MEM_WRITE, blitter_write_cb, NULL,
+                        at, at + len - 1);
+            uc_hook_add(g_uc, &br, UC_HOOK_MEM_READ, blitter_read_cb, NULL,
                         at, at + len - 1);
         }
     }

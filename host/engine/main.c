@@ -144,6 +144,24 @@ static void *helper_thread(void *arg) {
     return NULL;
 }
 
+/* TEMP diagnostic harness (ME_TEST_RELOAD): drive engine_request_reload through a ;-list of
+   game paths to reproduce the hot-reload chain headlessly (under ASan/valgrind). */
+static void *test_reload_thread(void *arg) {
+    (void)arg;
+    char *list = strdup(getenv("ME_TEST_RELOAD"));
+    int secs = getenv("ME_TEST_RELOAD_SECS") ? atoi(getenv("ME_TEST_RELOAD_SECS")) : 6;
+    if (secs < 1) secs = 1;
+    for (char *p = strtok(list, ";"); p && !g_shutdown; p = strtok(NULL, ";")) {
+        for (int i = 0; i < secs * 10 && !g_shutdown; i++) usleep(100000);
+        char bin[PATH_MAX]; const char *r = resolve_input(p, bin, sizeof bin);
+        if (!r || classify_elf(r) != 0) { fprintf(stderr, "[test-reload] skip '%s'\n", p); continue; }
+        fprintf(stderr, "[test-reload] -> %s\n", r);
+        engine_request_reload(r);
+    }
+    free(list);
+    return NULL;
+}
+
 #ifndef ME_VERSION
 #define ME_VERSION "0.2.0-dev"   /* release builds inject the tag via -DME_VERSION (build_bundle_win.sh) */
 #endif
@@ -310,6 +328,11 @@ int main(int argc, char **argv) {
 
     /* helper + viewer threads are created ONCE and outlive every reload / idle period */
     pthread_t helper; pthread_create(&helper, NULL, helper_thread, NULL);
+    /* TEMP diagnostic: ME_TEST_RELOAD="pathA;pathB" auto-hot-reloads through the list (every
+       ME_TEST_RELOAD_SECS, default 6) — reproduces the File->Open reload chain headlessly so it
+       can run under ASan/valgrind. Reuses the exact reload path the viewer's File->Open uses. */
+    pthread_t treload; int test_reload = getenv("ME_TEST_RELOAD") != NULL;
+    if (test_reload) pthread_create(&treload, NULL, test_reload_thread, NULL);
 #ifdef ME_BUNDLED
     pthread_t vth; pthread_create(&vth, NULL, viewer_thread, NULL);
 #endif

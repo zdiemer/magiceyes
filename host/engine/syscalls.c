@@ -206,7 +206,7 @@ static int sysfile_open(const char *p) {
 
 long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
-    (void)a4; (void)a5;
+    (void)a5;
     if (g_trace)
         fprintf(stderr, "  [t%d] sc %u (%08x,%08x,%08x,%08x)\n",
                 g_self ? g_self->tid : -1, nr, a0, a1, a2, a3);
@@ -267,6 +267,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (mf) { uint32_t n = mf->len - mf->pos; if (n > a2) n = a2;
                   if (n) uc_mem_write(g_uc, a1, mf->data + mf->pos, n);
                   mf->pos += n; return n; }
+        if (dev_type((int)a0) == DEV_I2C)  return i2c_read(a1, a2);  /* handset serial */
+        if (dev_type((int)a0) == DEV_GPIO) return gpio_read(a1, a2); /* joystick buttons */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         long r = read((int)a0, tmp, a2);
         if (r > 0) uc_mem_write(g_uc, a1, tmp, r);
@@ -427,6 +429,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 148:  return 0;        /* fdatasync */
     case 34:   return 0;        /* nice */
     case 314:  return 0;        /* sync_file_range */
+    case 55:                    /* fcntl  (F_GETFL/F_SETFL/F_SETFD on device/normal fds) */
+    case 221:  return 0;        /* fcntl64 — accept (we don't honour O_NONBLOCK; harmless here) */
+    case 156:  return 0;        /* sched_setscheduler (GP2X games bump their audio thread's prio) */
     case 12: {  /* chdir(path) -- some games cd before opening assets (Blazar) */
         char p[1024]; read_cstr(a0, p, sizeof p);
         char rp[PATH_MAX]; rewrite_guest_path(p, rp, sizeof rp);
@@ -450,6 +455,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 54:   /* ioctl */ {
         int t = dev_type((int)a0);
         if (t == DEV_DSP) return dsp_ioctl(a1, a2);
+        if (t == DEV_FB)  return fb_ioctl((int)a0, a1, a2);
+        if (t == DEV_I2C) return i2c_ioctl(a1, a2);
         return 0;
     }
     case 0xf0005: { /* __ARM_NR_set_tls -> kuser TLS slot */
@@ -554,6 +561,30 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                               t->has_sigsave = 0; }
         if (t->susp_active) { t->sig_blocked = t->susp_oldmask; t->susp_active = 0; }
         g_setpc = 1;   /* PC/regs restored; don't let intr_cb clobber R0 */
+        return 0;
+    }
+    case 142: { /* _newselect(n, readfds, writefds, exceptfds, timeout). GP2X games use
+                   select(0,NULL,NULL,NULL,&tv) as a portable sub-second sleep (Knight Lore's
+                   audio/timing worker spins on it). Report any requested writefds as ready
+                   (devices/files are always writable), clear readfds/exceptfds (no input
+                   pending), and otherwise sleep the timeout — lock-free — so the caller paces
+                   to real time instead of busy-spinning. */
+        uint32_t nfds = a0, rd = a1, wr = a2, ex = a3, tmo = a4;
+        int words = (int)((nfds + 31) / 32); if (words > 32) words = 32; if (words < 0) words = 0;
+        int ready = 0;
+        if (wr) for (int i = 0; i < words; i++) {
+            uint32_t w = 0; uc_mem_read(g_uc, wr + i * 4, &w, 4);
+            ready += __builtin_popcount(w);
+        }
+        if (rd) { uint32_t z = 0; for (int i = 0; i < words; i++) uc_mem_write(g_uc, rd + i * 4, &z, 4); }
+        if (ex) { uint32_t z = 0; for (int i = 0; i < words; i++) uc_mem_write(g_uc, ex + i * 4, &z, 4); }
+        if (ready) return ready;
+        double dur = 0.02;                 /* no timeout (parked thread): park ~20ms, then re-select */
+        if (tmo) { uint32_t tv[2] = {0, 0}; uc_mem_read(g_uc, tmo, tv, 8);
+                   dur = (double)tv[0] + (double)tv[1] * 1e-6; }
+        if (dur > 0.1) dur = 0.1;
+        if (dur <= 0) dur = 0.001;          /* zero-timeout poll: a 1ms yield avoids pinning a core */
+        BIGLOCK_UNLOCK(); me_usleep((unsigned)(dur * 1e6)); BIGLOCK_LOCK();
         return 0;
     }
     case 168: { /* poll(fds, nfds, timeout): pipe check, else a real (lock-free) sleep */

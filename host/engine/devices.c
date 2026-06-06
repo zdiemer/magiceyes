@@ -3,18 +3,21 @@
 #include "engine.h"
 
 int g_devtype[64], g_devn = 0;
+int g_fbnum[64];   /* per-slot framebuffer index (0=/dev/fb0, 1=/dev/fb1) for DEV_FB fds */
 int dev_open(const char *path) {
-    int t;
-    if (!strncmp(path, "/dev/fb", 7))         t = DEV_FB;
+    int t, fbno = 0;
+    if (!strncmp(path, "/dev/fb", 7))       { t = DEV_FB; fbno = (path[7] == '1') ? 1 : 0; }
     else if (!strcmp(path, "/dev/mem"))       t = DEV_MEM;
-    else if (!strcmp(path, "/dev/gpio"))      t = DEV_GPIO;
+    else if (!strcmp(path, "/dev/gpio") ||
+             !strcmp(path, "/dev/GPIO"))      t = DEV_GPIO;   /* paeryn SDL opens "/dev/GPIO" */
     else if (!strncmp(path, "/dev/dsp", 8))   t = DEV_DSP;
     else if (!strncmp(path, "/dev/mixer", 10))t = DEV_MIXER;
     else if (!strncmp(path, "/dev/tty", 8))   t = DEV_TTY;
+    else if (!strcmp(path, "/dev/i2c-0"))     t = DEV_I2C;   /* handset serial (DRM/region check) */
     else return -1;
     int i; for (i = 0; i < 64; i++) if (g_devtype[i] == 0) break;  /* reuse freed slots */
     if (i == 64) return -1;
-    g_devtype[i] = t; if (i + 1 > g_devn) g_devn = i + 1;
+    g_devtype[i] = t; g_fbnum[i] = fbno; if (i + 1 > g_devn) g_devn = i + 1;
     if (g_trace) fprintf(stderr, "  DEV open %s -> fd=%d type=%d\n", path, DEVFD_BASE + i, t);
     return DEVFD_BASE + i;
 }
@@ -64,15 +67,37 @@ int phys_to_guest(uint32_t phys, uint32_t *out) {
     return 0;
 }
 
-/* GP2X native screen = 320x240 RGB565. Present framebuffer at `phys` to shm. */
+/* MLC 8-bit palette (defined in the palette section below; used by present_guest). */
+extern uint8_t g_pal[256][3];
+extern int g_pal_have;
+
+/* GP2X native screen = 320x240. Present the framebuffer at guest addr `g` to shm.
+   Depth is inferred from g_pal_have: an 8-bit MLC framebuffer (Odonata, paeryn-SDL
+   titles like Knight Lore) uploads a palette via the write-only PALLT port — which only
+   8-bit modes ever touch — so a captured palette means the live surface is 8-bit indexed
+   (320 B/row, LUT'd to RGB565). No palette => native RGB565 (640 B/row). See gp2x_mmio_palette. */
 void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
-    uint8_t row[320 * 2]; int nz = 0;
-    for (int y = 0; y < 240; y++) {
-        { uint8_t *src = guest_to_host(g + (uint32_t)y * 640); if (!src) break;
-          memcpy(row, src, sizeof row); }
-        memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, sizeof row);
-        if (!nz) for (int i = 0; i < 640; i++) if (row[i]) { nz = 1; break; }
+    int nz = 0;
+    if (g_pal_have) {                       /* 8-bit indexed -> RGB565 via the captured palette */
+        uint16_t lut[256];
+        for (int i = 0; i < 256; i++)
+            lut[i] = (uint16_t)(((g_pal[i][0] >> 3) << 11) |
+                                ((g_pal[i][1] >> 2) << 5)  | (g_pal[i][2] >> 3));
+        uint16_t *dst = (uint16_t *)g_shm->pixels;
+        for (int y = 0; y < 240; y++) {
+            uint8_t *src = guest_to_host(g + (uint32_t)y * 320); if (!src) break;
+            uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
+            for (int x = 0; x < 320; x++) { dp[x] = lut[src[x]]; if (src[x]) nz = 1; }
+        }
+    } else {                                /* native RGB565 */
+        uint8_t row[320 * 2];
+        for (int y = 0; y < 240; y++) {
+            { uint8_t *src = guest_to_host(g + (uint32_t)y * 640); if (!src) break;
+              memcpy(row, src, sizeof row); }
+            memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, sizeof row);
+            if (!nz) for (int i = 0; i < 640; i++) if (row[i]) { nz = 1; break; }
+        }
     }
     g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
     if (getenv("ME_GP2X_PRESENTLOG")) {   /* diagnose black-screen: black frames vs viewer issue */
@@ -152,6 +177,256 @@ void gp2x_cacheflush(uint32_t guest) {
     g_oadr_driven = 1;                /* stop the async fallback present; we drive it per frame */
     g_flip_active = 1; g_flip_guest = guest;
     g_frame_ready = 1;
+}
+
+/* ---- /dev/fb0,fb1 (Linux fbdev) -------------------------------------------
+   Framebuffer-direct GP2X games (Blazar, Quartz2, minlib titles) query the fb
+   geometry via FBIOGET_VSCREENINFO/FSCREENINFO before mmap'ing it; if the engine
+   returns a zeroed struct they decide the framebuffer is unusable and bail back to
+   `gp2xmenu` (execve) without ever drawing. We advertise a 320x240 RGB565 fbdev,
+   with a yres_virtual of 480 so a game can double-buffer via FBIOPAN_DISPLAY. Each
+   fb mmap is given a synthetic phys (FB0_PHYS/FB1_PHYS, also reported as smem_start)
+   and recorded so an MLC OADR flip to that phys resolves back to the surface. */
+#define FB0_PHYS 0x04000000u
+#define FB1_PHYS 0x04040000u
+#define FB_LEN_  (320 * 240 * 2)
+static void fill_vscreeninfo(uint32_t gbuf) {
+    uint8_t b[160]; memset(b, 0, sizeof b);
+    *(uint32_t *)(b + 0)  = 320; *(uint32_t *)(b + 4)  = 240;   /* xres / yres */
+    *(uint32_t *)(b + 8)  = 320; *(uint32_t *)(b + 12) = 480;   /* xres_v / yres_v (2 pages) */
+    *(uint32_t *)(b + 24) = 16;                                 /* bits_per_pixel */
+    *(uint32_t *)(b + 32) = 11; *(uint32_t *)(b + 36) = 5;      /* red   offset/len */
+    *(uint32_t *)(b + 44) = 5;  *(uint32_t *)(b + 48) = 6;      /* green offset/len */
+    *(uint32_t *)(b + 56) = 0;  *(uint32_t *)(b + 60) = 5;      /* blue  offset/len */
+    uc_mem_write(g_uc, gbuf, b, sizeof b);
+}
+static void fill_fscreeninfo(uint32_t gbuf, uint32_t smem_start) {
+    uint8_t b[80]; memset(b, 0, sizeof b);
+    memcpy(b + 0, "MagicEyes-MLC", 13);            /* id[16] */
+    *(uint32_t *)(b + 16) = smem_start;            /* smem_start (phys base) */
+    *(uint32_t *)(b + 20) = FB_LEN_ * 2;           /* smem_len (2 pages) */
+    *(uint32_t *)(b + 24) = 0;                      /* FB_TYPE_PACKED_PIXELS */
+    *(uint32_t *)(b + 32) = 2;                      /* FB_VISUAL_TRUECOLOR */
+    *(uint32_t *)(b + 44) = 640;                    /* line_length */
+    uc_mem_write(g_uc, gbuf, b, sizeof b);
+}
+/* FBIOPAN_DISPLAY: select the visible page by yoffset. Reuse the OADR flip-lock path
+   so present() shows exactly the panned-to region (one complete frame, frame-synced). */
+static void fb_pan(uint32_t yoffset) {
+    if (!g_fb_guest) return;
+    g_oadr_driven = 1; g_flip_active = 1;
+    g_flip_guest = g_fb_guest + yoffset * 640;     /* stride 640; page 1 = yoffset 240 */
+    g_frame_ready = 1;
+}
+long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
+    int i = fd - DEVFD_BASE, fbno = (i >= 0 && i < 64) ? g_fbnum[i] : 0;
+    switch (cmd) {
+    case 0x4600: if (arg) fill_vscreeninfo(arg); return 0;                 /* GET_VSCREENINFO */
+    case 0x4602: if (arg) fill_fscreeninfo(arg, fbno ? FB1_PHYS : FB0_PHYS); return 0; /* GET_FSCREENINFO */
+    case 0x4601: return 0;                                                  /* PUT_VSCREENINFO: accept */
+    case 0x4606: { uint32_t yoff = 0; if (arg) uc_mem_read(g_uc, arg + 20, &yoff, 4);
+                   fb_pan(yoff); return 0; }                                /* PAN_DISPLAY (yoffset@20) */
+    case 0x4611: return 0;                                                  /* FBIOBLANK: accept */
+    default:     return 0;
+    }
+}
+
+/* ---- /dev/i2c-0 handset serial (paeryn/Inka serial read) ------------------
+   Some titles (Vektar) read the GP2X handset serial over i2c for a region/DRM
+   check, printing "got serial number: ...". The serial is read via the I2C_RDWR
+   ioctl (a register-select write msg + a read msg), in a retry loop that only exits
+   once a serial is returned — so the read MUST hand back bytes (returning success
+   with an unchanged buffer made Vektar spin forever). We supply a fixed plausible
+   serial; the games tolerate the value. */
+static const uint8_t I2C_SERIAL[16] = "MAGICEYES0000001";
+long i2c_read(uint32_t gbuf, uint32_t n) {
+    uint32_t k = n < sizeof I2C_SERIAL ? n : (uint32_t)sizeof I2C_SERIAL;
+    if (gbuf && k) uc_mem_write(g_uc, gbuf, I2C_SERIAL, k);
+    return (long)k;
+}
+/* i2c ioctl. I2C_SLAVE/RETRIES/TIMEOUT etc.: accept. I2C_RDWR (0x0707): walk the
+   i2c_rdwr_ioctl_data {u32 msgs; u32 nmsgs;}; for each read msg (i2c_msg{u16 addr;
+   u16 flags; u16 len; u8 *buf} == 12 bytes, flags&I2C_M_RD) fill buf with the serial. */
+long i2c_ioctl(uint32_t cmd, uint32_t arg) {
+    if (cmd != 0x0707 || !arg) return 0;
+    uint32_t msgs = 0, nmsgs = 0;
+    uc_mem_read(g_uc, arg, &msgs, 4);
+    uc_mem_read(g_uc, arg + 4, &nmsgs, 4);
+    if (nmsgs > 16) nmsgs = 16;
+    for (uint32_t i = 0; i < nmsgs; i++) {
+        uint16_t flags = 0, len = 0; uint32_t buf = 0;
+        uc_mem_read(g_uc, msgs + i * 12 + 2, &flags, 2);
+        uc_mem_read(g_uc, msgs + i * 12 + 4, &len, 2);
+        uc_mem_read(g_uc, msgs + i * 12 + 8, &buf, 4);
+        if ((flags & 0x0001) && buf && len) {            /* I2C_M_RD */
+            uint8_t s[256]; for (int k = 0; k < 256; k++) s[k] = I2C_SERIAL[k % 16];
+            uint16_t k = len < 256 ? len : 256;
+            uc_mem_write(g_uc, buf, s, k);
+        }
+    }
+    return (long)nmsgs;
+}
+
+/* ---- /dev/GPIO joystick (paeryn SDL) --------------------------------------
+   paeryn SDL's joystick driver reads a 32-bit active-high button word per poll
+   (PEPC_VK_* layout). Map our shm button bitmap (gp2xshm.h order) into it. */
+long gpio_read(uint32_t gbuf, uint32_t n) {
+    static const uint8_t map[19] = {           /* shm bit -> PEPC_VK bit */
+        0, 1, 6, 4, 3, 5, 7, 2,                /* UP UPLEFT LEFT DOWNLEFT DOWN DOWNRIGHT RIGHT UPRIGHT */
+        15, 14, 12, 13, 8, 9, 10, 11,          /* START SELECT L R A B X Y */
+        16, 17, 18 };                          /* VOLUP VOLDOWN CLICK */
+    uint32_t b = g_shm ? g_shm->buttons : 0, v = 0;
+    for (int i = 0; i < 19; i++) if (b & (1u << i)) v |= (1u << map[i]);
+    uint32_t k = n < 4 ? n : 4;
+    if (gbuf && k) uc_mem_write(g_uc, gbuf, &v, k);
+    return (long)k;
+}
+
+/* ---- MLC 8-bit palette (PALLT_A index @0x2958, PALLT_D data @0x295a) -------
+   The palette is a write-only hardware port — the value never survives in RAM —
+   so present() can't read it back. Capture it from the MMSP2-page write hook: write
+   the start index to PALLT_A, then 2 halfwords/entry to PALLT_D (first (G<<8)|B,
+   then R), the index auto-incrementing. Reconstructs the 256-entry RGB888 palette so
+   8-bit framebuffers present in true colour (else an RGB332 approximation). */
+#define MMSP2_PALLT_A 0x2958
+#define MMSP2_PALLT_D 0x295a
+uint8_t g_pal[256][3]; int g_pal_have = 0;
+static uint16_t g_pal_idx; static uint8_t g_pal_phase; static uint16_t g_pal_gb;
+void gp2x_mmio_palette(uint32_t off, uint32_t val) {
+    if (off == MMSP2_PALLT_A) { g_pal_idx = (uint16_t)(val & 0xff); g_pal_phase = 0; }
+    else if (off == MMSP2_PALLT_D) {
+        if (g_pal_phase == 0) { g_pal_gb = (uint16_t)val; g_pal_phase = 1; }
+        else {
+            uint8_t e = (uint8_t)(g_pal_idx & 0xff);
+            g_pal[e][0] = (uint8_t)(val & 0xff);            /* R */
+            g_pal[e][1] = (uint8_t)((g_pal_gb >> 8) & 0xff);/* G */
+            g_pal[e][2] = (uint8_t)(g_pal_gb & 0xff);       /* B */
+            g_pal_idx = (uint16_t)((g_pal_idx + 1) & 0xff);
+            g_pal_phase = 0; g_pal_have = 1;
+        }
+    }
+}
+
+/* ---- MMSP2 2D "MESG" blitter (0xE0020000) ---------------------------------
+   minlib-style games (Vektar) draw entirely through the 2D blitter — the CPU never
+   touches fb0/fb1, so they'd stay black. We shadow the blitter registers from a write
+   hook on the mapped window and run the blit when MESGSTATUS is written BUSY (the hw
+   run-trigger). Handles solid fill (forecolor) + video->video copy with colour-key
+   transparency, 8/16bpp. FIFO (system-mem) sources, 1-bpp expand, and blend ROPs are
+   skipped (logged). Ported from host/common/gp2x_device.c. Reg map: paeryn mmsp2_regs.h. */
+#define MESG_DSTCTRL 0x00
+#define MESG_DSTADDR 0x04
+#define MESG_DSTSTRIDE 0x08
+#define MESG_SRCCTRL 0x0c
+#define MESG_SRCADDR 0x10
+#define MESG_SRCSTRIDE 0x14
+#define MESG_PATCTRL 0x20
+#define MESG_FORCOLOR 0x24
+#define MESG_BACKCOLOR 0x28
+#define MESG_SIZE 0x2c
+#define MESG_CTRL 0x30
+#define MESG_STATUS 0x34
+#define MESG_B_DSTBPP16 (1u << 5)
+#define MESG_B_SRCENB   (1u << 7)
+#define MESG_B_INVIDEO  (1u << 8)
+#define MESG_B_SRCBPP16 (1u << 5)
+#define MESG_B_SRCBPP1  (1u << 6)
+#define MESG_B_TRANSPEN (1u << 11)
+#define MESG_B_TRANSP_SHIFT 16
+#define MESG_BUSY (1u << 0)
+static struct {
+    uint32_t dstctrl, dstaddr, dststride, srcctrl, srcaddr, srcstride;
+    uint32_t patctrl, forcolor, backcolor, size, ctrl;
+} g_blt;
+/* phys -> host pointer (regions are one contiguous host mmap, so base+offset is valid). */
+static void *phys_to_hostptr(uint32_t phys) {
+    uint32_t g; if (!phys_to_guest(phys, &g)) return NULL; return guest_to_host(g);
+}
+static void blit_exec(void) {
+    uint32_t w = g_blt.size & 0xffff, h = (g_blt.size >> 16) & 0xffff;
+    if (!w || !h) return;
+    uint32_t ctrl = g_blt.ctrl;
+    int transp = (ctrl & MESG_B_TRANSPEN) != 0;
+    uint32_t transpc = ctrl >> MESG_B_TRANSP_SHIFT;
+    int dbpp = (g_blt.dstctrl & MESG_B_DSTBPP16) ? 16 : 8, dbytes = dbpp / 8;
+    uint32_t dpixoff = (dbpp == 16) ? ((g_blt.dstctrl >> 4) & 1) : ((g_blt.dstctrl >> 3) & 3);
+    uint8_t *dst = phys_to_hostptr(g_blt.dstaddr & ~3u);
+    uint32_t dstride = g_blt.dststride;
+    const char *why = "ok";
+    if (!dst) { why = "dst-unmapped"; goto done; }
+    dst += dpixoff * dbytes;
+    if (g_blt.srcctrl & MESG_B_SRCENB) {                 /* copy blit */
+        if (!(g_blt.srcctrl & MESG_B_INVIDEO)) { why = "fifo-src"; goto done; }
+        int sbpp = (g_blt.srcctrl & MESG_B_SRCBPP16) ? 16
+                 : (g_blt.srcctrl & MESG_B_SRCBPP1)  ? 1 : 8;
+        if (sbpp != dbpp) { why = "bpp-mismatch"; goto done; }
+        uint32_t spixoff = (sbpp == 16) ? ((g_blt.srcctrl >> 4) & 1) : ((g_blt.srcctrl >> 3) & 3);
+        uint8_t *src = phys_to_hostptr(g_blt.srcaddr & ~3u);
+        if (!src) { why = "src-unmapped"; goto done; }
+        src += spixoff * dbytes;
+        uint32_t sstride = g_blt.srcstride;
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *drow = dst + (size_t)y * dstride;
+            const uint8_t *srow = src + (size_t)y * sstride;
+            if (dbpp == 16) {
+                uint16_t *dp = (uint16_t *)drow; const uint16_t *sp = (const uint16_t *)srow;
+                for (uint32_t x = 0; x < w; x++) { uint16_t p = sp[x];
+                    if (!(transp && p == (uint16_t)transpc)) dp[x] = p; }
+            } else {
+                for (uint32_t x = 0; x < w; x++) { uint8_t p = srow[x];
+                    if (!(transp && p == (uint8_t)transpc)) drow[x] = p; }
+            }
+        }
+    } else {                                             /* solid fill (forcolor) */
+        uint32_t fc = g_blt.forcolor;
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *drow = dst + (size_t)y * dstride;
+            if (dbpp == 16) { uint16_t *dp = (uint16_t *)drow;
+                              for (uint32_t x = 0; x < w; x++) dp[x] = (uint16_t)fc; }
+            else            memset(drow, (int)(fc & 0xff), w);
+        }
+    }
+done:
+    if (getenv("ME_GP2X_BLITLOG"))
+        fprintf(stderr, "  BLIT %s: dst=%08x(+%u) %ux%u dbpp=%d src=%08x sctrl=%08x ctrl=%08x fc=%08x\n",
+                why, g_blt.dstaddr, dpixoff, w, h, dbpp, g_blt.srcaddr, g_blt.srcctrl, ctrl, g_blt.forcolor);
+}
+void gp2x_blitter_write(uint32_t off, uint32_t val, int size) {
+    (void)size;
+    switch (off) {
+    case MESG_DSTCTRL:   g_blt.dstctrl   = val; break;
+    case MESG_DSTADDR:   g_blt.dstaddr   = val; break;
+    case MESG_DSTSTRIDE: g_blt.dststride = val; break;
+    case MESG_SRCCTRL:   g_blt.srcctrl   = val; break;
+    case MESG_SRCADDR:   g_blt.srcaddr   = val; break;
+    case MESG_SRCSTRIDE: g_blt.srcstride = val; break;
+    case MESG_PATCTRL:   g_blt.patctrl   = val; break;
+    case MESG_FORCOLOR:  g_blt.forcolor  = val; break;
+    case MESG_BACKCOLOR: g_blt.backcolor = val; break;
+    case MESG_SIZE:      g_blt.size      = val; break;
+    case MESG_CTRL:      g_blt.ctrl      = val; break;
+    case MESG_STATUS:    if (val & MESG_BUSY) blit_exec(); break;
+    default: break;
+    }
+}
+uint32_t g_blit_guest = 0;   /* guest base of the 0xe0020000 blitter window */
+void blitter_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
+                      int size, int64_t value, void *user) {
+    (void)uc; (void)type; (void)user;
+    if (!g_blit_guest) return;
+    gp2x_blitter_write((uint32_t)addr - g_blit_guest, (uint32_t)value, size);
+}
+/* The game triggers a blit by storing BUSY to MESGSTATUS, then spins `while(STATUS & BUSY)`.
+   Our blits run synchronously, so the engine is never busy. We can't clear BUSY from the WRITE
+   hook (Unicorn fires it before the CPU store, which then writes BUSY back), so serve every
+   STATUS read as 0 (idle) from a READ hook — the poll exits immediately. */
+void blitter_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
+                     int size, int64_t value, void *user) {
+    (void)type; (void)value; (void)user;
+    if (!g_blit_guest) return;
+    if ((uint32_t)addr - g_blit_guest == MESG_STATUS) {
+        uint32_t z = 0; uc_mem_write(uc, g_blit_guest + MESG_STATUS, &z, size < 4 ? size : 4);
+    }
 }
 
 /* ---- /dev/dsp (OSS) audio -> shm audio ring (consumed by the viewer) ---- */
@@ -261,6 +536,7 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     uint32_t off = (uint32_t)addr - g_mmsp2_guest;
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  MMSP2 wr %04x sz%d=%08x\n", off, size, (uint32_t)value); }
+    if (off == MMSP2_PALLT_A || off == MMSP2_PALLT_D) { gp2x_mmio_palette(off, (uint32_t)value); return; }
     if (off != MMSP2_OADRL && off != MMSP2_OADRH) return;
     uint16_t lo = 0, hi = 0;
     uc_mem_read(uc, g_mmsp2_guest + MMSP2_OADRL, &lo, 2);
@@ -334,7 +610,10 @@ void shm_reset_for_new_game(void) {
    The shm allocation itself is preserved (the viewer thread holds it) -- see shm_reset_for_new_game. */
 void devices_reset(void) {
     memset(g_devtype, 0, sizeof g_devtype); g_devn = 0;
+    memset(g_fbnum, 0, sizeof g_fbnum);
     memset(g_mem, 0, sizeof g_mem); g_nmem = 0;
+    g_blit_guest = 0; memset(&g_blt, 0, sizeof g_blt);
+    g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0;
     g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0;
     g_flip_active = 0; g_flip_guest = 0;
     g_oadr_driven = 0; g_frame_ready = 0;
