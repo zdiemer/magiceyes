@@ -8,6 +8,7 @@
 #define ME_MKDIR(p) mkdir(p, 0777)
 #endif
 #include <dirent.h>   /* portable directory enumeration (Linux + MinGW-w64) for getdents */
+#include "glcmd.h"     /* GL render-offload syscall numbers + descriptor */
 
 /* Host scratch dir for decompressed GPEComp temps + extracted zips (created on first use). */
 void me_host_tmpdir(char *out, size_t cap) {
@@ -689,6 +690,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                      just rendered. Double-buffered titles (Payback) flip via this, not OADR. */
         gp2x_cacheflush(a3);
         return 0;
+    /* GL render offload: the fake-GLES shim forwards draws here; the engine rasterizes natively. */
+    case ME_NR_GL_RESIZE:  glr_resize((int)a0, (int)a1); return 0;
+    case ME_NR_GL_CLEAR:   glr_clear(a0);  return 0;
+    case ME_NR_GL_DRAW:    glr_draw(a0);   return 0;
+    case ME_NR_GL_PRESENT: glr_present();  return 0;
     case 5: {  /* open(path, flags, mode) */
         char p[1024]; read_cstr(a0, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;

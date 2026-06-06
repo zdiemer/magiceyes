@@ -37,6 +37,22 @@
 #include <time.h>
 
 #include "gp2xshm.h"
+#include "glcmd.h"
+
+/* GL render offload: forward draws to the native engine rasterizer via custom syscalls instead of
+   rasterizing in the emulated CPU (the dominant cost on low-spec hosts). Default ON;
+   ME_GL_NOOFFLOAD falls back to the in-shim software rasterizer below. */
+static long me_sc1(long nr, long a0) {
+    register long r7 __asm__("r7") = nr; register long r0 __asm__("r0") = a0;
+    __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7) : "memory"); return r0;
+}
+static long me_sc2(long nr, long a0, long a1) {
+    register long r7 __asm__("r7") = nr; register long r0 __asm__("r0") = a0;
+    register long r1 __asm__("r1") = a1;
+    __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7), "r"(r1) : "memory"); return r0;
+}
+static int gl_offload(void) { static int v = -1; if (v < 0) v = getenv("ME_GL_NOOFFLOAD") ? 0 : 1; return v; }
+static struct gl_draw g_desc;   /* reused per glDrawArrays; passed by guest pointer to the engine */
 
 /* ------------------------------------------------------------ Khronos ABI */
 typedef unsigned int   GLenum;
@@ -268,7 +284,10 @@ void glMatrixMode(GLenum m) { g_mmode = m; }
 void glLoadIdentity(void)   { m_identity(cur_matrix()); }
 void glViewport(GLint x, GLint y, GLsizei w, GLsizei h) {
     g_vp[0] = x; g_vp[1] = y; g_vp[2] = w; g_vp[3] = h;
-    if (x == 0 && y == 0 && w > 0 && h > 0) fb_resize(w, h);
+    if (x == 0 && y == 0 && w > 0 && h > 0) {
+        if (gl_offload()) me_sc2(ME_NR_GL_RESIZE, w, h);
+        else fb_resize(w, h);
+    }
 }
 void glOrthox(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f) {
     float L=l/65536.f, R=r/65536.f, B=b/65536.f, T=t/65536.f, N=n/65536.f, F=f/65536.f;
@@ -450,11 +469,12 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
 /* ----------------------------------------------------------- GL: clear */
 void glClear(GLbitfield mask) {
     g_n_clear++;
-    ensure_cbuf();
-    if (!(mask & GL_COLOR_BUFFER_BIT) || !g_cbuf) return;
+    if (!(mask & GL_COLOR_BUFFER_BIT)) return;
     uint8_t r=(uint8_t)(g_clear[0]*255+0.5f), g=(uint8_t)(g_clear[1]*255+0.5f),
             b=(uint8_t)(g_clear[2]*255+0.5f), a=(uint8_t)(g_clear[3]*255+0.5f);
     uint32_t c = ((uint32_t)a<<24)|((uint32_t)b<<16)|((uint32_t)g<<8)|r;
+    if (gl_offload()) { me_sc1(ME_NR_GL_CLEAR, (long)c); return; }
+    ensure_cbuf(); if (!g_cbuf) return;
     int i, n = g_fbw * g_fbh;
     for (i = 0; i < n; i++) g_cbuf[i] = c;
 }
@@ -710,10 +730,35 @@ static int fast_quad(const Vtx *v, int n, GLenum mode) {
     }
     return 1;
 }
+/* fill the engine-side draw descriptor from current GL state + arrays, forward to the native
+   rasterizer. The array/texture pointers are GUEST addresses; the engine derefs them via
+   guest_to_host (zero-copy). */
+static void offload_draw(GLenum mode, GLint first, GLsizei count) {
+    struct gl_draw *d = &g_desc;
+    d->mode = mode; d->first = (uint32_t)first; d->count = (uint32_t)count;
+    memcpy(d->mv, g_mv, sizeof d->mv); memcpy(d->proj, g_proj, sizeof d->proj);
+    for (int i = 0; i < 4; i++) d->vp[i] = g_vp[i];
+    d->en_tex = g_en_tex; d->en_blend = g_en_blend; d->en_atest = g_en_atest;
+    d->blend_s = g_blend_s; d->blend_d = g_blend_d;
+    d->atest_func = g_atest_func; d->atest_ref = g_atest_ref; d->texenv = g_texenv;
+    #define ARR(D,S) D.ptr=(uint32_t)(uintptr_t)(S).ptr; D.size=(S).size; D.type=(S).type; \
+                     D.stride=(S).stride; D.en=(S).enabled
+    ARR(d->av, g_av); ARR(d->ac, g_ac); ARR(d->at, g_at);
+    #undef ARR
+    for (int i = 0; i < 4; i++) d->cur_color[i] = g_cur_color[i];
+    const Tex *tx = (g_en_tex && g_bound_tex && g_bound_tex < MAXTEX && g_tex[g_bound_tex].used)
+                  ? &g_tex[g_bound_tex] : NULL;
+    if (tx) { d->tex_rgba = (uint32_t)(uintptr_t)tx->rgba; d->tex_w = tx->w; d->tex_h = tx->h;
+              d->tex_wraps = tx->wraps; d->tex_wrapt = tx->wrapt; }
+    else    { d->tex_rgba = 0; d->tex_w = d->tex_h = 0; }
+    me_sc1(ME_NR_GL_DRAW, (long)(intptr_t)d);
+}
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     g_n_draw++;
+    if (count <= 0 || !g_av.enabled) return;
+    if (gl_offload()) { offload_draw(mode, first, count); return; }
     ensure_cbuf();
-    if (!g_cbuf || count <= 0 || !g_av.enabled) return;
+    if (!g_cbuf) return;
     { static int norast = -1; if (norast < 0) norast = getenv("FAKEGLES_NORAST") ? 1 : 0;
       if (norast) return; }   /* perf probe: skip rasterization (keep transforms/present) */
     Vtx *v = (Vtx *)malloc((size_t)count * sizeof(Vtx));
@@ -787,6 +832,10 @@ EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read, EGLCon
 /* Present the colour buffer to the shm RGB565 framebuffer + frame-cap like SDL_Flip. */
 EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) {
     (void)d; (void)s;
+    if (gl_offload()) {
+        me_sc1(ME_NR_GL_PRESENT, 0);   /* engine converts its native cbuf -> shm + frame_seq++ */
+        goto framecap;
+    }
     if (!g_shm || !g_cbuf) return EGL_TRUE;
     uint16_t *dst = (uint16_t *)g_shm->pixels;
     int x, y;
@@ -803,6 +852,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) {
         fprintf(stderr, "fakegles: swap #%lu draws=%lu clears=%lu texs=%lu tex_bound=%u en_tex=%d nonblack=%d\n",
                 g_n_swap, g_n_draw, g_n_clear, g_n_tex, g_bound_tex, g_en_tex, nz);
     }
+framecap:;
     /* frame cap (FAKESDL_FPS, default 60) — GP2X eglSwapBuffers blocks on vsync */
     static long frame_ms = -1;
     if (frame_ms < 0) {
