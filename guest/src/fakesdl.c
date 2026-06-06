@@ -431,6 +431,45 @@ int SDL_UpperBlit(SDL_Surface *src, SDL_Rect *srcrect,
       } }
     int usealpha = (src->flags & SDL_SRCALPHA) ? 1 : 0;
     Uint8 sa = src->format->alpha;
+    /* Fast path: identical pixel format + no alpha blend -> copy raw pixels directly (no
+       per-pixel RGB round-trip). This is the common case (sprites DisplayFormat'd to the 16-bit
+       screen, blitted to it) and the dominant per-frame cost under ARM emulation; the slow
+       general path below stays for format-converting / alpha-blended blits. */
+    if (!(usealpha && sa < 255) && !src->format->palette && !dst->format->palette &&
+        src->format->BytesPerPixel == dst->format->BytesPerPixel &&
+        src->format->Rmask == dst->format->Rmask &&
+        src->format->Gmask == dst->format->Gmask &&
+        src->format->Bmask == dst->format->Bmask) {
+        int bpp = src->format->BytesPerPixel;
+        Uint32 ck = src->format->colorkey;
+        for (y = 0; y < sh; y++) {
+            int ty = dy + y, syy = sy0 + y;
+            if (ty < cy0 || ty >= cy1 || syy < 0 || syy >= src->h) continue;
+            int xs = 0, xe = sw;                 /* clip x to dst clip rect + src bounds */
+            if (xs < cx0 - dx) xs = cx0 - dx;
+            if (xs < -sx0)     xs = -sx0;
+            if (xe > cx1 - dx) xe = cx1 - dx;
+            if (xe > src->w - sx0) xe = src->w - sx0;
+            if (xe <= xs) continue;
+            Uint8 *sp = (Uint8 *)src->pixels + (size_t)syy * src->pitch + (size_t)(sx0 + xs) * bpp;
+            Uint8 *dp = (Uint8 *)dst->pixels + (size_t)ty  * dst->pitch + (size_t)(dx  + xs) * bpp;
+            int n = xe - xs;
+            if (!usecolorkey) {
+                memcpy(dp, sp, (size_t)n * bpp);
+            } else if (bpp == 2) {
+                Uint16 k = (Uint16)ck, *s16 = (Uint16 *)sp, *d16 = (Uint16 *)dp;
+                for (x = 0; x < n; x++) { Uint16 p = s16[x]; if (p != k) d16[x] = p; }
+            } else if (bpp == 4) {
+                Uint32 *s32 = (Uint32 *)sp, *d32 = (Uint32 *)dp;
+                for (x = 0; x < n; x++) { Uint32 p = s32[x]; if (p != ck) d32[x] = p; }
+            } else {
+                for (x = 0; x < n; x++) { Uint32 p = get_raw(src, sx0 + xs + x, syy);
+                    if (p != ck) put_raw(dst, dx + xs + x, ty, p); }
+            }
+        }
+        if (dstrect) { dstrect->w = sw; dstrect->h = sh; }
+        return 0;
+    }
     for (y = 0; y < sh; y++) {
         int ty = dy + y, syy = sy0 + y;
         if (ty < cy0 || ty >= cy1 || syy < 0 || syy >= src->h) continue;
