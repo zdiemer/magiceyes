@@ -31,6 +31,15 @@ void engine_request_reload(const char *host_path);
 #define ME_WINMENU 1
 #endif
 
+#ifdef ME_BUNDLED
+/* Crash-recovery handoff from the engine (guard.c): when a game hits a host fault the engine
+   tears it down and sets g_fault_pending; the viewer thread polls it and tells the user the
+   emulator is still alive. Externs only (no engine.h here). g_cur_game is read as a string. */
+extern volatile int g_fault_pending;
+extern volatile uintptr_t g_fault_addr;
+extern char g_cur_game[];
+#endif
+
 static gp2x_shm_t *shm;
 static unsigned long long g_consumed = 0;   /* real audio bytes played (B/s stat) */
 static unsigned long long g_fed = 0;        /* all bytes queued incl. silence pad */
@@ -226,8 +235,9 @@ static void start_game(const char *path) {
     if (!r) { MessageBoxA(NULL, "No .gpe found, or the folder/zip is ambiguous.\nSee the console for details.",
                           "magiceyes", MB_ICONERROR); return; }
     int c = classify_elf(r);
-    if (c == 1) { MessageBoxA(NULL, "That title is dynamically linked -- the native build can't run it yet "
-                             "(GP2X static + GPEComp only).", "magiceyes", MB_ICONWARNING); return; }
+    if (c == 1) { MessageBoxA(NULL, "That title is a dynamically-linked ELF (not a GPEComp self-extractor, "
+                             "which is decompressed automatically).\nThe native build runs GP2X static + "
+                             "GPEComp games; dynamic titles need the Wiz/qemu path.", "magiceyes", MB_ICONWARNING); return; }
     if (c < 0) { MessageBoxA(NULL, "Not a usable GP2X ARM binary.\nSee the console for details.",
                             "magiceyes", MB_ICONERROR); return; }
     snprintf(g_last_game, sizeof g_last_game, "%s", path);
@@ -357,6 +367,21 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
 #endif
         }
         if (shm->quit) running = 0;
+#ifdef ME_BUNDLED
+        if (g_fault_pending) {     /* the engine caught a host fault + returned to idle */
+            g_fault_pending = 0;
+            char msg[1200];
+            snprintf(msg, sizeof msg,
+                "The game crashed and was stopped:\n\n%s\n\nFault address: 0x%llx\n\n"
+                "The emulator is still running -- use File > Open to load another game.",
+                g_cur_game[0] ? g_cur_game : "(unknown)", (unsigned long long)g_fault_addr);
+#ifdef _WIN32
+            MessageBoxA(hwnd, msg, "magiceyes -- game crashed", MB_ICONERROR | MB_OK);
+#else
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "magiceyes -- game crashed", msg, win);
+#endif
+        }
+#endif
         shm->viewer_heartbeat++;   /* tell the producer a viewer is consuming a_read */
 
         /* keyboard -> GP2X buttons */

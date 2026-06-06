@@ -101,7 +101,7 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     uint32_t nr = (imm == 0) ? gread(UC_ARM_REG_R7)
                 : (imm >= 0x900000u) ? (imm - 0x900000u) : imm;
     if (g_self) g_self->last_pc = pc;   /* diagnostics: where this thread last syscalled */
-    pthread_mutex_lock(&g_biglock);
+    BIGLOCK_LOCK();
     g_setpc = 0;
     uint32_t a0 = gread(UC_ARM_REG_R0), a1 = gread(UC_ARM_REG_R1), a2 = gread(UC_ARM_REG_R2);
     long r = sys_dispatch(nr, a0, a1, a2,
@@ -113,7 +113,7 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
                  host_now(), g_self ? g_self->tid : -1, pc, nr, a0, a1, a2, (unsigned long)(uint32_t)r);
         fputs(b, stderr);
     }
-    pthread_mutex_unlock(&g_biglock);
+    BIGLOCK_UNLOCK();
     if (g_exit) uc_emu_stop(uc);
 }
 
@@ -130,7 +130,7 @@ static void *helper_thread(void *arg) {
         /* Present off the guest render thread: frame-synced to the game's OADR write
            (g_frame_ready) once it drives present, else an async fallback. Skip while a reload
            is tearing down/rebuilding guest memory (g_fb_guest is being reset). */
-        if (!g_reloading && g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; present_active(); }
+        if (!g_reloading && g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; guarded_present(); }
         if (acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
         double now = host_now();
         if (prof && now - prof_t >= 2.0) {
@@ -190,9 +190,11 @@ static uint32_t engine_load_game(const char *path) {
     uc_err e = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &u);
     if (e) die("uc_open", e);
     g_uc = u;
+    snprintf(g_cur_game, sizeof g_cur_game, "%s", path);   /* the game the crash guard names */
     map_kuser_page();
     shm_reset_for_new_game();
     uint32_t entry = load_elf(path);
+    if (!entry) { uc_close(u); g_uc = NULL; return 0; }   /* bad/missing binary: caller goes idle */
     char *av[1]; av[0] = (char *)path;
     uint32_t sp = setup_stack(1, av);
     gwrite(UC_ARM_REG_SP, sp);
@@ -243,6 +245,7 @@ int main(int argc, char **argv) {
                                            a redirected stderr otherwise -> lost logs on Windows) */
     me_platform_init();   /* Windows: 1ms timer + opt out of EcoQoS throttling (else a backgrounded
                              window is CPU/timer-throttled -> ~4x slower load; Linux never throttles) */
+    guard_init();         /* install the host-fault guard so a bad game can't crash the GUI */
     /* ---- CLI: parse flags; the first non-flag positional is the game ---- */
     const char *input = NULL;
     for (int i = 1; i < argc; i++) {
@@ -275,8 +278,9 @@ int main(int argc, char **argv) {
         int cls = classify_elf(bin);
         if (cls < 0) return 2;
         if (cls == 1) {
-            fprintf(stderr, "magiceyes: '%s' is dynamically linked -- native dynamic-linked titles "
-                            "aren't supported yet (Wiz/qemu path only).\n", bin);
+            fprintf(stderr, "magiceyes: '%s' is a dynamically-linked ELF (not a GPEComp self-extractor, "
+                            "which is decompressed automatically). Native dynamic-linked titles need a "
+                            "runtime linker + rootfs -- run them via the Wiz/qemu path for now.\n", bin);
             return 3;
         }
     } else {
@@ -296,6 +300,12 @@ int main(int argc, char **argv) {
         chdir_to_dir_of(bin);                 /* run from the game's dir so its Data/ resolves */
         entry = engine_load_game(bin);
         if (g_trace) fprintf(stderr, "entry=%08x brk=%08x\n", entry, g_brk);
+        if (!entry) {
+            fprintf(stderr, "magiceyes: failed to load '%s'\n", bin);
+#ifndef ME_BUNDLED
+            return 1;                         /* standalone: nothing to run */
+#endif
+        }                                     /* bundle: fall through to an idle window */
     }
 
     /* helper + viewer threads are created ONCE and outlive every reload / idle period */
@@ -306,10 +316,16 @@ int main(int argc, char **argv) {
 
     while (!g_shutdown) {
         if (entry) {
-            uc_err e = uc_emu_start(g_th[0].uc, entry, 0, 0, 0);   /* run the main guest thread */
+            struct me_fault flt = {0};
+            uc_err e = guarded_emu_start(g_th[0].uc, entry, &flt);   /* run the main guest thread */
             entry = 0;
+            if (flt.faulted) {                 /* a HOST fault (access violation) -- recover, don't die */
+                fprintf(stderr, "magiceyes: GAME CRASHED (host fault) pc=%p addr=%p in %s\n",
+                        (void *)flt.pc, (void *)flt.addr, g_cur_game[0] ? g_cur_game : "(unknown)");
+                g_fault_addr = flt.addr; g_fault_pending = 1;   /* viewer pops a MessageBox */
+            }
             if (!g_reload_path[0]) {           /* game ended on its own (exit/return/error) */
-                if (e != UC_ERR_OK && !g_exit)
+                if (e != UC_ERR_OK && !g_exit && !flt.faulted)
                     fprintf(stderr, "me_unicorn: main emu err %s pc=%08x\n", uc_strerror(e), gread(UC_ARM_REG_PC));
 #ifdef ME_BUNDLED
                 engine_stop_all_threads();     /* halt lingering workers; keep last frame + window */

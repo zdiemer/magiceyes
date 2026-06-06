@@ -3,10 +3,11 @@
  * The CLI/menu accept a folder, a .zip, or a .gpe directly. resolve_input() reduces any of
  * those to a single runnable binary path (finding the one .gpe in a folder/zip, erroring on
  * 0 or 2+), and classify_elf() decides static-ET_EXEC (run it) vs dynamically-linked (deferred
- * to the Wiz/qemu path). GPEComp decompression is NOT done here: a .gpe is itself a static ARM
- * self-extractor, so the engine runs it and the execve of its decompressed payload triggers the
- * reload (syscalls.c case 11) -- inline decomp with no separate decompressor. */
+ * to the Wiz/qemu path). GPEComp .gpe stubs are themselves dynamically linked, so the native
+ * engine can't run them to self-extract; finalize() decompresses the appended UCL payload
+ * offline (gpecomp.c) to the scratch dir and runs that static binary instead. */
 #include "engine.h"
+#include "gpecomp.h"
 #include <dirent.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -69,14 +70,68 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     return NULL;
 }
 
+/* If `elf` is a GPEComp self-extractor, decompress its UCL payload to the host scratch dir
+   (<tmpdir>/<stem>_tmp) and return that path in out (1); else 0. The .gpe stub is dynamically
+   linked (unrunnable natively), but the payload it carries is the static game. */
+static int gpecomp_to_tmp(const char *elf, char *out, size_t cap) {
+    FILE *f = fopen(elf, "rb"); if (!f) return 0;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return 0; }
+    uint8_t *buf = malloc((size_t)sz);
+    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return 0; }
+    fclose(f);
+    if (!gpecomp_detect(buf, (size_t)sz)) { free(buf); return 0; }
+    uint8_t *dec = NULL; size_t dlen = 0;
+    if (gpecomp_decompress(buf, (size_t)sz, &dec, &dlen) != 0) {
+        free(buf);
+        fprintf(stderr, "magiceyes: '%s' is GPEComp but decompression failed (corrupt/unsupported)\n", elf);
+        return 0;
+    }
+    free(buf);
+    /* derive <gamedir> and <stem> from the .gpe path */
+    char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", elf);
+    char *d1 = strrchr(dir, '/'), *d2 = strrchr(dir, '\\'), *d = d1 > d2 ? d1 : d2;
+    const char *name = d ? d + 1 : elf;
+    char stem[PATH_MAX]; snprintf(stem, sizeof stem, "%s", name);
+    char *dot = strrchr(stem, '.'); if (dot) *dot = 0;
+    if (d) *d = 0; else snprintf(dir, sizeof dir, ".");
+    /* Prefer writing the decompressed game BESIDE the .gpe so the engine's chdir lands in the
+       game's own dir and its relative Data/ resolves. Fall back to the host scratch dir if the
+       game's location is read-only (the game may then not find its assets -- it's the best we can do). */
+    snprintf(out, cap, "%s/%s_tmp", dir, stem);
+    FILE *o = fopen(out, "wb");
+    if (!o) {
+        char base[PATH_MAX]; me_host_tmpdir(base, sizeof base);
+        snprintf(out, cap, "%s/%s_tmp", base, stem);
+        o = fopen(out, "wb");
+        if (!o) { fprintf(stderr, "magiceyes: cannot write decompressed '%s': %s\n", out, strerror(errno)); free(dec); return 0; }
+        fprintf(stderr, "magiceyes: note: '%s' is read-only; decompressed to %s (the game may not find its Data/)\n", dir, out);
+    }
+    size_t w = fwrite(dec, 1, dlen, o); fclose(o); free(dec);
+    if (w != dlen) { fprintf(stderr, "magiceyes: short write to '%s'\n", out); return 0; }
+#ifndef _WIN32
+    chmod(out, 0755);
+#endif
+    if (g_trace) fprintf(stderr, "  [gpecomp] %s -> %s (%zu bytes)\n", elf, out, dlen);
+    return 1;
+}
+
 /* Normalise a chosen path to a runnable ARM ELF: use it directly if it's an ELF, else treat it
-   as a launcher script and follow it to the binary beside it. */
+   as a launcher script and follow it to the binary beside it; then transparently decompress a
+   GPEComp self-extractor to its static payload. */
 static const char *finalize(const char *path, char *out, size_t cap) {
-    if (file_is_elf(path)) { snprintf(out, cap, "%s", path); return out; }
-    const char *r = resolve_script(path, out, cap);
-    if (r) return r;
-    fprintf(stderr, "magiceyes: '%s' is not an ARM ELF and no runnable binary was found beside it\n", path);
-    return NULL;
+    char elfbuf[PATH_MAX]; const char *elf;
+    if (file_is_elf(path)) { snprintf(elfbuf, sizeof elfbuf, "%s", path); elf = elfbuf; }
+    else {
+        elf = resolve_script(path, elfbuf, sizeof elfbuf);
+        if (!elf) {
+            fprintf(stderr, "magiceyes: '%s' is not an ARM ELF and no runnable binary was found beside it\n", path);
+            return NULL;
+        }
+    }
+    if (gpecomp_to_tmp(elf, out, cap)) return out;   /* GPEComp stub -> decompressed static game */
+    snprintf(out, cap, "%s", elf);
+    return out;
 }
 
 /* Reduce a directory tree to its single .gpe (following a launcher script to the real binary);

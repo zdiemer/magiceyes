@@ -168,7 +168,8 @@ they live under `tools/scratch/gp2x/` and the operator's drives:
   (doukutsu — note: that build is missing `data/Org/` music), Payback, Knight Lore.
 - GP2X games are GPEComp; decompress by running the stub from **ext4** with `/mnt/tmp`
   writable (it writes `/mnt/tmp/<name>_tmp`), then run that static binary in the engine.
-  TODO: an offline `tools/un-gpecomp` (UCL) so there's no `/mnt/tmp`+exec dance.
+  **DONE — offline `host/engine/gpecomp.c` + `tools/un-gpecomp` (no qemu//mnt/tmp dance):**
+  the loader now decompresses GPEComp `.gpe` natively (see the GPEComp-format note below).
 
 These large/derivable assets now live in **`assets/` in this repo (gitignored)** —
 `assets/rootfs` (extracted wiz_ubifs), `assets/sdk` (GPH SDK), `assets/paeryn-sdl` (GP2X
@@ -455,6 +456,34 @@ itself glitches. Not our code. Mitigations are environmental: a periodic `wsl --
   whether music is present, absent (worker error-loops harmlessly), or finishes a song.
 - Interactive run (qemu): `bash host/qemu/run-gp2x-qemu.sh ~/pbtest/Payback_tmp` (qemu-arm +
   SDL2 viewer, WSLg). The old `run-gp2x.sh` launches the **Unicorn** fallback.
+- **Offline GPEComp decompressor (`host/engine/gpecomp.c`, validated byte-exact vs the qemu
+  decomp of Payback; also Knight Lore).** GPEComp `.gpe` = a small *dynamically-linked* ARM ELF
+  stub with a standard **`uclpack`** container appended right after the section-header table
+  (the stub also embeds a copy of the magic in its code, so `find_header` searches *past* the
+  ELF image). Container: `magic[8]=00 e9 55 43 4c ff 01 1a`, BE `u32 flags`, `u8 method`
+  (**0x2b=NRV2B, 0x2d=NRV2D, 0x2e=NRV2E** — both our samples are NRV2D), `u8 level`, BE
+  `u32 block_size`; then per block `BE u32 in_len; BE u32 out_len; out_len bytes` (stored when
+  `out_len==in_len`), EOF when `in_len==0`. NRV2x 8-bit decoders reimplemented from the UCL spec
+  (`getbit_8`: `bb&0x7f ? bb*=2 : bb=src[ip++]*2+1; return (bb>>8)&1`). `loader.c` `finalize()`
+  detects a GPEComp stub, decompresses **beside the `.gpe`** (so the engine's chdir finds the
+  game's `Data/`; scratch-dir fallback if read-only) and loads the static payload — no qemu, no
+  inline-execve self-extract. CLI: `tools/un-gpecomp` (`tools/build_un_gpecomp.sh`; set
+  `CC=x86_64-w64-mingw32-gcc` for a Windows `un-gpecomp.exe`).
+- **Don't-crash-the-GUI hardening (native Windows).** Tested `F:\Roms\GP2X` titles: Blazar,
+  Quartz, Vektar `.gpe` are already *static* ELFs (run directly); Odonata/RetroVirus/W&W are
+  genuinely dynamic (need the Wiz/qemu linker path, not GPEComp). Three crash vectors fixed so a
+  bad game can't take the window down: (1) **host-fault guard** `host/engine/guard.c` — MinGW
+  has no `__try`/`__except`, so a process-wide **Vectored Exception Handler** restores a
+  `RtlCaptureContext` arm point (Win analog of sigsetjmp; Linux uses `sigaction`+`siglongjmp`)
+  around every `uc_emu_start` + the helper `present_active`; releases `g_biglock` via a
+  per-thread `g_holds_biglock` flag (every lock site uses `BIGLOCK_LOCK/UNLOCK`); a caught fault
+  tears the game down and the viewer pops a MessageBox (`g_fault_pending`/`g_cur_game`), window
+  stays alive. (2) **`load_elf` returns 0 instead of `exit(1)`** on a bad/missing binary → idle
+  window, not process death (this was Blazar: a self-relaunch `execve` to a garbage path).
+  (3) **`execve` to a missing target returns ENOENT** (game keeps running) instead of tearing
+  down. Also added benign syscalls: `chdir(12)`, `getcwd(183)`, `sync(36)`/`fsync`/`fdatasync`/
+  `nice`/`sync_file_range` (no-op) — with `getcwd`/`chdir` real, Blazar/Quartz/Vektar now run
+  with **zero UNIMPLEMENTED syscalls and zero crashes**.
 
 ## Conventions
 

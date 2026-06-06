@@ -8,19 +8,24 @@
 static uint32_t g_phdr_va, g_phnum, g_phent, g_elf_entry;
 
 /* ---- ELF loader (static EXEC) ---- */
+/* Returns the entry PC, or 0 on a recoverable failure (bad path/format) so the caller can return
+   to an idle window instead of killing the process -- a game's execve to a missing/garbage path
+   must NOT take the whole GUI down. */
 uint32_t load_elf(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) { perror("open elf"); exit(1); }
+    if (!f) { fprintf(stderr, "magiceyes: cannot open '%s': %s\n", path, strerror(errno)); return 0; }
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fprintf(stderr, "magiceyes: '%s' is empty/invalid\n", path); fclose(f); return 0; }
     uint8_t *buf = malloc(sz);
-    if (fread(buf, 1, sz, f) != (size_t)sz) { perror("read elf"); exit(1); }
+    if (!buf || fread(buf, 1, sz, f) != (size_t)sz) { fprintf(stderr, "magiceyes: read '%s' failed\n", path); free(buf); fclose(f); return 0; }
     fclose(f);
 
     Elf32_Ehdr *eh = (Elf32_Ehdr *)buf;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS32)
-        { fprintf(stderr, "not a 32-bit ELF\n"); exit(1); }
-    if (eh->e_machine != EM_ARM) { fprintf(stderr, "not ARM\n"); exit(1); }
-    if (eh->e_type != ET_EXEC) { fprintf(stderr, "only static ET_EXEC for now\n"); exit(1); }
+    if ((size_t)sz < sizeof *eh ||
+        memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS32)
+        { fprintf(stderr, "magiceyes: '%s' is not a 32-bit ELF\n", path); free(buf); return 0; }
+    if (eh->e_machine != EM_ARM) { fprintf(stderr, "magiceyes: '%s' is not ARM\n", path); free(buf); return 0; }
+    if (eh->e_type != ET_EXEC) { fprintf(stderr, "magiceyes: '%s' is not a static ET_EXEC\n", path); free(buf); return 0; }
 
     uint32_t max_end = 0;
     Elf32_Phdr *ph = (Elf32_Phdr *)(buf + eh->e_phoff);

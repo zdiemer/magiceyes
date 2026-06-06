@@ -8,12 +8,17 @@
 #include "engine.h"
 
 pthread_mutex_t g_biglock = PTHREAD_MUTEX_INITIALIZER;   /* syscall + device layer lock */
+__thread int g_holds_biglock = 0;    /* this thread holds g_biglock (for the crash guard) */
 __thread uc_engine *g_uc;            /* the calling host thread's uc */
 __thread struct thread *g_self;      /* the calling host thread's guest-thread record */
 
 struct thread g_th[MAXTH];
 int g_nth = 0, g_next_tid = 100;
 int g_threaddump = 0;
+
+/* defined below; forward-declared so thread_entry's crash path can wake a sigsuspended thread */
+static pthread_mutex_t g_sigm;
+static pthread_cond_t  g_sigc;
 
 /* process-wide signal disposition (shared across threads) */
 struct sigact g_sigact[65];
@@ -77,14 +82,28 @@ void *thread_entry(void *arg) {
     g_self = t;
     g_uc = t->uc;
     uc_mem_write(g_uc, 0xffff0ff0u, &t->tls, 4);   /* this thread's kuser TLS slot */
-    uc_emu_start(g_uc, t->entry_pc, 0, 0, 0);
-    pthread_mutex_lock(&g_biglock);
+    struct me_fault flt = {0};
+    guarded_emu_start(g_uc, t->entry_pc, &flt);    /* run to completion (or catch a host fault) */
+    if (flt.faulted) {       /* a worker host fault: flag the crash + tear the whole game down */
+        fprintf(stderr, "magiceyes: GAME CRASHED (worker host fault) pc=%p addr=%p in %s\n",
+                (void *)flt.pc, (void *)flt.addr, g_cur_game[0] ? g_cur_game : "(unknown)");
+        g_fault_addr = flt.addr; g_fault_pending = 1;   /* viewer pops a MessageBox */
+        /* We can't engine_stop_all_threads() here (it would join ourselves). Instead kick the
+           main thread out of uc_emu_start so the main loop runs the standard teardown -> idle. */
+        BIGLOCK_LOCK();
+        g_exit = 1;
+        if (g_th[0].uc) uc_emu_stop(g_th[0].uc);
+        BIGLOCK_UNLOCK();
+        futex_wake_all();
+        pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
+    }
+    BIGLOCK_LOCK();
     t->state = TH_DEAD;
     if (t->ctid) {                                  /* CLONE_CHILD_CLEARTID: clear + wake */
         uint32_t z = 0; uc_mem_write(g_uc, t->ctid, &z, 4);
         futex_wake(t->ctid, INT_MAX);
     }
-    pthread_mutex_unlock(&g_biglock);
+    BIGLOCK_UNLOCK();
     return NULL;
 }
 
@@ -107,10 +126,10 @@ int futex_wait(uint32_t uaddr, uint32_t val) {
     pthread_mutex_lock(&q->m);
     uint32_t cur = 0; uc_mem_read(g_uc, uaddr, &cur, 4);
     if (cur != val) { pthread_mutex_unlock(&q->m); return -11; /* EAGAIN */ }
-    pthread_mutex_unlock(&g_biglock);          /* let others run while we block */
+    BIGLOCK_UNLOCK();                           /* let others run while we block */
     pthread_cond_wait(&q->c, &q->m);           /* atomically releases q->m */
     pthread_mutex_unlock(&q->m);
-    pthread_mutex_lock(&g_biglock);
+    BIGLOCK_LOCK();
     return 0;
 }
 int futex_wake(uint32_t uaddr, int n) {
@@ -191,11 +210,11 @@ void sigsuspend_wait(void) {
         g_self->tid, (unsigned long long)g_self->sig_pending,
         (unsigned long long)g_self->sig_blocked);
     pthread_mutex_lock(&g_sigm);
-    pthread_mutex_unlock(&g_biglock);
+    BIGLOCK_UNLOCK();
     while (!(g_self->sig_pending & ~g_self->sig_blocked) && !g_exit)
         pthread_cond_wait(&g_sigc, &g_sigm);   /* g_exit: a teardown woke us to bail out */
     pthread_mutex_unlock(&g_sigm);
-    pthread_mutex_lock(&g_biglock);
+    BIGLOCK_LOCK();
     if (g_siglog) fprintf(stderr, "SIG t%d sigsuspend_wait WAKE pend=%llx\n",
         g_self->tid, (unsigned long long)g_self->sig_pending);
 }
@@ -208,11 +227,11 @@ void threads_init(void) { fxq_init(); }
    bail on g_exit. The main thread (g_th[0]) is the caller and has already left its own
    uc_emu_start, so it is neither stopped nor joined here. */
 void engine_stop_all_threads(void) {
-    pthread_mutex_lock(&g_biglock);
+    BIGLOCK_LOCK();
     g_exit = 1;
     for (int i = 1; i < g_nth; i++)
         if (g_th[i].uc && g_th[i].state != TH_DEAD) uc_emu_stop(g_th[i].uc);
-    pthread_mutex_unlock(&g_biglock);
+    BIGLOCK_UNLOCK();
     futex_wake_all();
     pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
     for (int i = 1; i < g_nth; i++)
@@ -230,10 +249,10 @@ void engine_request_reload(const char *host_path) {
     if (!host_path || !*host_path) return;
     snprintf(g_reload_path, sizeof g_reload_path, "%s", host_path);
     g_reload_chdir = 1;   /* a new game from the picker -> run from its directory */
-    pthread_mutex_lock(&g_biglock);
+    BIGLOCK_LOCK();
     g_exit = 1;
     for (int i = 0; i < g_nth; i++) if (g_th[i].uc) uc_emu_stop(g_th[i].uc);
-    pthread_mutex_unlock(&g_biglock);
+    BIGLOCK_UNLOCK();
     futex_wake_all();
     pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
 }

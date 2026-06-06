@@ -150,6 +150,12 @@ struct freereg { uint32_t addr, len; };
 
 /* ---- threads.c (native host threads) ---- */
 extern pthread_mutex_t g_biglock;   /* serialises the syscall + device layer */
+/* Per-thread "I hold g_biglock" flag so the crash guard (guard.c) can release the lock if a
+   host fault hits while a guest thread is mid-syscall (else every other thread deadlocks).
+   EVERY g_biglock lock/unlock MUST go through these macros to keep the flag accurate. */
+extern __thread int g_holds_biglock;
+#define BIGLOCK_LOCK()   do { pthread_mutex_lock(&g_biglock);   g_holds_biglock = 1; } while (0)
+#define BIGLOCK_UNLOCK() do { g_holds_biglock = 0; pthread_mutex_unlock(&g_biglock); } while (0)
 extern __thread struct thread *g_self;   /* the calling host thread's guest-thread record */
 extern struct thread g_th[MAXTH];
 extern int g_nth, g_next_tid;
@@ -199,5 +205,19 @@ extern volatile int g_timer_run;
 extern unsigned g_slice_us;
 void intr_cb(uc_engine *uc, uint32_t intno, void *user);
 void *timer_thread(void *arg);
+
+/* ---- guard.c: catch genuine HOST faults (Win SEH / Linux SIGSEGV+SIGBUS) so a bad game
+   never takes the whole GUI process down. (Guest unmapped accesses are handled by Unicorn's
+   mem_invalid_cb and never reach here.) ---- */
+struct me_fault { int faulted; uintptr_t pc; uintptr_t addr; };
+void guard_init(void);                 /* install handlers (Linux); Windows: timer/no-op */
+int  guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f);  /* -1 on fault */
+int  guarded_present(void);            /* 0 ok, -1 if present faulted (frame skipped) */
+void guard_release_biglock(void);      /* unlock g_biglock iff the faulting thread held it */
+/* Recovery handoff to the viewer (bundle only): the engine flags a crashed game; the viewer
+   thread polls and pops a MessageBox. (Not in gp2x_shm_t -- that ABI is shared with the guest.) */
+extern volatile int g_fault_pending;
+extern volatile uintptr_t g_fault_addr;
+extern char g_cur_game[PATH_MAX];      /* the binary the engine is actually running */
 
 #endif /* MAGICEYES_ENGINE_H */

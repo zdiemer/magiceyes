@@ -251,7 +251,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             uint32_t us = dsp_pace_us();   /* pace like a blocking OSS write (frees the mixer
                                               mutex + CPU; else the audio thread free-runs) */
             if (us) { if (us > 100000) us = 100000;
-                      pthread_mutex_unlock(&g_biglock); usleep(us); pthread_mutex_lock(&g_biglock); }
+                      BIGLOCK_UNLOCK(); usleep(us); BIGLOCK_LOCK(); }
             return r; }
         if (dev_type((int)a0)) { free(tmp); return a2; }  /* other devices: accept + discard */
         long r = write((int)a0, tmp, a2); free(tmp);
@@ -372,7 +372,15 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            dir). Record it as the reload target, stop this uc, and let the main loop reset +
            load it. This is how inline decompression works in the native engine. */
         if (!g_forked) {
-            rewrite_guest_path(ep, g_reload_path, sizeof g_reload_path);
+            char rp[PATH_MAX]; rewrite_guest_path(ep, rp, sizeof rp);
+            struct stat es;
+            if (stat(rp, &es) != 0) {   /* garbage/missing target (e.g. a game relaunching itself
+                                           with a path built from stubbed getcwd/readlink): fail the
+                                           execve so the game keeps running -- don't tear down to idle. */
+                if (g_trace) fprintf(stderr, "  [execve] target '%s' (guest '%s') missing -> ENOENT\n", rp, ep);
+                return LERR(ENOENT);
+            }
+            snprintf(g_reload_path, sizeof g_reload_path, "%s", rp);
             if (g_trace) fprintf(stderr, "  [execve] reload -> %s (guest '%s')\n", g_reload_path, ep);
             g_setpc = 1; uc_emu_stop(g_uc);
             return 0;
@@ -411,6 +419,27 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 199: case 200: case 201: case 202:   /* ...32 variants */
         return 0;
     case 75:   return 0;        /* setrlimit */
+    /* benign no-ops: nothing the engine caches to a guest FS / nothing to schedule. Returning
+       success keeps these off the UNIMPLEMENTED log (Vektar calls sync; others appear in titles
+       that otherwise spam ENOSYS) without changing behaviour. */
+    case 36:   return 0;        /* sync */
+    case 118:  return 0;        /* fsync */
+    case 148:  return 0;        /* fdatasync */
+    case 34:   return 0;        /* nice */
+    case 314:  return 0;        /* sync_file_range */
+    case 12: {  /* chdir(path) -- some games cd before opening assets (Blazar) */
+        char p[1024]; read_cstr(a0, p, sizeof p);
+        char rp[PATH_MAX]; rewrite_guest_path(p, rp, sizeof rp);
+        return chdir(rp) == 0 ? 0 : LERR(errno);
+    }
+    case 183: {  /* getcwd(buf, size) -> bytes incl NUL, or -ERANGE */
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof cwd)) return LERR(errno);
+        size_t l = strlen(cwd) + 1;
+        if (l > a1) return LERR(ERANGE);
+        uc_mem_write(g_uc, a0, cwd, (uint32_t)l);
+        return (long)l;
+    }
     case 149:  return LERR(ENOSYS);  /* _sysctl (glibc tolerates) */
     case 122: { /* uname -> minimal Linux/armv5tel 2.6.24 */
         char u[6 * 65]; memset(u, 0, sizeof u);
@@ -451,9 +480,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            back it off with a real sleep so it doesn't spin hot. */
         if (e2 == ENOENT && ++g_self->enoent_streak > 3) {
             g_self->enoent_streak = 0;
-            pthread_mutex_unlock(&g_biglock);
+            BIGLOCK_UNLOCK();
             usleep(50000);
-            pthread_mutex_lock(&g_biglock);
+            BIGLOCK_LOCK();
         }
         return LERR(e2);
     }
@@ -542,9 +571,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         int tmo = (int)a2;
         if (tmo == 0) return 0;            /* non-blocking */
         double dur = (tmo < 0 || tmo > 100) ? 0.1 : (double)tmo / 1000.0;
-        pthread_mutex_unlock(&g_biglock);
+        BIGLOCK_UNLOCK();
         me_usleep((unsigned)(dur * 1e6));
-        pthread_mutex_lock(&g_biglock);
+        BIGLOCK_LOCK();
         return 0;
     }
     case 240: { /* futex(uaddr, op, val, ...) */
@@ -583,7 +612,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return c->tid;     /* parent gets the new tid */
     }
     case 158:   /* sched_yield */
-        pthread_mutex_unlock(&g_biglock); sched_yield(); pthread_mutex_lock(&g_biglock);
+        BIGLOCK_UNLOCK(); sched_yield(); BIGLOCK_LOCK();
         return 0;
     case 29:    /* pause */
     case 72:    /* sigsuspend (old) */
@@ -602,9 +631,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
         double dur = (double)ts[0] + (double)ts[1] * 1e-9;
         if (dur > 0.1) dur = 0.1;
-        if (dur > 0) { pthread_mutex_unlock(&g_biglock);
+        if (dur > 0) { BIGLOCK_UNLOCK();
                        me_usleep((unsigned)(dur * 1e6));
-                       pthread_mutex_lock(&g_biglock); }
+                       BIGLOCK_LOCK(); }
         return 0;
     }
     case 78: {  /* gettimeofday(tv, tz): real wall-clock — games drive loading/animation

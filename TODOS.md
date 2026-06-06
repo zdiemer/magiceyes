@@ -238,15 +238,16 @@ NEXT (toward fully playable):
 Decompress note: run the GPEComp stub under qemu (binfmt + QEMU_LD_PREFIX) and recover
 `/mnt/tmp/<name>_tmp` via an inode pin (`tools/scratch/gp2x/decomp_payback.sh` in romnas)
 — the stub `unlink`s the temp after its exec fails; an fd opened first survives it.
-TODO: fold this into an offline un-GPEComp (UCL) tool so there's no qemu/`/mnt/tmp` dance.
+DONE: offline un-GPEComp — `host/engine/gpecomp.c` + `tools/un-gpecomp` (pure-C UCL/NRV2x
+decoder, no qemu//mnt/tmp); the native loader decompresses `.gpe` transparently. Format +
+validation in CLAUDE.md.
 
 Alternative considered: patch qemu-user's do_openat/do_mmap/do_ioctl for the GP2X
 devices. Faster but Linux-only + ships a forked qemu — rejected in favor of the engine.
 
 Other GP2X notes (still relevant once syscalls are owned):
-- GPEComp: offline **un-GPEComp tool** in tools/ (UCL decompress) so we get the raw
-  binary without runtime `/mnt/tmp`. Must run from **ext4** (drvfs breaks the stub's
-  self-`stat`); needs writable `/mnt/tmp` if run live.
+- GPEComp: offline **un-GPEComp tool** — DONE (`host/engine/gpecomp.c` + `tools/un-gpecomp`,
+  pure-C UCL/NRV2x; loader decompresses `.gpe` natively). Format/validation in CLAUDE.md.
 - Emulate MMSP2: framebuffer base/flip/mode regs + the 2D **blitter** (the hard part);
   use the staged firmware source + paeryn SDL source for the register map.
   - `/dev/fb0` → a RAM framebuffer; on flip, present via the shm→viewer (reuse the
