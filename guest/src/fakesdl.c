@@ -84,8 +84,12 @@ static unsigned long now_ms(void) {
 
 static void shm_init(void) {
     if (g_shm) return;
-    int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (fd < 0) { fprintf(stderr, "fakesdl: shm_open failed\n"); return; }
+    /* Open the shm object directly rather than via shm_open(): the device glibc's shm_open
+       statfs-checks /dev/shm and returns an empty path on our fake /proc, so it fails (Caanoo
+       EABI rootfs). The engine (DEV_SHMFB) and qemu both intercept open("/dev/shm/gp2x_fb"). */
+    char shmpath[64]; snprintf(shmpath, sizeof shmpath, "/dev/shm%s", GP2XSHM_NAME);
+    int fd = open(shmpath, O_CREAT | O_RDWR, 0666);
+    if (fd < 0) { fprintf(stderr, "fakesdl: shm open(%s) failed\n", shmpath); return; }
     if (ftruncate(fd, sizeof(gp2x_shm_t)) != 0) { /* may already be sized */ }
     void *p = mmap(NULL, sizeof(gp2x_shm_t), PROT_READ | PROT_WRITE,
                    MAP_SHARED, fd, 0);
@@ -963,61 +967,42 @@ int SDL_SaveBMP_RW(SDL_Surface *s, SDL_RWops *dst, int freedst) {
 
 /* -------------------------------------------------------------- SDL_image (PNG)
  * Caanoo GLES titles (Propis/Rhythmos) load textures with IMG_Load. Pulling the real
- * SDL_image drags in a libjpeg/libtiff/libwebp chain; instead we decode PNG ourselves via
- * the staged libpng12, dlopen'd LAZILY so the shim keeps no hard NEEDED (the firmware rootfs
- * has no libpng). IMG_Load resolves from this shim; libSDL_image-1.2.so.0 stays a load-only
- * stub. Output is a 32-bit RGBA surface (byte order R,G,B,A) ready for glTexImage2D(GL_RGBA). */
+ * SDL_image drags in a libjpeg/libtiff/libwebp chain; instead we decode PNG ourselves with
+ * libpng12 -- which these titles already NEED (it's loaded in the process). We bind the libpng
+ * entrypoints as WEAK externs: when libpng12 is present they resolve to it (no dlopen, so no
+ * __dlopen ref -- the device glibc's libdl doesn't export that), and when it's absent (a
+ * firmware-rootfs SDL title) they're NULL and IMG_Load returns NULL gracefully. IMG_Load
+ * resolves from this shim; libSDL_image-1.2.so.0 stays a load-only stub. Output is a 32-bit
+ * RGBA surface (byte order R,G,B,A) ready for glTexImage2D(GL_RGBA). */
 typedef void (*png_rw_t)(void *, unsigned char *, unsigned long);
 typedef void (*png_err_t)(void *, const char *);
-static struct {
-    int tried; void *h;
-    void* (*create_read)(const char *, void *, png_err_t, png_err_t);
-    void* (*create_info)(void *);
-    void  (*destroy)(void **, void **, void **);
-    void  (*set_read_fn)(void *, void *, png_rw_t);
-    void  (*read_info)(void *, void *);
-    void  (*read_image)(void *, unsigned char **);
-    void  (*read_update_info)(void *, void *);
-    void  (*set_strip_16)(void *);
-    void  (*set_expand)(void *);
-    void  (*set_gray_to_rgb)(void *);
-    void  (*set_tRNS_to_alpha)(void *);
-    void  (*set_filler)(void *, unsigned int, int);
-    unsigned int  (*get_iw)(void *, void *);
-    unsigned int  (*get_ih)(void *, void *);
-    unsigned char (*get_bitdepth)(void *, void *);
-    unsigned char (*get_colortype)(void *, void *);
-    const char* (*get_ver)(void *);
-    void* (*get_error_ptr)(void *);
-    void* (*get_io_ptr)(void *);
-} P;
-static int png_load(void) {
-    if (P.tried) return P.h != NULL;
-    P.tried = 1;
-    P.h = dlopen("libpng12.so.0", RTLD_NOW | RTLD_GLOBAL);
-    if (!P.h) { fprintf(stderr, "fakesdl: IMG_Load: libpng12 not loadable (%s)\n", dlerror()); return 0; }
-#define L(f,n) P.f = (void *)dlsym(P.h, n)
-    L(create_read,"png_create_read_struct"); L(create_info,"png_create_info_struct");
-    L(destroy,"png_destroy_read_struct");     L(set_read_fn,"png_set_read_fn");
-    L(read_info,"png_read_info");             L(read_image,"png_read_image");
-    L(read_update_info,"png_read_update_info");L(set_strip_16,"png_set_strip_16");
-    L(set_expand,"png_set_expand");           L(set_gray_to_rgb,"png_set_gray_to_rgb");
-    L(set_tRNS_to_alpha,"png_set_tRNS_to_alpha"); L(set_filler,"png_set_filler");
-    L(get_iw,"png_get_image_width");          L(get_ih,"png_get_image_height");
-    L(get_bitdepth,"png_get_bit_depth");      L(get_colortype,"png_get_color_type");
-    L(get_ver,"png_get_libpng_ver");          L(get_error_ptr,"png_get_error_ptr");
-    L(get_io_ptr,"png_get_io_ptr");
-#undef L
-    if (!P.create_read || !P.read_image || !P.set_read_fn || !P.get_io_ptr)
-        { fprintf(stderr, "fakesdl: IMG_Load: libpng12 symbols missing\n"); P.h = NULL; return 0; }
-    return 1;
-}
+#define WK __attribute__((weak))
+extern void *png_create_read_struct(const char *, void *, png_err_t, png_err_t) WK;
+extern void *png_create_info_struct(void *) WK;
+extern void  png_destroy_read_struct(void **, void **, void **) WK;
+extern void  png_set_read_fn(void *, void *, png_rw_t) WK;
+extern void  png_read_info(void *, void *) WK;
+extern void  png_read_image(void *, unsigned char **) WK;
+extern void  png_read_update_info(void *, void *) WK;
+extern void  png_set_strip_16(void *) WK;
+extern void  png_set_expand(void *) WK;
+extern void  png_set_gray_to_rgb(void *) WK;
+extern void  png_set_tRNS_to_alpha(void *) WK;
+extern void  png_set_filler(void *, unsigned int, int) WK;
+extern unsigned int  png_get_image_width(void *, void *) WK;
+extern unsigned int  png_get_image_height(void *, void *) WK;
+extern unsigned char png_get_bit_depth(void *, void *) WK;
+extern unsigned char png_get_color_type(void *, void *) WK;
+extern const char *png_get_libpng_ver(void *) WK;
+extern void *png_get_error_ptr(void *) WK;
+extern void *png_get_io_ptr(void *) WK;
+#undef WK
 static void png_cb_read(void *png, unsigned char *data, unsigned long len) {
-    SDL_RWops *rw = (SDL_RWops *)P.get_io_ptr(png);
+    SDL_RWops *rw = (SDL_RWops *)png_get_io_ptr(png);
     if (rw) rw->read(rw, data, 1, (int)len);
 }
 static void png_cb_err(void *png, const char *msg) {
-    jmp_buf *jb = (jmp_buf *)P.get_error_ptr(png);
+    jmp_buf *jb = (jmp_buf *)png_get_error_ptr(png);
     fprintf(stderr, "fakesdl: IMG_Load: libpng error: %s\n", msg ? msg : "?");
     if (jb) longjmp(*jb, 1);
 }
@@ -1025,34 +1010,38 @@ static void png_cb_warn(void *png, const char *msg) { (void)png; (void)msg; }
 
 SDL_Surface *IMG_Load_RW(SDL_RWops *src, int freesrc) {
     if (!src) return NULL;
-    if (!png_load()) { if (freesrc) src->close(src); return NULL; }
+    if (!png_create_read_struct) {             /* libpng not in the process (weak -> NULL) */
+        fprintf(stderr, "fakesdl: IMG_Load: libpng12 not available\n");
+        if (freesrc) src->close(src); return NULL;
+    }
     jmp_buf jb;
-    void *png = P.create_read(P.get_ver ? P.get_ver(NULL) : "1.2.49", &jb, png_cb_err, png_cb_warn);
+    void *png = png_create_read_struct(png_get_libpng_ver ? png_get_libpng_ver(NULL) : "1.2.49",
+                                       &jb, png_cb_err, png_cb_warn);
     if (!png) { if (freesrc) src->close(src); return NULL; }
-    void *info = P.create_info(png);
+    void *info = png_create_info_struct(png);
     SDL_Surface * volatile surf = NULL;
     unsigned char ** volatile rows = NULL;
     if (setjmp(jb)) goto done;                 /* libpng error path */
-    P.set_read_fn(png, src, png_cb_read);
-    P.read_info(png, info);
-    unsigned int w = P.get_iw(png, info), h = P.get_ih(png, info), y;
-    int bd = P.get_bitdepth(png, info), ct = P.get_colortype(png, info);
-    if (bd == 16) P.set_strip_16(png);
-    P.set_expand(png);                         /* palette->RGB, sub-8-bit gray->8, tRNS->alpha */
-    if (!(ct & 2)) P.set_gray_to_rgb(png);     /* PNG_COLOR_MASK_COLOR == 2 */
-    P.set_tRNS_to_alpha(png);
-    P.set_filler(png, 0xFF, 1);                /* PNG_FILLER_AFTER: force RGB -> RGBA */
-    P.read_update_info(png, info);
+    png_set_read_fn(png, src, png_cb_read);
+    png_read_info(png, info);
+    unsigned int w = png_get_image_width(png, info), h = png_get_image_height(png, info), y;
+    int bd = png_get_bit_depth(png, info), ct = png_get_color_type(png, info);
+    if (bd == 16) png_set_strip_16(png);
+    png_set_expand(png);                       /* palette->RGB, sub-8-bit gray->8, tRNS->alpha */
+    if (!(ct & 2)) png_set_gray_to_rgb(png);   /* PNG_COLOR_MASK_COLOR == 2 */
+    png_set_tRNS_to_alpha(png);
+    png_set_filler(png, 0xFF, 1);              /* PNG_FILLER_AFTER: force RGB -> RGBA */
+    png_read_update_info(png, info);
     surf = alloc_surface(0, (int)w, (int)h, 32, 0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
     rows = (unsigned char **)malloc((size_t)h * sizeof(unsigned char *));
     for (y = 0; y < h; y++)
         rows[y] = (unsigned char *)surf->pixels + (size_t)y * surf->pitch;
-    P.read_image(png, rows);
+    png_read_image(png, rows);
     { static int log = -1; if (log < 0) log = getenv("FAKESDL_BLIT_LOG") ? 1 : 0;
       if (log) fprintf(stderr, "IMG_Load %ux%u (bd=%d ct=%d) -> RGBA32\n", w, h, bd, ct); }
 done:
     free((void *)rows);
-    { void *pp = png, *ii = info; P.destroy(&pp, &ii, NULL); }
+    { void *pp = png, *ii = info; png_destroy_read_struct(&pp, &ii, NULL); }
     if (freesrc) src->close(src);
     return (SDL_Surface *)surf;
 }

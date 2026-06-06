@@ -177,8 +177,12 @@ static unsigned long now_ms(void) {
 }
 static void shm_init(void) {
     if (g_shm) return;
-    int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (fd < 0) { fprintf(stderr, "fakegles: shm_open failed\n"); return; }
+    /* Open the shm object directly rather than via shm_open(): the device glibc's shm_open
+       statfs-checks /dev/shm and returns an empty path on our fake /proc, so it fails. The engine
+       (DEV_SHMFB) and qemu both intercept open("/dev/shm/gp2x_fb") directly. */
+    char shmpath[64]; snprintf(shmpath, sizeof shmpath, "/dev/shm%s", GP2XSHM_NAME);
+    int fd = open(shmpath, O_CREAT | O_RDWR, 0666);
+    if (fd < 0) { fprintf(stderr, "fakegles: shm open(%s) failed\n", shmpath); return; }
     if (ftruncate(fd, sizeof(gp2x_shm_t)) != 0) { /* may already be sized */ }
     void *p = mmap(NULL, sizeof(gp2x_shm_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
@@ -229,6 +233,7 @@ static GLenum g_atest_func = GL_ALWAYS; static float g_atest_ref = 0;
 static GLenum g_texenv = GL_MODULATE;
 static GLuint g_bound_tex = 0;
 static float  g_clear[4] = { 0, 0, 0, 1 };
+static unsigned long g_n_draw = 0, g_n_clear = 0, g_n_tex = 0, g_n_swap = 0;  /* diag counters */
 
 /* ----------------------------------------------------------- matrix math */
 static void m_identity(float *m) {
@@ -415,6 +420,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     tx->w = w; tx->h = h;
     tx->rgba = (uint32_t *)malloc((size_t)w * h * 4);
     if (!tx->rgba) { tx->w = tx->h = 0; return; }
+    g_n_tex++;
     if (pixels) {
         int i, n = w * h;
         for (i = 0; i < n; i++) tx->rgba[i] = decode_texel((const uint8_t *)pixels, format, type, i);
@@ -443,6 +449,7 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
 
 /* ----------------------------------------------------------- GL: clear */
 void glClear(GLbitfield mask) {
+    g_n_clear++;
     ensure_cbuf();
     if (!(mask & GL_COLOR_BUFFER_BIT) || !g_cbuf) return;
     uint8_t r=(uint8_t)(g_clear[0]*255+0.5f), g=(uint8_t)(g_clear[1]*255+0.5f),
@@ -620,6 +627,7 @@ static void raster_tri(const Vtx *v0, const Vtx *v1, const Vtx *v2) {
     }
 }
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    g_n_draw++;
     ensure_cbuf();
     if (!g_cbuf || count <= 0 || !g_av.enabled) return;
     Vtx *v = (Vtx *)malloc((size_t)count * sizeof(Vtx));
@@ -643,9 +651,16 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 static int g_egl_dpy, g_egl_cfg, g_egl_ctx, g_egl_surf;  /* addresses used as opaque handles */
 static unsigned long g_last_swap_ms = 0;
 
+/* MagicEyes/Pollux native window creation (normally in libDrv). Caanoo titles call it to make
+   the native window handed to eglCreateWindowSurface. We render to the shm framebuffer and ignore
+   the window, so return a non-NULL dummy handle. K&R parens accept whatever args the game passes. */
+void *OS_CreateWindow() { ensure_cbuf(); return (void *)&g_egl_surf; }
+
 EGLDisplay eglGetDisplay(EGLNativeDisplayType d) { (void)d; return (EGLDisplay)&g_egl_dpy; }
 EGLBoolean eglInitialize(EGLDisplay d, EGLint *major, EGLint *minor) {
-    (void)d; shm_init(); if (major)*major=1; if (minor)*minor=1; return EGL_TRUE;
+    (void)d; shm_init(); if (major)*major=1; if (minor)*minor=1;
+    GLOG("eglInitialize\n");
+    return EGL_TRUE;
 }
 EGLBoolean eglTerminate(EGLDisplay d) { (void)d; return EGL_TRUE; }
 EGLBoolean eglChooseConfig(EGLDisplay d, const EGLint *attrib, EGLConfig *configs,
@@ -678,6 +693,7 @@ EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read, EGLCon
     m_identity(g_mv); m_identity(g_proj);
     ensure_cbuf();
     magiceyes_gl_active = 1;
+    GLOG("eglMakeCurrent (GL now owns the framebuffer)\n");
     return EGL_TRUE;
 }
 /* Present the colour buffer to the shm RGB565 framebuffer + frame-cap like SDL_Flip. */
@@ -694,6 +710,11 @@ EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) {
         }
     }
     g_shm->width = g_fbw; g_shm->height = g_fbh; g_shm->frame_seq++;
+    if (gl_log() && (++g_n_swap % 120) == 1) {
+        int nz = 0; for (int i = 0; i < g_fbw * g_fbh; i++) if (g_cbuf[i] & 0x00FFFFFF) { nz = 1; break; }
+        fprintf(stderr, "fakegles: swap #%lu draws=%lu clears=%lu texs=%lu tex_bound=%u en_tex=%d nonblack=%d\n",
+                g_n_swap, g_n_draw, g_n_clear, g_n_tex, g_bound_tex, g_en_tex, nz);
+    }
     /* frame cap (FAKESDL_FPS, default 60) — GP2X eglSwapBuffers blocks on vsync */
     static long frame_ms = -1;
     if (frame_ms < 0) {

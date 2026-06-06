@@ -163,6 +163,15 @@ void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
      st_rdev@32(8) st_size@44(8,packed) st_blksize@52 st_blocks@56(8) st_ino@88(8). */
 void fill_stat64(uint32_t gbuf, struct stat *hs) {
     uint64_t sz = (uint64_t)hs->st_size, blk = (uint64_t)((hs->st_size + 511) / 512);
+    /* Truncate st_ino to 32 bits. The guest's 32-bit fstat() (glibc __fxstat) does the fstat64
+       syscall then converts to `struct stat`, returning EOVERFLOW if the 64-bit st_ino doesn't
+       fit in 32 bits -- and a Windows drive mounted in WSL (drvfs, where assets/ lives) hands
+       back HUGE 64-bit inodes. That EOVERFLOW makes the guest think fstat failed: Caanoo QType4's
+       tt_font_init treats it as "TTF Font File Open Failed" and bails to gp2xmenu. A 32-bit-safe
+       synthetic inode keeps the conversion lossless. */
+    uint32_t ino = (uint32_t)hs->st_ino; if (!ino) ino = 1;
+    if (getenv("ME_STATLOG")) fprintf(stderr, "  STAT64 mode=%07o size=%llu ino=%u blksz=4096 eabi=%d -> buf=%08x\n",
+                                      (unsigned)hs->st_mode, (unsigned long long)sz, ino, g_eabi, gbuf);
     if (g_eabi) {
         /* Mainline ARM **EABI** `struct stat64` -- sizeof **104**, `long long` 8-byte aligned:
            st_dev@0(8) __st_ino@12 st_mode@16 st_nlink@20 st_uid@24 st_gid@28 st_rdev@32(8)
@@ -172,7 +181,7 @@ void fill_stat64(uint32_t gbuf, struct stat *hs) {
            not defined" at relocation. */
         uint8_t b[104]; memset(b, 0, sizeof b);
         *(uint64_t *)(b + 0)  = (uint64_t)hs->st_dev;
-        *(uint32_t *)(b + 12) = (uint32_t)hs->st_ino;
+        *(uint32_t *)(b + 12) = ino;
         *(uint32_t *)(b + 16) = (uint32_t)hs->st_mode;
         *(uint32_t *)(b + 20) = (uint32_t)(hs->st_nlink ? hs->st_nlink : 1);
         *(uint32_t *)(b + 24) = (uint32_t)hs->st_uid;
@@ -181,7 +190,7 @@ void fill_stat64(uint32_t gbuf, struct stat *hs) {
         *(uint64_t *)(b + 48) = sz;                        /* st_size @48 (8-byte aligned) */
         *(uint32_t *)(b + 56) = 4096;                      /* st_blksize @56 */
         *(uint64_t *)(b + 64) = blk;                       /* st_blocks @64 */
-        *(uint64_t *)(b + 96) = (uint64_t)hs->st_ino;      /* 64-bit st_ino @96 */
+        *(uint64_t *)(b + 96) = (uint64_t)ino;             /* 64-bit st_ino @96 (32-bit-safe) */
         uc_mem_write(g_uc, gbuf, b, sizeof b);
         return;
     }
@@ -189,7 +198,7 @@ void fill_stat64(uint32_t gbuf, struct stat *hs) {
        the _IO_file_doallocate proof in the header above; st_size@44, st_blksize@52, st_ino@88. */
     uint8_t b[96]; memset(b, 0, sizeof b);
     *(uint64_t *)(b + 0)  = (uint64_t)hs->st_dev;
-    *(uint32_t *)(b + 12) = (uint32_t)hs->st_ino;          /* legacy 32-bit __st_ino */
+    *(uint32_t *)(b + 12) = ino;                           /* legacy 32-bit __st_ino */
     *(uint32_t *)(b + 16) = (uint32_t)hs->st_mode;
     *(uint32_t *)(b + 20) = (uint32_t)(hs->st_nlink ? hs->st_nlink : 1);
     *(uint32_t *)(b + 24) = (uint32_t)hs->st_uid;
@@ -198,7 +207,7 @@ void fill_stat64(uint32_t gbuf, struct stat *hs) {
     memcpy(b + 44, &sz, 8);                                /* st_size @44 (4-byte aligned) */
     *(uint32_t *)(b + 52) = 4096;                          /* st_blksize @52 */
     *(uint64_t *)(b + 56) = blk;                           /* st_blocks @56 */
-    *(uint64_t *)(b + 88) = (uint64_t)hs->st_ino;          /* 64-bit st_ino @88 */
+    *(uint64_t *)(b + 88) = (uint64_t)ino;                 /* 64-bit st_ino @88 (32-bit-safe) */
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 
@@ -321,8 +330,12 @@ static int sysfile_open(const char *p) {
     if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))
         return memfd_make("2.6.32\n");
     if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab"))
+        /* Include a /dev/shm tmpfs: glibc's shm_open() parses this for the POSIX shm directory;
+           without it __shm_directory() returns "" and shm_open(open '') fails -> the fake-SDL /
+           fake-GLES shims can't map the /dev/shm framebuffer (no rendering). */
         return memfd_make("/dev/root / ext2 rw 0 0\nnone /proc proc rw 0 0\n"
-                          "none /tmp tmpfs rw 0 0\n/dev/mmcsd/disc0/part1 /mnt/sd vfat rw 0 0\n");
+                          "none /tmp tmpfs rw 0 0\nnone /dev/shm tmpfs rw 0 0\n"
+                          "/dev/mmcsd/disc0/part1 /mnt/sd vfat rw 0 0\n");
     if (!strcmp(p, "/etc/localtime"))
         return memfd_make_bin(TZ_UTC, sizeof TZ_UTC);
     return 0;

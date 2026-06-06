@@ -44,11 +44,9 @@ $CC -shared -fPIC -O2 -march=armv5te -marm -mfloat-abi=soft -fno-stack-protector
    --sysroot="$SYS" -B "$SYS/usr/lib/$MA" -L "$SYS/usr/lib/$MA" -L "$SYS/lib/$MA" \
    -nostdinc -I "$SH/inc/SDL" -I "$SH/inc" -I "$REPO/guest/src" \
    -isystem "$GCCINC" -isystem "$SYS/usr/include/$MA" -isystem "$SYS/usr/include" \
-   -Wl,-soname,libSDL-1.2.so.0 -o "$SH/libSDL-1.2.so.0" "$REPO/guest/src/fakesdl.c" -lrt -ldl
-# (dlopen IS used now — IMG_Load decodes PNG via libpng12 dlopen'd at runtime; Wheezy glibc 2.13
-#  provides it in libdl.so.2, which we stage, so __dlopen is fine for THIS EABI rootfs.)
+   -Wl,-soname,libSDL-1.2.so.0 -o "$SH/libSDL-1.2.so.0" "$REPO/guest/src/fakesdl.c" -lrt
 bad=$(readelf -W --dyn-syms "$SH/libSDL-1.2.so.0" | awk '$7=="UND"{print $8}' \
-      | grep -E '__gettimeofday64|__nanosleep64|GLIBC_2\.(1[4-9]|[2-9][0-9])' || true)
+      | grep -E '__gettimeofday64|__nanosleep64|__dlopen|GLIBC_2\.(1[4-9]|[2-9][0-9])' || true)
 [ -z "$bad" ] || { echo "shim has too-new refs: $bad"; exit 1; }
 
 echo "== cross-compile the fake-GLES1.1/EGL software rasterizer (Caanoo GPU emu) =="

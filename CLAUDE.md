@@ -597,17 +597,31 @@ soname the games NEED + empty stubs for the real driver libs (`libMesNativeOEM`/
   UBIFS). `host/win/extract_caanoo_fw.sh` unyaffs it (needs root) → `assets/caanoo-ref/usr/gp2x/`;
   `stage_rootfs_eabi.sh` overlays `assets/caanoo-ref/usr` into the rootfs.
 
-**STATUS — Propis loads fully and runs its whole DGE engine init** (DRM, Display, File, Frame,
-Render, Sound, SurfaceManager, Font: `qt4_workspace_init` + `CreateFont` succeed) headless on the
-Linux engine (`bin/me_unicorn`, verified end-to-end through dynamic load + all libs). **BLOCKED**
-at QType4 `tt_font_init` → `"TTF Font File Open Failed"` then orderly teardown + exit(773).
-This is **NOT** our GPU/rootfs: the font open SUCCEEDS (fd 3 → fstat64 → close) for the genuine
-firmware font (and for a small DejaVu substitute) — QType4 still fails, so it's a QType4-internal
-check (likely a Korean cmap/table or companion resource). **Next: disassemble propis.gpe
-`tt_font_init`** — note the Caanoo CodeSourcery binaries are likely **Thumb** with no mapping
-symbols, so `objdump -d` (ARM) misreads them and the "TTF Font File Open Failed" string xref
-isn't a `.word`/`movw`/`movt` literal; disassemble as Thumb. Rhythmos uses the same DGE/QType4
-(expect the same wall + AVI video after).
+**STATUS — Propis RUNS END-TO-END and renders content** headless on the Linux engine
+(`bin/me_unicorn`): it loads, runs its whole DGE init, reaches its main loop, sets up EGL
+(`eglInitialize`+`eglMakeCurrent`), and presents real (non-black) frames. The chain of fixes that
+got it there (each found by tracing the next failure):
+1. **fstat st_ino overflow** (`syscalls.c fill_stat64`): the guest's 32-bit `fstat()` (glibc
+   `__fxstat`) does the fstat64 syscall then converts to `struct stat`, returning **EOVERFLOW if
+   st_ino doesn't fit in 32 bits** — and the `/mnt/e` drvfs mount hands back HUGE 64-bit inodes.
+   QType4 `tt_font_init` opens the font, `fstat`s it, sees the (EOVERFLOW) failure, and prints
+   "TTF Font File Open Failed". *Truncating st_ino to 32 bits was THE fix* (this was the whole
+   "QType4 font" wall — found via radare2: `tt_font_init` = `fcn.0007c160`, the open fn
+   `fcn.00072164` bails to NULL on the `__fxstat` `bne`). Reusable: any drvfs file hit this.
+2. **`IMG_Load` PNG** in `fakesdl.c` rebound from dlopen to **weak externs** on libpng12 (the
+   dlopen pulled an unresolvable `__dlopen`; Propis already NEEDs libpng12, so weak refs resolve).
+3. **`OS_CreateWindow`** stub in `fakegles.c` (the Pollux native-window fn the title hands to
+   `eglCreateWindowSurface`; we ignore the window → return a dummy).
+4. **shm via direct `open("/dev/shm/gp2x_fb")`** in both shims: the EABI glibc's `shm_open()`
+   statfs-checks /dev/shm and built an empty path on our fake /proc → failed; opening the shm
+   object directly is intercepted by the engine (DEV_SHMFB) / qemu.
+Diagnostics (env `FAKEGLES_LOG`): per-N-frame `swap/draws/clears/texs/nonblack` summary;
+`ME_STATLOG` logs every fstat. **The render is the SDL 2D title/menu; GL (`eglSwapBuffers`/
+`glDrawArrays`) hasn't kicked in yet** — the title likely waits for input (none headless), and the
+interpreter is slow through the loading phase (~1000 frames before content). **Next: run with the
+viewer (`host/viewer`) to SEE the title + feed input → start gameplay (exercises the GLES
+rasterizer).** Rhythmos uses the same DGE/QType4 (the st_ino fix should clear its font wall too;
+then its AVI-video background remains).
 
 **Liar — two binaries.** `Liar_kr.gpe` is a *launcher* (`system()` + `execlp("…/gp2xmenu")`): it
 chain-loads the real game via a shell command (a no-op here), then falls back to gp2xmenu, so it
