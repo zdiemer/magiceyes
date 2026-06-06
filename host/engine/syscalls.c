@@ -7,6 +7,7 @@
 #else
 #define ME_MKDIR(p) mkdir(p, 0777)
 #endif
+#include <dirent.h>   /* portable directory enumeration (Linux + MinGW-w64) for getdents */
 
 /* Host scratch dir for decompressed GPEComp temps + extracted zips (created on first use). */
 void me_host_tmpdir(char *out, size_t cap) {
@@ -278,6 +279,81 @@ static int memfd_make_bin(const void *s, uint32_t len) {
     return -1;
 }
 static int memfd_make(const char *s) { return memfd_make_bin(s, (uint32_t)strlen(s)); }
+
+/* ---- directory handles (getdents) -----------------------------------------
+   A guest open() of a directory becomes a DIRFD: opendir() + a snapshot of all entries (name +
+   type). getdents/getdents64 serve from the snapshot with a cursor (no telldir/seekdir, which
+   MinGW lacks). Used by Caanoo Rhythmos scanning ./package/ for songs. */
+#define DIRFD_BASE 0x30000000
+#define DIRFD_MAX  16
+struct dirhandle { int used, n, pos; char **name; unsigned char *type; };
+static struct dirhandle g_dirf[DIRFD_MAX];
+static struct dirhandle *dirfd_get(int fd) {
+    int i = fd - DIRFD_BASE;
+    return (i >= 0 && i < DIRFD_MAX && g_dirf[i].used) ? &g_dirf[i] : NULL;
+}
+static int dirfd_make(const char *hp) {
+    int slot = -1;
+    for (int i = 0; i < DIRFD_MAX; i++) if (!g_dirf[i].used) { slot = i; break; }
+    if (slot < 0) return -1;
+    DIR *d = opendir(hp); if (!d) return -1;
+    struct dirhandle *h = &g_dirf[slot]; memset(h, 0, sizeof *h);
+    int cap = 0; struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (h->n >= cap) { cap = cap ? cap * 2 : 32;
+            h->name = realloc(h->name, cap * sizeof *h->name);
+            h->type = realloc(h->type, cap * sizeof *h->type); }
+        h->name[h->n] = strdup(de->d_name);
+        unsigned char t = 0;            /* DT_UNKNOWN */
+#ifdef DT_DIR
+        t = de->d_type;
+#endif
+        if (t == 0) {                   /* d_type unavailable: stat the entry */
+            char ep[PATH_MAX]; struct stat es;
+            snprintf(ep, sizeof ep, "%s/%s", hp, de->d_name);
+            if (stat(ep, &es) == 0) t = S_ISDIR(es.st_mode) ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+        }
+        h->type[h->n] = t; h->n++;
+    }
+    closedir(d);
+    h->used = 1; h->pos = 0;
+    return DIRFD_BASE + slot;
+}
+static void dirfd_close(int fd) {
+    struct dirhandle *h = dirfd_get(fd); if (!h) return;
+    for (int i = 0; i < h->n; i++) free(h->name[i]);
+    free(h->name); free(h->type); memset(h, 0, sizeof *h);
+}
+/* pack snapshot entries into the guest buffer; wide=1 -> linux_dirent64, else linux_dirent.
+   returns bytes written (0 = end of directory). */
+static long dir_getdents(int fd, uint32_t gbuf, uint32_t count, int wide) {
+    struct dirhandle *h = dirfd_get(fd); if (!h) return -9 /*EBADF*/;
+    uint32_t off = 0;
+    while (h->pos < h->n) {
+        const char *nm = h->name[h->pos]; int nlen = (int)strlen(nm);
+        int reclen = wide ? ((19 + nlen + 1 + 7) & ~7)     /* d64: ino8 off8 reclen2 type1 name.. */
+                          : ((10 + nlen + 1 + 1 + 3) & ~3); /* d:   ino4 off4 reclen2 name.. pad type@end */
+        if (off + (uint32_t)reclen > count) break;          /* full: leave for the next call */
+        uint8_t rec[320]; if (reclen > (int)sizeof rec) { h->pos++; continue; }
+        memset(rec, 0, reclen);
+        if (wide) {
+            *(uint64_t *)(rec + 0)  = (uint64_t)(h->pos + 1);   /* d_ino */
+            *(uint64_t *)(rec + 8)  = (uint64_t)(off + reclen); /* d_off */
+            *(uint16_t *)(rec + 16) = (uint16_t)reclen;
+            rec[18] = h->type[h->pos];                          /* d_type */
+            memcpy(rec + 19, nm, nlen + 1);
+        } else {
+            *(uint32_t *)(rec + 0) = (uint32_t)(h->pos + 1);    /* d_ino */
+            *(uint32_t *)(rec + 4) = (uint32_t)(off + reclen);  /* d_off */
+            *(uint16_t *)(rec + 8) = (uint16_t)reclen;
+            memcpy(rec + 10, nm, nlen + 1);
+            rec[reclen - 1] = h->type[h->pos];                  /* d_type at record end */
+        }
+        uc_mem_write(g_uc, gbuf + off, rec, reclen);
+        off += reclen; h->pos++;
+    }
+    return (long)off;
+}
 
 /* Track the real host fds we hand back to the guest from open()/openat(). The guest closes
    most of them, but a game that exits/reloads mid-load leaks the rest; over many hot reloads
@@ -576,6 +652,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 314:  return 0;        /* sync_file_range */
     case 55:                    /* fcntl  (F_GETFL/F_SETFL/F_SETFD on device/normal fds) */
     case 221:  return 0;        /* fcntl64 — accept (we don't honour O_NONBLOCK; harmless here) */
+    case 141:  return dir_getdents((int)a0, a1, a2, 0);  /* getdents   (linux_dirent)   */
+    case 217:  return dir_getdents((int)a0, a1, a2, 1);  /* getdents64 (linux_dirent64) */
     case 156:  return 0;        /* sched_setscheduler (GP2X games bump their audio thread's prio) */
     case 12: {  /* chdir(path) -- some games cd before opening assets (Blazar) */
         char p[1024]; read_cstr(a0, p, sizeof p);
@@ -624,6 +702,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         { int mf = sysfile_open(p); if (mf) { if (g_trace) fprintf(stderr, "  [fake %s]\n", p);
                                               return mf; } }
         char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        /* Directory -> a DIRFD (portable opendir; a host open() of a dir works on Linux but not
+           on MinGW, and we serve getdents from it). */
+        { struct stat ds; if (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode)) {
+              int dfd = dirfd_make(hp);
+              if (g_trace) fprintf(stderr, "  open dir '%s' -> %d\n", p, dfd);
+              if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
         if (getenv("ME_OPENLOG")) { char b[1100]; snprintf(b, sizeof b,
             "OPEN '%s' flags=%x -> %ld%s\n", p, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
@@ -643,18 +727,23 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         int d = dev_open(p); if (d >= 0) return d;
         int mf = sysfile_open(p); if (mf) return mf;
         char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        { struct stat ds; if (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode)) {
+              int dfd = dirfd_make(hp); if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a2), a3);
         if (r >= 0) { hostfd_track((int)r, path_ino(hp)); return r; }
         return LERR(errno);
     }
     case 6:    /* close */
         if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W || (int)a0 == FAKESOCK_FD) return 0;
+        if (dirfd_get((int)a0)) { dirfd_close((int)a0); return 0; }
         { struct memfile *mf = memfd_get((int)a0);
           if (mf) { free(mf->data); mf->used = 0; mf->data = NULL; return 0; } }
         if (dev_type((int)a0)) { dev_close((int)a0); return 0; }  /* free the device slot */
         hostfd_untrack((int)a0);
         return close((int)a0) < 0 ? LERR(errno) : 0;
     case 19: { /* lseek */
+        struct dirhandle *dh = dirfd_get((int)a0);
+        if (dh) { if ((int)a2 == 0 && a1 == 0) dh->pos = 0; return 0; }   /* rewinddir */
         struct memfile *mf = memfd_get((int)a0);
         if (mf) { uint32_t base = ((int)a2 == 1) ? mf->pos : ((int)a2 == 2) ? mf->len : 0;
                   mf->pos = base + a1; if (mf->pos > mf->len) mf->pos = mf->len; return mf->pos; }
@@ -883,6 +972,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 195: case 196: case 197: { /* stat64 / lstat64 / fstat64 */
         struct stat s; int ok; char p[1024] = {0};
         if (nr == 197) {
+            if (dirfd_get((int)a0)) { struct stat ds; memset(&ds, 0, sizeof ds);
+                ds.st_mode = S_IFDIR | 0755; ds.st_ino = 2; fill_stat64(a1, &ds); return 0; }
             struct memfile *mf = memfd_get((int)a0);
             if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
                       ms.st_size = mf->len; fill_stat64(a1, &ms); return 0; }
