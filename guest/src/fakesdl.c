@@ -480,11 +480,62 @@ static void push_event(const SDL_Event *e) {
     if (nt == g_evq_head) return; /* full */
     g_evq[g_evq_tail] = *e; g_evq_tail = nt;
 }
+
+/* ---- per-device joystick mapping --------------------------------------------
+   GP2X + Wiz games see the GP2X 19-"button" layout (gp2xshm.h order, button index == shm bit;
+   the d-pad is buttons 0..7). The default. CAANOO games are built against the Caanoo SDL, which
+   reports the analog stick as AXES 0/1 and the face buttons in the Caanoo NATIVE order
+   (A,X,B,Y,L,R,START,HOLD,I,II,TAT == joystick buttons 0..10) -- so feeding them the GP2X order
+   makes the d-pad register as face buttons (the reported symptom). Select Caanoo with
+   MAGICEYES_DEVICE=caanoo. TODO: separate GP2X/Wiz/Caanoo profiles + user-remappable bindings. */
+static int joymap_caanoo(void) {
+    static int v = -1;
+    if (v < 0) { const char *d = getenv("MAGICEYES_DEVICE"); v = (d && !strcmp(d, "caanoo")) ? 1 : 0; }
+    return v;
+}
+/* Caanoo SDL joystick button index -> our shm button bit (gp2xshm.h). */
+static const int g_caanoo_btn[] = {
+    GP2X_A, GP2X_X, GP2X_B, GP2X_Y, GP2X_L, GP2X_R,
+    GP2X_START, GP2X_SELECT, GP2X_VOLUP, GP2X_VOLDOWN, GP2X_CLICK
+};
+#define CAANOO_NBTN ((int)(sizeof g_caanoo_btn / sizeof g_caanoo_btn[0]))
+/* the analog stick, derived from the d-pad bits (axis 0 = X: left/right, axis 1 = Y: up/down) */
+static Sint16 caanoo_axis(int axis) {
+    if (!g_shm) return 0;
+    unsigned b = g_shm->buttons;
+    if (axis == 0) return (b & (1u << GP2X_RIGHT)) ? 32767 : (b & (1u << GP2X_LEFT)) ? -32768 : 0;
+    if (axis == 1) return (b & (1u << GP2X_DOWN))  ? 32767 : (b & (1u << GP2X_UP))   ? -32768 : 0;
+    return 0;
+}
+
 static void pump(void) {
     if (!g_shm) return;
     if (g_shm->quit) { SDL_Event e; memset(&e, 0, sizeof(e)); e.type = SDL_QUIT; push_event(&e); }
     unsigned int b = g_shm->buttons, changed = b ^ g_prev_buttons, i;
-    for (i = 0; i < GP2X_NBUTTONS; i++) {
+    if (joymap_caanoo()) {
+        /* analog-stick motion events from the d-pad bits */
+        static Sint16 ax = 0, ay = 0;
+        Sint16 nx = caanoo_axis(0), ny = caanoo_axis(1);
+        if (nx != ax) { SDL_Event e; memset(&e,0,sizeof e); e.type=SDL_JOYAXISMOTION;
+                        e.jaxis.which=0; e.jaxis.axis=0; e.jaxis.value=nx; push_event(&e); ax=nx; }
+        if (ny != ay) { SDL_Event e; memset(&e,0,sizeof e); e.type=SDL_JOYAXISMOTION;
+                        e.jaxis.which=0; e.jaxis.axis=1; e.jaxis.value=ny; push_event(&e); ay=ny; }
+        /* face buttons in the Caanoo native order (button index i -> shm bit g_caanoo_btn[i]) */
+        for (i = 0; i < (unsigned)CAANOO_NBTN; i++) {
+            int bit = g_caanoo_btn[i];
+            if (changed & (1u << bit)) {
+                SDL_Event e; memset(&e, 0, sizeof(e));
+                int down = (b >> bit) & 1;
+                e.type = down ? SDL_JOYBUTTONDOWN : SDL_JOYBUTTONUP;
+                e.jbutton.which = 0; e.jbutton.button = (Uint8)i;
+                e.jbutton.state = (Uint8)(down ? SDL_PRESSED : SDL_RELEASED);
+                push_event(&e);
+            }
+        }
+        g_prev_buttons = b;
+        return;
+    }
+    for (i = 0; i < GP2X_NBUTTONS; i++) {       /* default GP2X/Wiz: button index == shm bit */
         if (changed & (1u << i)) {
             SDL_Event e; memset(&e, 0, sizeof(e));
             int down = (b >> i) & 1;
@@ -517,10 +568,14 @@ SDLMod SDL_GetModState(void) { return KMOD_NONE; }
 static int g_dummy_joy;
 int SDL_NumJoysticks(void) { return 1; }
 const char *SDL_JoystickName(int i) { (void)i; return "gp2x-buttons"; }
-SDL_Joystick *SDL_JoystickOpen(int i) { (void)i; return (SDL_Joystick *)&g_dummy_joy; }
+SDL_Joystick *SDL_JoystickOpen(int i) {
+    (void)i;
+    fprintf(stderr, "fakesdl: joystick opened, map=%s\n", joymap_caanoo() ? "caanoo" : "gp2x");
+    return (SDL_Joystick *)&g_dummy_joy;
+}
 void SDL_JoystickClose(SDL_Joystick *j) { (void)j; }
 int SDL_JoystickIndex(SDL_Joystick *j) { (void)j; return 0; }
-int SDL_JoystickNumButtons(SDL_Joystick *j) { (void)j; return GP2X_NBUTTONS; }
+int SDL_JoystickNumButtons(SDL_Joystick *j) { (void)j; return joymap_caanoo() ? CAANOO_NBTN : GP2X_NBUTTONS; }
 int SDL_JoystickNumAxes(SDL_Joystick *j) { (void)j; return 2; }
 int SDL_JoystickNumHats(SDL_Joystick *j) { (void)j; return 0; }
 int SDL_JoystickNumBalls(SDL_Joystick *j) { (void)j; return 0; }
@@ -528,10 +583,26 @@ void SDL_JoystickUpdate(void) { pump(); }
 int SDL_JoystickOpened(int i) { (void)i; return 1; }
 Uint8 SDL_JoystickGetButton(SDL_Joystick *j, int btn) {
     (void)j;
-    if (!g_shm || btn < 0 || btn >= GP2X_NBUTTONS) return 0;
+    { static int log = -1, seen[64] = {0};
+      if (log < 0) log = getenv("FAKESDL_JOYLOG") ? 1 : 0;
+      if (log && btn >= 0 && btn < 64 && !seen[btn]) { seen[btn] = 1;
+        fprintf(stderr, "JOY GetButton(%d) polled\n", btn); } }
+    if (!g_shm) return 0;
+    if (joymap_caanoo()) {
+        if (btn < 0 || btn >= CAANOO_NBTN) return 0;
+        return (Uint8)((g_shm->buttons >> g_caanoo_btn[btn]) & 1);
+    }
+    if (btn < 0 || btn >= GP2X_NBUTTONS) return 0;
     return (Uint8)((g_shm->buttons >> btn) & 1);
 }
-Sint16 SDL_JoystickGetAxis(SDL_Joystick *j, int axis) { (void)j; (void)axis; return 0; }
+Sint16 SDL_JoystickGetAxis(SDL_Joystick *j, int axis) {
+    (void)j;
+    { static int log = -1, seen[8] = {0};
+      if (log < 0) log = getenv("FAKESDL_JOYLOG") ? 1 : 0;
+      if (log && axis >= 0 && axis < 8 && !seen[axis]) { seen[axis] = 1;
+        fprintf(stderr, "JOY GetAxis(%d) polled\n", axis); } }
+    return joymap_caanoo() ? caanoo_axis(axis) : 0;
+}
 Uint8 SDL_JoystickGetHat(SDL_Joystick *j, int hat) { (void)j; (void)hat; return 0; }
 
 /* ----------------------------------------------- GP2X/Wiz SDL extensions

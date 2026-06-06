@@ -350,6 +350,15 @@ GP2X-specific libs (`libmedia`, etc.) come from the F100/F200 firmware patch tar
   likely unsupported (flag per-title).
 - **Caanoo** (Pollux, like Wiz): once the shim handles Pollux too, mostly mirrors Wiz
   + its own rootfs/button map (analog stick).
+  - **Per-device input bindings + remapping** (TODO): GP2X, Wiz, and Caanoo have different
+    controller layouts and the shim now switches joystick maps by device (GP2X/Wiz = the GP2X
+    19-button order; Caanoo = analog-stick axes + native button order A,X,B,Y,L,R,START,HOLD,I,
+    II,TAT), selected by `MAGICEYES_DEVICE` (auto-detected for Caanoo GLES titles via their
+    Pollux sonames in `host/engine/elf.c`; set it explicitly for non-GLES Caanoo titles like
+    Liar). Still wanted: proper per-device profiles (a real device enum, not just a joystick-map
+    bool) covering button names + the viewer key/gamepad bindings, and **user-remappable**
+    bindings (a config file / in-app remap UI). The shim map lives in `guest/src/fakesdl.c`
+    (`joymap_caanoo`, `g_caanoo_btn`, `caanoo_axis`).
   - **Touchscreen via the viewer** (TODO): Caanoo has a resistive touchscreen (tslib /
     `libts-0.0.so.0`; titles also read `/dev/input/event`). Map native viewer mouse
     clicks/drags to touch — feed x/y + pressed through shm (new fields), expose via a fake

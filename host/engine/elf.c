@@ -90,6 +90,8 @@ static uint32_t load_interp(const char *guest_interp) {
 /* ---- ELF loader (static EXEC or dynamic ET_EXEC w/ PT_INTERP) ---- */
 /* Returns the entry PC (the interpreter's, for a dynamic binary), or 0 on a recoverable
    failure (bad path/format) so the caller can go idle instead of killing the GUI process. */
+int g_caanoo_dev = 0;   /* set in load_elf: binary links Pollux/Caanoo GLES libs -> Caanoo device */
+
 uint32_t load_elf(const char *path) {
     long sz; uint8_t *buf = slurp(path, &sz);
     if (!buf) return 0;
@@ -104,6 +106,16 @@ uint32_t load_elf(const char *path) {
     for (int i = 0; i < eh->e_phnum; i++)
         if (ph[i].p_type == PT_INTERP && ph[i].p_filesz < sizeof interp)
             memcpy(interp, buf + ph[i].p_offset, ph[i].p_filesz);
+
+    /* Caanoo auto-detect (for the shim's per-device joystick map): Caanoo .gpe link Pollux
+       GLES/MES/media libs that no Wiz/GP2X title uses. Zero false positives on Wiz; titles
+       without these (e.g. Liar) need MAGICEYES_DEVICE=caanoo set explicitly. TODO: full
+       per-device profiles + remappable bindings (the user-flagged TODO). */
+    g_caanoo_dev = 0;
+    { static const char *sig[] = { "libopengles_lite", "libGLESv1_CM", "libOpenEGL", "libglport",
+          "libMesNativeOEM", "libDrv.so", "libmedia.so", "librec.so", "libunicodefont" };
+      for (unsigned k = 0; k < sizeof sig / sizeof sig[0]; k++)
+          if (memmem(buf, sz, sig[k], strlen(sig[k]))) { g_caanoo_dev = 1; break; } }
 
     /* The program loads at its fixed vaddrs (ET_EXEC, bias 0). PIE (ET_DYN main) isn't a GP2X
        case, so we don't relocate the main image. */
@@ -152,6 +164,13 @@ uint32_t setup_stack(int argc, char **argv) {
         envs[nenv++] = "HOME=/tmp";
         const char *f = getenv("ME_GP2X_FPS");
         snprintf(envbuf[nenv], sizeof envbuf[0], "FAKESDL_FPS=%s", f ? f : "60"); envs[nenv] = envbuf[nenv]; nenv++;
+        /* device profile for the shim's per-device joystick map (GP2X/Wiz default vs Caanoo's
+           analog-stick-axes + native button order). Explicit MAGICEYES_DEVICE wins; else use the
+           auto-detected device (g_caanoo_dev from the binary's sonames in load_elf). */
+        const char *dev = getenv("MAGICEYES_DEVICE");
+        if (!dev && g_caanoo_dev) dev = "caanoo";
+        if (dev && nenv < 11) { snprintf(envbuf[nenv], sizeof envbuf[0], "MAGICEYES_DEVICE=%s", dev);
+                                envs[nenv] = envbuf[nenv]; nenv++; }
         /* Forward shim debug toggles from the host env (the guest getenv reads only the envp we
            build here, not the host environment): ME_FAKESDL_FOO -> FAKESDL_FOO in the guest. */
         static const char *fwd[] = { "FAKESDL_BLIT_LOG", "FAKESDL_PRESENT_LOG", "FAKESDL_NO_COLORKEY",
