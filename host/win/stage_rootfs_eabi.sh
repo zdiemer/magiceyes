@@ -90,9 +90,14 @@ G=$(ls libSDL_gfx.so.13* 2>/dev/null | head -1); [ -n "${G:-}" ] && cp -f "$G" l
 echo "== fake-SDL shim + empty soname stubs (titles NEED these only to LOAD) =="
 for n in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do cp -f "$SH/libSDL-1.2.so.0" "$DST/lib/$n"; done
 echo '' > "$W/empty.c"
-for s in libSDL_image-1.2.so.0 libSDL_ttf-2.0.so.0 libjpeg.so.7 libvorbisidec.so.1; do
+for s in libSDL_ttf-2.0.so.0 libjpeg.so.7 libvorbisidec.so.1; do
   $CC -shared -nostdlib -march=armv5te -marm -Wl,-soname,$s -o "$DST/lib/$s" "$W/empty.c"
 done
+# libSDL_image stub: our fakesdl shim provides IMG_Load (decoding PNG via libpng12's weak-bound
+# entrypoints). Give this stub a DT_NEEDED on libpng12 so a title that uses IMG_Load but doesn't
+# link libpng itself (Liar) still pulls libpng into the process -> the weak refs resolve.
+$CC -shared -nostdlib -march=armv5te -marm -Wl,-soname,libSDL_image-1.2.so.0 \
+    -Wl,--no-as-needed -o "$DST/lib/libSDL_image-1.2.so.0" "$W/empty.c" "$DST/lib/libpng12.so.0"
 
 echo "== fake-GLES shim under every Caanoo GL/EGL soname + Pollux driver stubs =="
 # Our rasterizer exports the full gl*/egl* set; install it under each soname the games NEED

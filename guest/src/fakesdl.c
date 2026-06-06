@@ -1010,6 +1010,19 @@ static void png_cb_warn(void *png, const char *msg) { (void)png; (void)msg; }
 
 SDL_Surface *IMG_Load_RW(SDL_RWops *src, int freesrc) {
     if (!src) return NULL;
+    /* Dispatch by magic: BMP ("BM") -> our SDL_LoadBMP_RW; PNG -> libpng below. Caanoo titles
+       vary: Propis ships PNG, Liar ships BMP (its liar.dat holds char/0.bmp ...). */
+    int start = src->seek(src, 0, RW_SEEK_CUR);
+    unsigned char magic[8] = {0};
+    int got = src->read(src, magic, 1, 8);
+    src->seek(src, start, RW_SEEK_SET);
+    if (got >= 2 && magic[0] == 'B' && magic[1] == 'M')
+        return SDL_LoadBMP_RW(src, freesrc);
+    if (!(got >= 4 && magic[0] == 0x89 && magic[1] == 'P' && magic[2] == 'N' && magic[3] == 'G')) {
+        fprintf(stderr, "fakesdl: IMG_Load: unsupported image (magic %02x %02x %02x %02x)\n",
+                magic[0], magic[1], magic[2], magic[3]);
+        if (freesrc) src->close(src); return NULL;
+    }
     if (!png_create_read_struct) {             /* libpng not in the process (weak -> NULL) */
         fprintf(stderr, "fakesdl: IMG_Load: libpng12 not available\n");
         if (freesrc) src->close(src); return NULL;
