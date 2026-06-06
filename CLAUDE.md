@@ -634,10 +634,16 @@ is fork(), not a thread** (`syscalls.c` case 120): glibc fork() = `clone(SIGCHLD
 CHILD_CLEARTID, stack=0)`; spawning a memory-sharing host thread gave the child sp=0 → instant
 null-deref. Now it takes the parent branch like fork(2) (child = system()/sh no-op);
 `ME_GP2X_CLONEFORK_CHILD` forces the child branch (honours CHILD_SETTID for glibc's
-`self->tid != ppid` assert). **OPEN: `Liarno_kr.gpe` crashes very early** — a tight memcpy/memset
-loop (one PC in libc) walking unmapped pages (src ~0x5f4d5000++, dst just above sp ~0x1b9fb000++),
-i.e. a huge copy from a garbage pointer, before any asset open. Next: identify the bad
-length/pointer source (candidate: an NED_*/read returning an unexpected value, or a missing mmap).
+`self->tid != ppid` assert). **OPEN: `Liarno_kr.gpe` crashes very early** — RESOLVED. `Liarno_kr.gpe` now RENDERS (~30% non-black, like Propis): the early memcpy crash was the
+st_ino-overflow fstat bug (fixed below), and IMG_Load needed BMP support (Liar's `liar.dat` holds
+`char/0.bmp ...`, not PNG). `IMG_Load_RW` now dispatches by magic (BMP->SDL_LoadBMP_RW, PNG->libpng)
+and the libSDL_image stub carries a DT_NEEDED on libpng12 so titles using IMG_Load without linking
+libpng pull it in.
+
+**Rhythmos** is much further too (the st_ino fix cleared its QType4 font wall: DGE_Display
+eglInitialize/eglMakeCurrent OK), but crashes on UNIMPLEMENTED syscall 141 (getdents) scanning its
+song directory. Next for Rhythmos: getdents/getdents64, then its AVI-video background
+(`rhythmos.bin`, decoded via libmedia/librec).
 
 Test harness: run headless via `bin/me_unicorn ./game.gpe` from the game dir with
 `ME_TRACE=1 FAKEGLES_LOG=1 FAKESDL_BLIT_LOG=1`. (F: is `/mnt/f` in WSL; build/run via
