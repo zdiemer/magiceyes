@@ -22,6 +22,16 @@ Pollux in the Wiz/Caanoo).
   </tr>
 </table>
 
+## Motivation
+
+I'm a software developer with no experience in reverse engineering and an interest in
+obscure gaming hardware. The GP2X, GP2X Wiz, and GP2X Caanoo are three systems that I
+doubted would ever receive emulator coverage. I decided to try and proof-of-concept these
+platforms almost entirely driven by AI coding tools.
+
+This emulator is not intended to be robust, but it is intended to help preserve a very
+obscure part of gaming history.
+
 ## Download & run (Windows)
 
 1. Download the latest `magiceyes-<version>-win64.zip` from the
@@ -71,7 +81,7 @@ exercised. Highlights of what runs today:
 | GP2X | **Blazar**, **Quartz 2**, **Vektar** | ✅ Render + play with audio/input |
 | GP2X | **Knight Lore** | ✅ Plays (MIDI music needs a `timidity.cfg` you supply) |
 | GP2X | **Odonata**, **Wind & Water** | ⚠️ Render/run; need a device rootfs (dynamically linked) |
-| Wiz | **Deicide 3** (commercial, Inka DRM) | ✅ Video, audio, input, timing |
+| Wiz | **Deicide 3** (commercial, Inka DRM) | ⚠️ Intro only |
 | Wiz | **Cave Story / NXEngine** | ✅ Full |
 | Wiz | **Her Knights**, **Patissier** | ⚠️ Boot to render + audio (Her Knights BGM imperfect) |
 
