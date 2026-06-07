@@ -27,7 +27,8 @@
 /* engine entry points (plain C signatures -- avoid including engine.h / unicorn here) */
 const char *resolve_input(const char *in, char *out, size_t cap);
 int  classify_elf(const char *path);
-int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* dynamic title -> rootfs? */
+int  read_elf_interp(const char *path, char *out, size_t cap);     /* dynamic title's PT_INTERP */
+int  me_rootfs_select(const char *interp);                         /* pick the matching device rootfs */
 void engine_request_reload(const char *host_path);
 #define ME_WINMENU 1
 #endif
@@ -248,10 +249,14 @@ static void start_game(const char *path) {
     if (!r) { MessageBoxA(NULL, "No .gpe found, or the folder/zip is ambiguous.\nSee the console for details.",
                           "magiceyes", MB_ICONERROR); return; }
     int c = classify_elf(r);
-    if (c == 1) {   /* dynamically-linked title (Odonata, Wind & Water, RetroVirus): runnable as
-                       long as the device rootfs is present (load_elf loads the guest ld.so). */
-        char probe[MAX_PATH];
-        if (!me_rootfs_resolve("/lib/ld-linux.so.2", probe, sizeof probe)) {
+    if (c == 1) {   /* dynamically-linked title (Odonata, Wind & Water, Caanoo GLES, Wiz...): pick the
+                       rootfs whose linker it actually needs -- ld-linux.so.2 (firmware glibc) vs .so.3
+                       (EABI). Mirrors the CLI; a hardcoded .so.2 probe wrongly bailed on EABI titles
+                       (and on any setup where the default rootfs is the EABI one). load_elf re-selects. */
+        char interp[256];
+        if (!read_elf_interp(r, interp, sizeof interp))
+            snprintf(interp, sizeof interp, "/lib/ld-linux.so.2");
+        if (!me_rootfs_select(interp)) {
             MessageBoxA(NULL, "That title is dynamically linked and needs the device rootfs.\n"
                               "Set ME_GP2X_ROOTFS to a dereferenced rootfs (host/win/stage_rootfs.sh),\n"
                               "or place one at <exe>\\rootfs.", "magiceyes", MB_ICONWARNING);
