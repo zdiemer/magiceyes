@@ -39,19 +39,35 @@
 #define GL_NOTEQUAL 0x0205
 #define GL_GEQUAL 0x0206
 
-static uint32_t *g_glcbuf = NULL;     /* native RGBA8888 colour buffer */
+/* Double-buffered colour buffers. GLES titles (e.g. Propis dialogue) render content into the
+   back buffer across ALTERNATING frames and rely on eglSwapBuffers' two-buffer persistence:
+   they draw the text into one buffer and the scene into the other, then stop drawing and just
+   swap. A single shared buffer loses the text (a later text-less frame overwrites it). So we
+   keep two buffers and flip on present, matching real EGL double buffering.
+   ME_GL_SINGLEBUF forces the old single-buffer behaviour. */
+static uint32_t *g_buf[2] = { NULL, NULL };
+static int g_back = 0;                 /* index the game is currently drawing into */
+static uint32_t *g_glcbuf = NULL;      /* == g_buf[g_back] (what the draw code writes) */
 static int g_glw = 320, g_glh = 240;
 static int glr_log(void) { static int v = -1; if (v < 0) v = getenv("ME_GLR_LOG") ? 1 : 0; return v; }
+static int gl_singlebuf(void) { static int v = -1; if (v < 0) v = getenv("ME_GL_SINGLEBUF") ? 1 : 0; return v; }
 
+static void alloc_bufs(void) {
+    size_t n = (size_t)g_glw * g_glh;
+    g_buf[0] = calloc(n, 4);
+    g_buf[1] = gl_singlebuf() ? g_buf[0] : calloc(n, 4);
+    g_back = 0; g_glcbuf = g_buf[0];
+}
 void glr_resize(int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (w > GP2XSHM_MAXW) w = GP2XSHM_MAXW;
     if (h > GP2XSHM_MAXH) h = GP2XSHM_MAXH;
     if (w == g_glw && h == g_glh && g_glcbuf) return;
     g_glw = w; g_glh = h;
-    free(g_glcbuf); g_glcbuf = calloc((size_t)g_glw * g_glh, 4);
+    free(g_buf[0]); if (g_buf[1] != g_buf[0]) free(g_buf[1]);
+    g_buf[0] = g_buf[1] = NULL; alloc_bufs();
 }
-static void ensure_cbuf(void) { if (!g_glcbuf) g_glcbuf = calloc((size_t)g_glw * g_glh, 4); }
+static void ensure_cbuf(void) { if (!g_glcbuf) alloc_bufs(); }
 
 void glr_clear(uint32_t packed) {
     ensure_cbuf(); if (!g_glcbuf) return;
@@ -70,6 +86,7 @@ void glr_present(void) {
             dst[(size_t)y * GP2XSHM_MAXW + x] = (uint16_t)(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3));
         }
     g_shm->width = g_glw; g_shm->height = g_glh; g_shm->frame_seq++;
+    if (!gl_singlebuf()) { g_back ^= 1; g_glcbuf = g_buf[g_back]; }  /* flip: next frame draws the other buffer */
     if (glr_log()) { static unsigned f=0; unsigned step = getenv("ME_GLR_EVERYFRAME")?1:60;
         if ((f++ % step)==0) {
         int nz=0,n=g_glw*g_glh; for(int i=0;i<n;i++) if(g_glcbuf[i]&0x00FFFFFF){nz++;}
@@ -272,25 +289,38 @@ void glr_draw(uint32_t desc_ptr) {
     }
     int count = (int)d->count, first = (int)d->first;
     if (count > 100000) return;
+    { static uint32_t skip = 0xffffffff; if (skip==0xffffffff){ const char*e=getenv("ME_GL_SKIPTEX"); skip=e?(uint32_t)strtoul(e,0,16):0; }
+      if (skip && d->tex_rgba==skip) return; }   /* diagnostic: drop draws of a given texture */
     Vtx *v = malloc((size_t)count * sizeof(Vtx)); if (!v) return;
     for (int i = 0; i < count; i++) fetch(d, first + i, &v[i]);
     /* Per-draw trace: arm once a glyph run (count>6) is seen, then log EVERY draw in order so we
        can see whether the opaque dialogue box overdraws the text, and where the text lands. */
     if (glr_log()) {
-        static int armed = 0, logged = 0;
-        if (count > 6) armed = 1;
-        if (armed && logged < 160) {
+        static int armed = 0, logged = 0, cap = -1;
+        if (cap < 0) cap = getenv("ME_GLR_ALLDRAWS") ? 100000 : 160;
+        if (count > 6 || getenv("ME_GLR_ALLDRAWS")) armed = 1;
+        if (armed && logged < cap) {
             logged++;
             float minx=v[0].x,maxx=v[0].x,miny=v[0].y,maxy=v[0].y;
             for (int i=1;i<count;i++){ if(v[i].x<minx)minx=v[i].x; if(v[i].x>maxx)maxx=v[i].x;
                                        if(v[i].y<miny)miny=v[i].y; if(v[i].y>maxy)maxy=v[i].y; }
             uint32_t gtex=0; if(tx){int tot=d->tex_w*d->tex_h; for(int i=0;i<tot;i++) if(tx[i]&0xFF000000){gtex=tx[i];break;}}
+            if (count >= 12 && getenv("ME_GLR_VERTS")) {   /* per-glyph screen positions (scattered vs in-box?) */
+                fprintf(DIAG, "   verts:"); for (int i=0;i<count && i<24;i++) fprintf(DIAG," (%.0f,%.0f,uv%.2f,%.2f)",v[i].x,v[i].y,v[i].u,v[i].v);
+                fprintf(DIAG, "\n");
+            }
             fprintf(DIAG, "D mode=%u cnt=%u tex=%08x %dx%d bbox=[%.0f,%.0f %.0f,%.0f] entex=%d texenv=%x "
                     "blend=%d(%x,%x) atest=%d(%x,%.2f) col=(%.2f,%.2f,%.2f,%.2f) glyph=%08x\n",
                     d->mode, count, d->tex_rgba, d->tex_w, d->tex_h, minx, miny, maxx, maxy,
                     d->en_tex, d->texenv, d->en_blend, d->blend_s, d->blend_d,
                     d->en_atest, d->atest_func, d->atest_ref, v[0].r, v[0].g, v[0].b, v[0].a, gtex);
         }
+    }
+    if (tx && count >= 30 && getenv("ME_GL_DUMPATLAS")) {   /* dump the font atlas once for inspection */
+        static int done = 0; if (!done) { done = 1;
+            FILE *af = fopen(getenv("ME_GL_DUMPATLAS"), "wb");
+            if (af) { fprintf(af, "%d %d\n", d->tex_w, d->tex_h);
+                      fwrite(tx, 4, (size_t)d->tex_w * d->tex_h, af); fclose(af); } }
     }
     long frags0 = g_glr_frags;
     int handled_quad = fast_quad(d, tx, v, count);
