@@ -283,6 +283,9 @@ static uint32_t engine_reset_and_load(const char *path) {
 }
 
 int main(int argc, char **argv) {
+    const char *logf = getenv("ME_LOGFILE");   /* redirect diagnostics to a file -- the only way to
+                                                  see logs from the -mwindows bundle (no console) */
+    if (logf && *logf) freopen(logf, "w", stderr);
     setvbuf(stderr, NULL, _IONBF, 0);   /* diagnostics must survive a kill (msvcrt fully buffers
                                            a redirected stderr otherwise -> lost logs on Windows) */
     me_platform_init();   /* Windows: 1ms timer + opt out of EcoQoS throttling (else a backgrounded
