@@ -6,6 +6,7 @@
 #include "fwstage.h"
 #include "extract/miniz.h"
 #include "extract/untar.h"
+#include "extract/yaffs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,8 +91,9 @@ static int write_file(const char *path, const unsigned char *data, size_t n) {
     fclose(f); return ok ? 0 : -1;
 }
 
-/* ---- collected tar entries (data points into the live tar buffer) ---------- */
-struct ent { int type; char *path; char *link; const unsigned char *data; size_t size; };
+/* ---- collected entries (own their data: yaffs reassembles into transient buffers, tar points
+   into the tar image -- copying lets us free the source buffers + treat both uniformly) ------- */
+struct ent { int type; char *path; char *link; unsigned char *data; size_t size; };
 struct collect { struct ent *e; int n, cap; int err; };
 
 static int collect_cb(void *ud, const char *path, int type, const char *link,
@@ -107,8 +109,14 @@ static int collect_cb(void *ud, const char *path, int type, const char *link,
     }
     struct ent *e = &c->e[c->n++];
     e->type = type; e->path = strdup(np); e->link = strdup(link ? link : "");
-    e->data = data; e->size = size;
+    e->size = size;
+    e->data = size ? malloc(size) : NULL;
+    if (size && e->data) memcpy(e->data, data, size);
     return 0;
+}
+static void collect_free(struct collect *c) {
+    for (int i = 0; i < c->n; i++) { free(c->e[i].path); free(c->e[i].link); free(c->e[i].data); }
+    free(c->e); c->e = NULL; c->n = c->cap = 0;
 }
 
 static int find_ent(struct collect *c, const char *norm) {
@@ -185,38 +193,31 @@ int fw_detect(const char *file, fw_info *out) {
 }
 
 /* ---- staging --------------------------------------------------------------- */
-static int stage_gp2x_tar(const unsigned char *tar, size_t tarlen, const char *destdir,
-                          fw_progress cb, void *ud) {
-    struct collect c; memset(&c, 0, sizeof c);
-    prog(cb, ud, "reading rootfs (tar)", 55);
-    if (untar_mem(tar, tarlen, collect_cb, &c) != 0 || c.err) {
-        free(c.e); return -1;
-    }
+/* Write a collected entry set to destdir: dirs+files first, then symlinks/hardlinks deref'd to
+   real copies. The collect may merge several sources (e.g. yaffs base + tar overlay). */
+static int stage_collect(struct collect *c, const char *destdir, fw_progress cb, void *ud) {
+    if (c->err) return -1;
     prog(cb, ud, "writing files", 65);
     int files = 0, links = 0, fail = 0;
     char path[PATH_MAX];
-    /* 1) dirs + regular files */
-    for (int i = 0; i < c.n; i++) {
-        struct ent *e = &c.e[i];
+    for (int i = 0; i < c->n; i++) {
+        struct ent *e = &c->e[i];
         snprintf(path, sizeof path, "%s/%s", destdir, e->path);
         if (e->type == TAR_DIR) mkdirs(path);
         else if (e->type == TAR_FILE) { if (write_file(path, e->data, e->size) == 0) files++; else fail++; }
-        if ((i & 1023) == 0) prog(cb, ud, "writing files", 65 + (i * 25) / (c.n ? c.n : 1));
+        if ((i & 1023) == 0) prog(cb, ud, "writing files", 65 + (i * 25) / (c->n ? c->n : 1));
     }
-    /* 2) symlinks -> deref to real copies (so the native Windows engine can follow them) */
     prog(cb, ud, "resolving links", 92);
-    for (int i = 0; i < c.n; i++) {
-        struct ent *e = &c.e[i];
+    for (int i = 0; i < c->n; i++) {
+        struct ent *e = &c->e[i];
         if (e->type != TAR_SYMLINK && e->type != TAR_HARDLINK) continue;
-        const struct ent *t = resolve_link(&c, i, 0);
+        const struct ent *t = resolve_link(c, i, 0);
         if (!t) continue;   /* dangling link (e.g. into /dev or /proc) -- skip */
         snprintf(path, sizeof path, "%s/%s", destdir, e->path);
         if (write_file(path, t->data, t->size) == 0) links++;
     }
     char msg[128]; snprintf(msg, sizeof msg, "staged %d files + %d links", files, links);
     prog(cb, ud, msg, 100);
-    for (int i = 0; i < c.n; i++) { free(c.e[i].path); free(c.e[i].link); }
-    free(c.e);
     return fail > files ? -1 : 0;
 }
 
@@ -231,31 +232,45 @@ int fw_stage(const char *file, const char *device, const char *destdir, fw_progr
     if (!buf) { prog(cb, ud, "cannot read file", 0); return -1; }
     mkdirs(destdir);
 
+    struct collect c; memset(&c, 0, sizeof c);
     int rc = -2;   /* default: format not yet supported */
     if (!strcmp(info.format, "zip")) {
         mz_zip_archive z; memset(&z, 0, sizeof z);
         if (!mz_zip_reader_init_mem(&z, buf, n, 0)) { free(buf); prog(cb, ud, "corrupt zip", 0); return -1; }
         if (zip_has(&z, "gp2xfs.tar.gz")) {
-            prog(cb, ud, "extracting gp2xfs.tar.gz", 20);
+            /* GP2X full firmware: base glibc/ld.so in gp2xyaffs.img (YAFFS), then the lib/app
+               overlay in gp2xfs.tar.gz on top (later entries win on disk). */
+            size_t yl = 0;
+            unsigned char *yimg = mz_zip_reader_extract_file_to_heap(&z, "gp2xyaffs.img", &yl, 0);
+            if (yimg) { prog(cb, ud, "staging base (yaffs)", 25); yaffs_mem(yimg, yl, collect_cb, &c); mz_free(yimg); }
+            prog(cb, ud, "extracting gp2xfs.tar.gz", 40);
             size_t gzlen = 0;
             unsigned char *gz = mz_zip_reader_extract_file_to_heap(&z, "gp2xfs.tar.gz", &gzlen, 0);
             mz_zip_reader_end(&z);
-            if (!gz) { free(buf); prog(cb, ud, "extract failed", 0); return -1; }
-            prog(cb, ud, "decompressing rootfs", 40);
-            size_t tarlen = 0; unsigned char *tar = gz_inflate(gz, gzlen, &tarlen);
-            mz_free(gz);
-            if (!tar) { free(buf); prog(cb, ud, "gunzip failed", 0); return -1; }
-            rc = stage_gp2x_tar(tar, tarlen, destdir, cb, ud);
-            mz_free(tar);
+            if (gz) {
+                size_t tarlen = 0; unsigned char *tar = gz_inflate(gz, gzlen, &tarlen);
+                mz_free(gz);
+                if (tar) { prog(cb, ud, "staging overlay (tar)", 55); untar_mem(tar, tarlen, collect_cb, &c); mz_free(tar); }
+            }
+            rc = stage_collect(&c, destdir, cb, ud);
         } else if (zip_has(&z, "yaffs2_rfs.img")) {
+            prog(cb, ud, "extracting yaffs2_rfs.img", 20);
+            size_t yl = 0;
+            unsigned char *yimg = mz_zip_reader_extract_file_to_heap(&z, "yaffs2_rfs.img", &yl, 0);
             mz_zip_reader_end(&z);
-            prog(cb, ud, "Caanoo (yaffs2) staging not implemented yet", 0);   /* step 5 */
+            if (yimg) { prog(cb, ud, "staging rootfs (yaffs2)", 40);
+                        if (yaffs_mem(yimg, yl, collect_cb, &c) == 0) rc = stage_collect(&c, destdir, cb, ud);
+                        mz_free(yimg); }
+            else { prog(cb, ud, "extract failed", 0); rc = -1; }
         } else { mz_zip_reader_end(&z); prog(cb, ud, "no rootfs in zip", 0); rc = -1; }
+    } else if (!strcmp(info.format, "yaffs2")) {     /* a raw yaffs .img selected directly */
+        prog(cb, ud, "staging rootfs (yaffs)", 30);
+        if (yaffs_mem(buf, n, collect_cb, &c) == 0) rc = stage_collect(&c, destdir, cb, ud);
+        else prog(cb, ud, "not a yaffs image", 0);
     } else if (!strcmp(info.format, "ubi")) {
         prog(cb, ud, "Wiz (ubifs) staging not implemented yet", 0);            /* step 6 */
-    } else if (!strcmp(info.format, "yaffs2")) {
-        prog(cb, ud, "Caanoo (yaffs2) staging not implemented yet", 0);        /* step 5 */
     }
+    collect_free(&c);
     free(buf);
     return rc;
 }
