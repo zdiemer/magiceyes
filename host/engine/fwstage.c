@@ -7,6 +7,7 @@
 #include "extract/miniz.h"
 #include "extract/untar.h"
 #include "extract/yaffs.h"
+#include "extract/ubifs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -267,8 +268,10 @@ int fw_stage(const char *file, const char *device, const char *destdir, fw_progr
         prog(cb, ud, "staging rootfs (yaffs)", 30);
         if (yaffs_mem(buf, n, collect_cb, &c) == 0) rc = stage_collect(&c, destdir, cb, ud);
         else prog(cb, ud, "not a yaffs image", 0);
-    } else if (!strcmp(info.format, "ubi")) {
-        prog(cb, ud, "Wiz (ubifs) staging not implemented yet", 0);            /* step 6 */
+    } else if (!strcmp(info.format, "ubi")) {        /* Wiz wiz_ubifs.img */
+        prog(cb, ud, "staging rootfs (ubifs)", 30);
+        if (ubifs_mem(buf, n, collect_cb, &c) == 0) rc = stage_collect(&c, destdir, cb, ud);
+        else prog(cb, ud, "not a UBI/UBIFS image", 0);
     }
     collect_free(&c);
     free(buf);
