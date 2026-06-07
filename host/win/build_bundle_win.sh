@@ -28,6 +28,6 @@ $CC -O2 -Wall -mwindows "${DEFS[@]}" -o "$REPO/bin/magiceyes.exe" \
   -I "$REPO/guest/src" -I "$SDL/include" \
   -L "$SDL/lib" "$FORK/build-win/libunicorn.a" \
   -static-libgcc -Wl,-Bstatic -lpthread -Wl,-Bdynamic \
-  -lSDL2 -lm -lws2_32 -lbcrypt -lwinmm -lcomdlg32 -luser32 -lgdi32
+  -lSDL2 -lm -lws2_32 -lbcrypt -lwinmm -lcomdlg32 -luser32 -lgdi32 -lshell32 -lole32
 cp -f "$SDL/bin/SDL2.dll" "$REPO/bin/"
 echo "built $REPO/bin/magiceyes.exe (+ SDL2.dll)"

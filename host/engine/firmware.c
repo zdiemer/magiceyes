@@ -90,6 +90,19 @@ int me_firmware_install(const char *file, const char *device) {
     return rc;
 }
 
+/* Boot a device's firmware menu (called from the GUI). Pins the rootfs + device, sets firmware
+   mode, and requests the in-process reload of gp2xmenu. Returns 1 if the device is staged. */
+int me_firmware_boot_request(const char *device) {
+    char rootfs[PATH_MAX], menu[PATH_MAX];
+    if (!me_firmware_paths(device, rootfs, menu, sizeof rootfs)) return 0;
+    setenv("MAGICEYES_DEVICE", device, 1);
+    me_rootfs_set(rootfs);
+    g_firmware_mode = 1;
+    snprintf(g_firmware_menu, sizeof g_firmware_menu, "%s", menu);
+    engine_request_reload(menu);
+    return 1;
+}
+
 int me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap) {
     const char *name = fw_dir_name(device);
     if (!name) return 0;

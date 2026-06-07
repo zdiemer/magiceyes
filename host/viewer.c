@@ -23,6 +23,7 @@
 #include <SDL2/SDL_syswm.h>
 #include <windows.h>
 #include <commdlg.h>
+#include <shlobj.h>   /* SHBrowseForFolder (games-folder picker) */
 #include <direct.h>   /* _mkdir for the recent-files dir */
 /* engine entry points (plain C signatures -- avoid including engine.h / unicorn here) */
 const char *resolve_input(const char *in, char *out, size_t cap);
@@ -30,6 +31,9 @@ int  classify_elf(const char *path);
 int  read_elf_interp(const char *path, char *out, size_t cap);     /* dynamic title's PT_INTERP */
 int  me_rootfs_select(const char *interp);                         /* pick the matching device rootfs */
 void engine_request_reload(const char *host_path);
+int  me_firmware_install(const char *file, const char *device);    /* stage a firmware .zip/.img */
+int  me_firmware_boot_request(const char *device);                 /* boot a staged firmware menu */
+int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap);  /* installed? */
 #define ME_WINMENU 1
 #endif
 
@@ -168,6 +172,7 @@ enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
        IDM_SCALE1 = 1010, IDM_SCALE2, IDM_SCALE3, IDM_SCALE4, IDM_FULLSCREEN,
        IDM_MUTE = 1020, IDM_VOL25, IDM_VOL50, IDM_VOL75, IDM_VOL100,
        IDM_ABOUT = 1030, IDM_CONTROLS,
+       IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200, IDM_SET_GAMES,
        IDM_RECENT0 = 1100 };
 #define MAX_RECENT 8
 static HMENU g_recentmenu;
@@ -210,6 +215,37 @@ static void recent_rebuild_menu(void) {
         AppendMenuA(g_recentmenu, MF_STRING, IDM_RECENT0 + i, b);
     }
 }
+/* ---- games folder: persisted + exported as ME_GP2X_SD (mapped to /mnt/sd & /mnt/nand) ---- */
+static char g_games_dir[MAX_PATH];
+static void games_path(char *out, size_t cap) {
+    const char *ad = getenv("APPDATA"); if (!ad) ad = getenv("TEMP"); if (!ad) ad = ".";
+    snprintf(out, cap, "%s\\magiceyes\\games.txt", ad);
+}
+static void games_load(void) {
+    char p[MAX_PATH]; games_path(p, sizeof p);
+    FILE *f = fopen(p, "r"); if (!f) return;
+    if (fgets(g_games_dir, sizeof g_games_dir, f)) { char *nl = strpbrk(g_games_dir, "\r\n"); if (nl) *nl = 0; }
+    fclose(f);
+    if (g_games_dir[0]) _putenv_s("ME_GP2X_SD", g_games_dir);
+}
+static void pick_games_folder(HWND hwnd) {
+    BROWSEINFOW bi; memset(&bi, 0, sizeof bi);
+    bi.hwndOwner = hwnd; bi.lpszTitle = L"Select your games folder (it should contain a 'game' subfolder)";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return;
+    wchar_t wp[MAX_PATH];
+    if (SHGetPathFromIDListW(pidl, wp)) {
+        WideCharToMultiByte(CP_UTF8, 0, wp, -1, g_games_dir, sizeof g_games_dir, NULL, NULL);
+        _putenv_s("ME_GP2X_SD", g_games_dir);
+        char p[MAX_PATH]; games_path(p, sizeof p);
+        FILE *f = fopen(p, "w"); if (f) { fprintf(f, "%s\n", g_games_dir); fclose(f); }
+    }
+    CoTaskMemFree(pidl);
+}
+/* a device is "installed" if its staged gp2xmenu exists */
+static int fw_installed(const char *dev) { char r[1024], m[1024]; return me_firmware_paths(dev, r, m, sizeof r); }
+
 static void build_menu(HWND hwnd) {
     HMENU bar = CreateMenu(), file = CreatePopupMenu();
     AppendMenuA(file, MF_STRING, IDM_OPEN, "&Open...\tCtrl+O");
@@ -235,11 +271,22 @@ static void build_menu(HWND hwnd) {
     AppendMenuA(audio, MF_STRING, IDM_VOL75, "Volume 75%");
     AppendMenuA(audio, MF_STRING, IDM_VOL100, "Volume 100%");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)audio, "&Audio");
+    HMENU fw = CreatePopupMenu();
+    AppendMenuA(fw, MF_STRING, IDM_FW_INSTALL, "&Install firmware...");
+    AppendMenuA(fw, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(fw, MF_STRING | (fw_installed("wiz")    ? 0 : MF_GRAYED), IDM_FW_WIZ,    "Boot &Wiz menu");
+    AppendMenuA(fw, MF_STRING | (fw_installed("caanoo") ? 0 : MF_GRAYED), IDM_FW_CAANOO, "Boot &Caanoo menu");
+    AppendMenuA(fw, MF_STRING | (fw_installed("f100")   ? 0 : MF_GRAYED), IDM_FW_F100,   "Boot GP2X &F100 menu");
+    AppendMenuA(fw, MF_STRING | (fw_installed("f200")   ? 0 : MF_GRAYED), IDM_FW_F200,   "Boot GP2X F&200 menu");
+    AppendMenuA(fw, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(fw, MF_STRING, IDM_SET_GAMES, "Set &games folder...");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)fw, "Fir&mware");
     HMENU help = CreatePopupMenu();
     AppendMenuA(help, MF_STRING, IDM_CONTROLS, "&Controls");
     AppendMenuA(help, MF_STRING, IDM_ABOUT, "&About");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help");
     recent_load(); recent_rebuild_menu();
+    games_load();
     SetMenu(hwnd, bar);
     if (g_view_mute) CheckMenuItem(bar, IDM_MUTE, MF_BYCOMMAND | MF_CHECKED);
 }
@@ -282,6 +329,33 @@ static void do_open_dialog(HWND hwnd) {
     WideCharToMultiByte(CP_UTF8, 0, buf, -1, path, sizeof path, NULL, NULL);
     start_game(path);
 }
+static void do_install_firmware(HWND hwnd) {
+    wchar_t buf[MAX_PATH]; buf[0] = 0;
+    OPENFILENAMEW ofn; memset(&ofn, 0, sizeof ofn);
+    ofn.lStructSize = sizeof ofn; ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"Device firmware (*.zip;*.img)\0*.zip;*.img\0All files\0*.*\0";
+    ofn.lpstrFile = buf; ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Install device firmware";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+    char path[MAX_PATH * 2];
+    WideCharToMultiByte(CP_UTF8, 0, buf, -1, path, sizeof path, NULL, NULL);
+    HCURSOR old = SetCursor(LoadCursor(NULL, IDC_WAIT));
+    int rc = me_firmware_install(path, NULL);   /* device detected from the firmware contents */
+    SetCursor(old);
+    if (rc == 0) {
+        MessageBoxA(hwnd, "Firmware installed. Boot it from the Firmware menu.", "magiceyes", MB_OK);
+        build_menu(hwnd);   /* refresh: enable the newly-installed device's Boot item */
+    } else {
+        MessageBoxA(hwnd, "Could not install that firmware (unrecognised or unsupported format).\n"
+                          "See the log for details.", "magiceyes", MB_ICONERROR);
+    }
+}
+static void boot_firmware(HWND hwnd, const char *dev) {
+    if (!me_firmware_boot_request(dev))
+        MessageBoxA(hwnd, "That firmware isn't installed yet.\nUse Firmware > Install firmware...",
+                    "magiceyes", MB_ICONWARNING);
+}
 static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     switch (id) {
     case IDM_OPEN:   do_open_dialog(hwnd); break;
@@ -298,6 +372,12 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_VOL50:  g_view_volume = 50;  g_view_mute = 0; break;
     case IDM_VOL75:  g_view_volume = 75;  g_view_mute = 0; break;
     case IDM_VOL100: g_view_volume = 100; g_view_mute = 0; break;
+    case IDM_FW_INSTALL: do_install_firmware(hwnd); break;
+    case IDM_FW_WIZ:     boot_firmware(hwnd, "wiz"); break;
+    case IDM_FW_CAANOO:  boot_firmware(hwnd, "caanoo"); break;
+    case IDM_FW_F100:    boot_firmware(hwnd, "f100"); break;
+    case IDM_FW_F200:    boot_firmware(hwnd, "f200"); break;
+    case IDM_SET_GAMES:  pick_games_folder(hwnd); break;
     case IDM_CONTROLS:
         MessageBoxA(hwnd, "D-pad:    Arrow keys\nA/B/X/Y:  Z / X / A / S\nStart:    Enter\n"
                           "Select:   Backspace\nL / R:    Q / W\nFullscreen: F11\nQuit:     Esc",

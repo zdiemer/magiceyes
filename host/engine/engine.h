@@ -109,6 +109,7 @@ void me_rootfs_set(const char *dir);        /* firmware boot: pin a specific roo
 /* ---- firmware.c: locate / install a device firmware ---- */
 int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap);  /* 1 if found */
 int  me_firmware_install(const char *file, const char *device);  /* stage a .zip/.img; 0 = ok */
+int  me_firmware_boot_request(const char *device);  /* GUI: pin rootfs + reload its gp2xmenu; 1=ok */
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER };
