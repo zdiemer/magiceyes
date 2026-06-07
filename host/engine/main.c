@@ -145,7 +145,12 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
 static void *helper_thread(void *arg) {
     (void)arg;
     int prof = getenv("ME_PROF") ? 1 : 0;
-    double prof_t = 0, tdp = 0; uint32_t prof_fs = 0;
+    double prof_t = 0, tdp = 0, rpt_t = 0; uint32_t prof_fs = 0;
+    /* ME_RUN_SECS=N: a headless test bound. After N seconds, stop the guest CPU and end the run
+       CLEANLY (so the JSON report flushes) instead of the harness SIGKILLing us mid-write. */
+    double run_secs = getenv("ME_RUN_SECS") ? atof(getenv("ME_RUN_SECS")) : 0;
+    double run_t0 = host_now();
+    int run_stopped = 0;
     const char *ac = getenv("ME_AUDIOCLEAR");   /* TEMP: simulate audio-DMA completion by
                                                    periodically clearing a guest "DMA busy" flag */
     uint32_t acaddr = ac ? (uint32_t)strtoul(ac, NULL, 0) : 0;
@@ -157,6 +162,13 @@ static void *helper_thread(void *arg) {
         if (!g_reloading && g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; guarded_present(); }
         if (acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
         double now = host_now();
+        if (run_secs > 0 && !run_stopped && now - run_t0 >= run_secs) {
+            run_stopped = 1;
+            fprintf(DIAG, "ME_RUN_SECS=%.0f elapsed -> ending run\n", run_secs);
+            g_exit = 1; g_shutdown = 1;
+            if (g_shm) g_shm->quit = 1;          /* end the viewer loop (bundle) */
+            uc_emu_stop(g_th[0].uc);             /* break the main thread out of guarded_emu_start */
+        }
         if (prof && now - prof_t >= 2.0) {
             double dt = now - prof_t; uint32_t fs = g_shm ? g_shm->frame_seq : 0;
             extern unsigned long g_fpa_n, g_fpa_ops;
@@ -165,6 +177,9 @@ static void *helper_thread(void *arg) {
             prof_fs = fs; prof_t = now; g_n_rd = g_n_wr = g_n_fault = 0; g_fpa_n = g_fpa_ops = 0;
         }
         if (g_threaddump && now - tdp >= 2.0) { tdp = now; dump_threads("periodic"); }
+        /* Flush the JSON report periodically so even a hard kill leaves a recent snapshot on disk
+           (the harness imposes ME_RUN_SECS for a clean exit, but be robust anyway). */
+        if (me_report_active() && now - rpt_t >= 3.0) { rpt_t = now; me_report_flush_json(NULL); }
     }
     return NULL;
 }
@@ -205,6 +220,9 @@ static void print_usage(const char *p0) {
         "      --scret        per-thread syscall+return trace (ME_SCRET)\n"
         "      --threaddump   periodic thread-state dump (ME_THREADDUMP)\n"
         "      --no-smcfreeze disable the SMC-freeze CPU fix (ME_GP2X_NOSMCFREEZE)\n"
+        "      --debug        heavy logging: structured run report + fps profiling (ME_DEBUG)\n"
+        "      --report P     write the structured run report (JSON) to path P (ME_REPORT)\n"
+        "      --run-secs N   run for N seconds then exit cleanly (ME_RUN_SECS; for headless tests)\n"
         "  -h, --help         show this help\n"
         "      --version      show version\n", p0);
 }
@@ -324,6 +342,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--scret"))                          setenv("ME_SCRET", "1", 1);
         else if (!strcmp(a, "--threaddump"))                     setenv("ME_THREADDUMP", "1", 1);
         else if (!strcmp(a, "--no-smcfreeze"))                   setenv("ME_GP2X_NOSMCFREEZE", "1", 1);
+        else if (!strcmp(a, "--debug"))                          { setenv("ME_DEBUG", "1", 1); setenv("ME_PROF", "1", 1); }
+        else if (!strcmp(a, "--report"))                         { if (++i < argc) setenv("ME_REPORT", argv[i], 1); }
+        else if (!strcmp(a, "--run-secs"))                       { if (++i < argc) setenv("ME_RUN_SECS", argv[i], 1); }
         else { fprintf(stderr, "magiceyes: unknown option '%s'\n", a); print_usage(argv[0]); return 2; }
     }
     if (g_view_scale < 1) g_view_scale = 1;
@@ -362,6 +383,12 @@ int main(int argc, char **argv) {
     if (getenv("ME_TRACE")) g_trace = 1;
     if (getenv("ME_SCRET")) g_scret = 1;
     if (getenv("ME_THREADDUMP")) g_threaddump = 1;
+    /* Structured run telemetry (host/engine/report.c). ME_REPORT=<path> writes the JSON the
+       headless harness reads back; ME_DEBUG turns capture on with a default path. Off otherwise:
+       me_report() is a no-op, so zero impact on a normal play session. */
+    { const char *rpt = getenv("ME_REPORT");
+      if (rpt && *rpt)            me_report_init(rpt);
+      else if (getenv("ME_DEBUG")) me_report_init("me_report.json"); }
     threads_init();
     shm_setup();
 
@@ -398,6 +425,12 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "magiceyes: GAME CRASHED (host fault) pc=%p addr=%p in %s\n",
                         (void *)flt.pc, (void *)flt.addr, g_cur_game[0] ? g_cur_game : "(unknown)");
                 g_fault_addr = flt.addr; g_fault_pending = 1;   /* viewer pops a MessageBox */
+                me_report(MR_HOST_FAULT, (long)flt.addr, g_cur_game[0] ? g_cur_game : NULL,
+                          (uint32_t)flt.pc);
+#ifndef ME_BUNDLED
+                g_exit_code = 70;              /* a distinct "crashed" code so the harness tells a
+                                                 crash from a clean exit (standalone exits here) */
+#endif
             }
             if (!g_reload_path[0]) {           /* game ended on its own (exit/return/error) */
                 if (e != UC_ERR_OK && !g_exit && !flt.faulted) {
@@ -423,6 +456,7 @@ int main(int argc, char **argv) {
         if (!entry) me_usleep(16000);          /* idle: wait for File->Open or the window to close */
     }
     g_shutdown = 1; g_exit = 1;
+    if (me_report_active()) me_report_flush_json(NULL);   /* final structured run report */
 #ifdef ME_BUNDLED
     if (g_shm) g_shm->quit = 1;            /* engine done -> end the viewer loop, then it exit()s */
     pthread_join(vth, NULL);

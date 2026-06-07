@@ -38,6 +38,18 @@
 #include <setjmp.h>
 
 #include "gp2xshm.h"
+#include "glcmd.h"      /* ME_NR_REPORT: surface unsupported SDL features into the engine's run report */
+
+/* Tell the engine's structured run report about a feature we can't honour, by writing a sentinel
+   line to stderr that the engine ingests (see glcmd.h). A line, not a custom syscall, so it works
+   under the OABI GPH-SDK toolchain (no `svc`). Gated on ME_DEBUG so a normal run stays quiet. */
+static int sdl_rpt_on(void) { static int v = -1; if (v < 0) v = getenv("ME_DEBUG") ? 1 : 0; return v; }
+static void sdl_report(long kind, long code, const char *name) {
+    if (!sdl_rpt_on()) return;
+    char b[128];
+    int n = snprintf(b, sizeof b, "\x01MR %ld %ld %s\n", kind, code, name ? name : "");
+    if (n > 0) { int w = write(2, b, (unsigned)n); (void)w; }
+}
 
 /* ------------------------------------------------------------------ state */
 static gp2x_shm_t *g_shm = NULL;
@@ -837,6 +849,9 @@ static int g_cvt_monocap = 0;
 int SDL_BuildAudioCVT(SDL_AudioCVT *cvt, Uint16 sf, Uint8 sc, int sr,
                       Uint16 df, Uint8 dc, int dr) {
     if (!cvt) return -1;
+    /* The converter below assumes little-endian samples; a big-endian (0x1000) source/dst would
+       be byte-swapped garbage. Surface it rather than silently mis-converting. */
+    if ((sf & 0x1000u) || (df & 0x1000u)) sdl_report(ME_RPT_AUDIO, (sf & 0x1000u) ? sf : df, "audio_bigendian");
     if (sc == 0) sc = 1; if (dc == 0) dc = 1;
     if (sr == 0) sr = 22050; if (dr == 0) dr = 22050;
     memset(cvt, 0, sizeof(*cvt));
@@ -1155,6 +1170,7 @@ SDL_Surface *IMG_Load_RW(SDL_RWops *src, int freesrc) {
     if (!(got >= 4 && magic[0] == 0x89 && magic[1] == 'P' && magic[2] == 'N' && magic[3] == 'G')) {
         fprintf(stderr, "fakesdl: IMG_Load: unsupported image (magic %02x %02x %02x %02x)\n",
                 magic[0], magic[1], magic[2], magic[3]);
+        sdl_report(ME_RPT_SDL, ((long)magic[0] << 8) | magic[1], "IMG_Load_unsupported");
         if (freesrc) src->close(src); return NULL;
     }
     if (!png_create_read_struct) {             /* libpng not in the process (weak -> NULL) */
@@ -1231,7 +1247,8 @@ char *SDL_GetKeyName(SDLKey key) { (void)key; return (char *)""; }
  * and pulling in libdl forces a glibc-version-specific dlopen reference (e.g.
  * __dlopen / dlopen@GLIBC_2.34 with a modern EABI cross toolchain) that won't resolve
  * against an older device glibc. Stub them out so the shim depends on libc alone. */
-void *SDL_LoadObject(const char *name) { (void)name; SDL_SetError("SDL_LoadObject unsupported"); return 0; }
+void *SDL_LoadObject(const char *name) { sdl_report(ME_RPT_SDL, 0, "SDL_LoadObject");
+    (void)name; SDL_SetError("SDL_LoadObject unsupported"); return 0; }
 void *SDL_LoadFunction(void *handle, const char *name) { (void)handle; (void)name; return 0; }
 void SDL_UnloadObject(void *handle) { (void)handle; }
 

@@ -1,0 +1,19 @@
+{
+  "title": "vektar-free",
+  "device": "GP2X",
+  "status": "playable",
+  "fps": 31.4,
+  "frames": 445,
+  "audio_active": 1,
+  "allowed_unimplemented": [],
+  "frame_hashes": [
+    "0xdcb1513526334c49",
+    "0xdcb14c37363b6c49",
+    "0xdcb95435363b6c49",
+    "0xdcb159373b391f1d",
+    "0xcd31313133311717",
+    "0xcd71313133311717",
+    "0xd431713533331f1d"
+  ],
+  "secs": 14.0
+}

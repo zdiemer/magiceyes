@@ -51,6 +51,20 @@ static long me_sc2(long nr, long a0, long a1) {
     register long r1 __asm__("r1") = a1;
     __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7), "r"(r1) : "memory"); return r0;
 }
+/* Record an unsupported GLES feature into the engine's structured run report by writing a sentinel
+   line to stderr (the engine ingests it -- see glcmd.h). Gated on ME_DEBUG so a normal run does no
+   per-frame report work; a small recently-seen ring suppresses per-frame repeats (glEnable fires
+   every frame). */
+static int rpt_on(void) { static int v = -1; if (v < 0) v = getenv("ME_DEBUG") ? 1 : 0; return v; }
+static void gl_report(long code, const char *name) {
+    if (!rpt_on()) return;
+    static long seen[16]; static int nseen;
+    for (int i = 0; i < nseen; i++) if (seen[i] == code) return;     /* already reported */
+    if (nseen < 16) seen[nseen++] = code;
+    char b[128];
+    int n = snprintf(b, sizeof b, "\x01MR %d %ld %s\n", ME_RPT_GLES, code, name ? name : "");
+    if (n > 0) { ssize_t w = write(2, b, (size_t)n); (void)w; }
+}
 static int gl_offload(void) { static int v = -1; if (v < 0) v = getenv("ME_GL_NOOFFLOAD") ? 0 : 1; return v; }
 static struct gl_draw g_desc;   /* reused per glDrawArrays; passed by guest pointer to the engine */
 
@@ -336,7 +350,7 @@ void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) {
 void glEnable(GLenum c)  {
     if (c==GL_TEXTURE_2D) g_en_tex=1; else if (c==GL_BLEND) g_en_blend=1;
     else if (c==GL_ALPHA_TEST) g_en_atest=1;
-    else GLOG("glEnable(0x%x) [unhandled]\n", c);
+    else { GLOG("glEnable(0x%x) [unhandled]\n", c); gl_report((long)c, "glEnable"); }
 }
 void glDisable(GLenum c) {
     if (c==GL_TEXTURE_2D) g_en_tex=0; else if (c==GL_BLEND) g_en_blend=0;
@@ -461,6 +475,7 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
     if (level != 0 || !g_bound_tex || g_bound_tex >= MAXTEX || w <= 0 || h <= 0) return;
     fprintf(stderr, "fakegles: glCompressedTexImage2D UNHANDLED format=0x%x %dx%d size=%d "
                     "(placeholder; needs a decoder)\n", internalformat, w, h, imageSize);
+    gl_report((long)internalformat, "glCompressedTexImage2D");
     Tex *tx = &g_tex[g_bound_tex];
     free(tx->rgba);
     tx->w = w; tx->h = h;

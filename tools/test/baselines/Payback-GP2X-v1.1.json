@@ -1,0 +1,19 @@
+{
+  "title": "Payback-GP2X-v1.1",
+  "device": "GP2X",
+  "status": "playable",
+  "fps": 26.9,
+  "frames": 393,
+  "audio_active": 1,
+  "allowed_unimplemented": [],
+  "frame_hashes": [
+    "0x6362070f07060ea2",
+    "0x999988db4c1df159",
+    "0x8c108a5b760f0343",
+    "0x64499ad3528b09b9",
+    "0xd5740a53721f1919",
+    "0xca948ad25a8b0d9b",
+    "0xeeae0a53790f9951"
+  ],
+  "secs": 14.0
+}

@@ -1,0 +1,19 @@
+{
+  "title": "Blazar_v1-30_gp2x",
+  "device": "GP2X",
+  "status": "playable",
+  "fps": 61.1,
+  "frames": 863,
+  "audio_active": 1,
+  "allowed_unimplemented": [],
+  "frame_hashes": [
+    "0x3200ca3028686830",
+    "0xb000ca3028686830",
+    "0x7810806402000000",
+    "0x7820b86c74566610",
+    "0x7808e048242010c0",
+    "0x261f098dc5c98a79",
+    "0x261f098dc5c98a79"
+  ],
+  "secs": 14.0
+}

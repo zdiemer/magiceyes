@@ -43,7 +43,7 @@ CFLAGS="-shared -fPIC -O2 -Wall -B $CC1DIR/ -B $ASDIR/ -B $GCCLIB/ -B $SYSLIB/ \
 
 # stage sources + SDL headers on ext4 (drvfs EOVERFLOW)
 BLD="$WORK/build"; mkdir -p "$BLD/inc"
-cp -f "$HERE/src/"*.c "$HERE/src/gp2xshm.h" "$BLD/"
+cp -f "$HERE/src/"*.c "$HERE/src/gp2xshm.h" "$HERE/src/glcmd.h" "$BLD/"
 cp -rf "$SDK/DGE/include/." "$BLD/inc/"
 
 echo "building libSDL-1.2.so.0 ..."

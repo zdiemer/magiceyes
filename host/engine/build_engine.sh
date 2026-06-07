@@ -5,7 +5,14 @@ set -eu
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 FORK="${ME_UNICORN_FORK:-$HOME/me-unicorn-fork}"
 [ -f "$FORK/build/libunicorn.a" ] || { echo "fork not built at $FORK (see fork-patches/README.md)"; exit 1; }
-cc -O2 -Wall -o "$REPO/bin/me_unicorn" "$REPO"/host/engine/*.c \
+# ME_DEBUG_BUILD=1 -> a separate AddressSanitizer build (bin/me_unicorn_dbg) for headless triage
+# of memory bugs (the reload crash, guest-pointer overruns). Slower; not the shipping binary.
+if [ -n "${ME_DEBUG_BUILD:-}" ]; then
+  OUT="$REPO/bin/me_unicorn_dbg"; OPT="-O0 -g -fsanitize=address -fno-omit-frame-pointer"
+else
+  OUT="$REPO/bin/me_unicorn";     OPT="-O2"
+fi
+cc $OPT -Wall -o "$OUT" "$REPO"/host/engine/*.c \
   -I "$REPO/host/engine" -I "$FORK/include" -I "$REPO/guest/src" \
   "$FORK/build/libunicorn.a" -lpthread -lm -lrt
-echo "built $REPO/bin/me_unicorn (engine: host/engine/*.c, fork: $FORK)"
+echo "built $OUT (engine: host/engine/*.c, fork: $FORK)"

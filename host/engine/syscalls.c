@@ -473,6 +473,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            (on the -mwindows bundle a raw write(2,..) doesn't reach the redirected stderr, so
            guest FAKEGLES_LOG/printf output was being lost). */
         if ((int)a0 == 1 || (int)a0 == 2) {
+            if (me_report_ingest_guest((const char *)tmp, a2)) { free(tmp); return a2; }  /* shim
+                                                  report line: recorded, never echoed to the log */
+            me_report_scan_write((int)a0, (const char *)tmp, a2);  /* catch ld.so symbol/lib
+                                                                      errors + glibc aborts */
             FILE *s = g_log ? g_log : ((int)a0 == 1 ? stdout : stderr);
             size_t w = a2 ? fwrite(tmp, 1, a2, s) : 0; fflush(s); free(tmp);
             return (long)w;
@@ -1053,8 +1057,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         }
     }
     default:
-        fprintf(stderr, "me_unicorn: UNIMPLEMENTED syscall %u (r0=%08x r1=%08x r2=%08x)\n",
-                nr, a0, a1, a2);
+        me_report(MR_UNIMPL_SYSCALL, (long)nr, NULL, g_self ? g_self->last_pc : 0);
+        if (g_trace)
+            fprintf(stderr, "me_unicorn: UNIMPLEMENTED syscall %u (r0=%08x r1=%08x r2=%08x)\n",
+                    nr, a0, a1, a2);
         return LERR(ENOSYS);
     }
 }

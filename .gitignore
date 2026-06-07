@@ -4,6 +4,13 @@ rootfs/
 tmp_dyn/
 *.o
 *.so*
+__pycache__/
+*.pyc
 
 # large/derivable GP2X+Wiz assets (rootfs, SDK, games, firmware, paeryn-sdl)
 /assets/
+
+# headless-harness output: captured frame PNGs (game imagery) + per-run reports/scorecards.
+# The committed regression baselines (perceptual hashes, no imagery) live in tools/test/baselines/.
+/tools/test/results/
+

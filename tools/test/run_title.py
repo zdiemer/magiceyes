@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Run ONE GP2X/Wiz/Caanoo binary headlessly through the magiceyes engine and emit a machine-
+readable verdict. Built for unattended triage of a large set of titles (a Claude agent reads the
+verdicts to decide what to fix) while staying inspectable by a human (PNG frames + a human log).
+
+Targets the standalone Linux engine (bin/me_unicorn): it exits on game-end/crash with a real exit
+code, and ME_RUN_SECS makes it self-terminate cleanly so the JSON run report flushes.
+
+What it observes (off the /dev/shm framebuffer/audio contract, no window needed):
+  - frame_seq over time  -> fps + "did it ever render"
+  - non-black pixel ratio -> "rendered something" vs "booted to a black screen"
+  - audio_active / a_write -> "audio is playing"
+  - the engine's structured run report (report.json) -> WHY it failed (unimpl syscalls,
+    missing ld.so symbols, unknown devices, unsupported GLES/blit/audio, host fault)
+
+Status tiers (map to the project's goals): incompatible < crashed < black < renders < playable.
+
+Usage:
+  run_title.py GAME [--secs 20] [--engine bin/me_unicorn] [--out DIR]
+               [--shm-name NAME] [--press "UP:0.5,A:0.2,B+DOWN:0.3"] [--headed]
+"""
+import argparse, json, os, subprocess, sys, time, tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import shmlib
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def parse_press(script):
+    """'UP:0.5,A+DOWN:0.3' -> [(['UP'],0.5), (['A','DOWN'],0.3)]"""
+    seq = []
+    for item in (script or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        names, _, dur = item.partition(":")
+        seq.append((names.split("+"), float(dur) if dur else 0.3))
+    return seq
+
+
+def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
+            press=None, headed=False, extra_env=None, quiet=False):
+    engine = engine or os.path.join(REPO, "bin", "me_unicorn")
+    if not os.path.exists(engine):
+        return {"title": os.path.basename(game), "path": game, "status": "error",
+                "error": "engine not built: %s (run host/engine/build_engine.sh)" % engine}
+    own_out = out_dir is None
+    out_dir = out_dir or tempfile.mkdtemp(prefix="metest_")
+    os.makedirs(out_dir, exist_ok=True)
+    report_path = os.path.join(out_dir, "report.json")
+    log_path = os.path.join(out_dir, "log.txt")
+    spath = shmlib.shm_path(shm_name)
+    try:
+        os.unlink(spath)            # start from a clean shm so we don't read a stale frame
+    except OSError:
+        pass
+
+    env = dict(os.environ)
+    env.update({"ME_REPORT": report_path, "ME_LOGFILE": log_path,
+                "ME_RUN_SECS": str(secs), "ME_SHM_NAME": shm_name, "ME_PROF": "1"})
+    if extra_env:
+        env.update(extra_env)
+
+    proc = subprocess.Popen([engine, game], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    viewer = None
+    if headed:                      # optional: a live window for a human to watch alongside
+        vbin = os.path.join(REPO, "bin", "viewer")
+        if os.path.exists(vbin):
+            viewer = subprocess.Popen([vbin], env=env)
+
+    t0 = time.time()
+    seq0 = None
+    last_seq = 0
+    frames_seen = 0
+    frame_pngs = []
+    nz_samples = []
+    frame_hashes = []
+    audio_active = 0
+    aw_max = 0
+    next_cap = 1.0                  # first capture ~1s in
+    press_seq = parse_press(press)
+    press_idx = 0
+    press_next_at = 2.0 if press_seq else None   # start the input script ~2s in (after boot)
+    hold_until = 0.0
+    held_mask = 0
+    hard_deadline = t0 + secs + 12  # backstop if the engine ignores ME_RUN_SECS / hangs
+
+    while True:
+        if proc.poll() is not None and time.time() - t0 > 0.5:
+            break
+        now = time.time()
+        if now > hard_deadline:
+            proc.kill()
+            break
+        h = shmlib.read_header(spath)
+        if h and h.get("magic") == shmlib.MAGIC:
+            if seq0 is None:
+                seq0 = h["frame_seq"]
+            if h["frame_seq"] != last_seq:
+                last_seq = h["frame_seq"]
+                frames_seen = last_seq - seq0
+            audio_active = audio_active or h["audio_active"]
+            aw_max = max(aw_max, h["a_write"])
+            if now - t0 >= next_cap and h["width"]:
+                png = os.path.join(out_dir, "frame%02d.png" % len(frame_pngs))
+                if shmlib.save_png(spath, png, h["width"], h["height"]):
+                    frame_pngs.append(png)
+                    nz_samples.append(shmlib.nonzero_ratio(spath, h["width"], h["height"]))
+                    frame_hashes.append("0x%016x" % shmlib.dhash(spath, h["width"], h["height"]))
+                next_cap += 2.0
+            # input script: press the next chord when its time comes, release when its hold ends
+            el = now - t0
+            if press_next_at is not None and el >= press_next_at:
+                names, dur = press_seq[press_idx]
+                held_mask = shmlib.buttons_mask(names)
+                shmlib.set_buttons(spath, held_mask)
+                hold_until = now + dur
+                press_idx += 1
+                press_next_at = el + dur if press_idx < len(press_seq) else None
+            elif held_mask and now >= hold_until:
+                held_mask = 0
+                shmlib.set_buttons(spath, 0)
+        time.sleep(0.1)
+
+    # let the process finish + flush its report
+    try:
+        exit_code = proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        exit_code = proc.wait()
+    if viewer:
+        viewer.terminate()
+
+    elapsed = max(0.001, time.time() - t0)
+    fps = frames_seen / elapsed
+    report = _load_report(report_path)
+    hdr = shmlib.read_header(spath) or {}
+    device = shmlib.DEVICE_NAME.get(hdr.get("device", 0), "GP2X")
+    backend = shmlib.BACKEND_NAME.get(hdr.get("backend", 0), "framebuffer")
+    black_ratio = 1.0 - (max(nz_samples) if nz_samples else 0.0)
+
+    verdict = {
+        "title": os.path.basename(game.rstrip("/\\")),
+        "path": game,
+        "device": device,
+        "backend": backend,
+        "status": _status(exit_code, report, frames_seen, fps, nz_samples, audio_active),
+        "fps": round(fps, 1),
+        "frames": frames_seen,
+        "secs": round(elapsed, 1),
+        "black_ratio": round(black_ratio, 3),
+        "audio_active": int(bool(audio_active)),
+        "audio_bytes": aw_max,
+        "exit_code": exit_code,
+        "unimplemented": _codes(report, "unimpl_syscall"),
+        "missing_symbols": _names(report, ("missing_symbol", "missing_rootfs_lib")),
+        "unknown_devices": _names(report, ("unknown_dev",)),
+        "quirks": _quirks(report),
+        "report_counts": (report or {}).get("counts", {}),
+        "frame_hashes": frame_hashes,
+        "frame_pngs": frame_pngs,
+        "log": log_path,
+        "report": report_path,
+        "out_dir": out_dir,
+    }
+    if not quiet:
+        with open(os.path.join(out_dir, "verdict.json"), "w") as f:
+            json.dump(verdict, f, indent=2)
+    return verdict
+
+
+def _load_report(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _events(report, kinds):
+    return [e for e in (report or {}).get("events", []) if e.get("kind") in kinds]
+
+
+def _codes(report, kind):
+    return sorted({e["code"] for e in _events(report, (kind,))})
+
+
+def _names(report, kinds):
+    return sorted({e.get("name", "") for e in _events(report, kinds) if e.get("name")})
+
+
+def _quirks(report):
+    """The cosmetic/ironing bucket (goal #3): things that ran but weren't fully honoured."""
+    out = []
+    for e in _events(report, ("unknown_ioctl", "unknown_mmio", "unsupported_blit",
+                              "unsupported_gles", "unsupported_audio", "unsupported_sdl")):
+        tag = e["kind"]
+        if e.get("name"):
+            tag += ":" + e["name"]
+        elif e.get("code"):
+            tag += ":0x%x" % e["code"] if e["kind"] == "unknown_mmio" else ":%d" % e["code"]
+        out.append(tag)
+    return sorted(set(out))
+
+
+def _status(exit_code, report, frames, fps, nz_samples, audio_active):
+    fatal = _events(report, ("host_fault",))
+    if exit_code == 70 or fatal:
+        return "crashed"
+    cant_start = _events(report, ("missing_symbol", "missing_rootfs_lib", "guest_fatal"))
+    if cant_start or frames < 2:
+        return "incompatible"
+    rendered = max(nz_samples) if nz_samples else 0.0
+    if rendered < 0.005:                       # frames advanced but every sample was black
+        return "black"
+    if fps >= 25 and audio_active:
+        return "playable"
+    return "renders"
+
+
+def main():
+    ap = argparse.ArgumentParser(description="run one title headlessly, emit a verdict")
+    ap.add_argument("game")
+    ap.add_argument("--secs", type=float, default=20.0)
+    ap.add_argument("--engine", default=None)
+    ap.add_argument("--out", default=None, help="output dir (default: a temp dir)")
+    ap.add_argument("--shm-name", default="gp2x_fb")
+    ap.add_argument("--press", default=None, help='e.g. "UP:0.5,A:0.2,B+DOWN:0.3"')
+    ap.add_argument("--headed", action="store_true", help="also open the live viewer window")
+    ap.add_argument("--json", action="store_true", help="print the full verdict JSON")
+    a = ap.parse_args()
+    v = run_one(a.game, secs=a.secs, engine=a.engine, out_dir=a.out, shm_name=a.shm_name,
+                press=a.press, headed=a.headed)
+    if a.json:
+        print(json.dumps(v, indent=2))
+    else:
+        print("%-28s %-10s %-9s fps=%-5s frames=%-5s black=%.2f audio=%d  %s" % (
+            v["title"][:28], v["status"], v.get("device", "?"), v.get("fps", "?"),
+            v.get("frames", "?"), v.get("black_ratio", 1.0), v.get("audio_active", 0),
+            v.get("out_dir", "")))
+        blockers = v.get("missing_symbols", []) + ["sc%d" % c for c in v.get("unimplemented", [])]
+        if blockers:
+            print("   blockers: " + ", ".join(str(b) for b in blockers[:8]))
+        if v.get("quirks"):
+            print("   quirks:   " + ", ".join(v["quirks"][:8]))
+    return 0 if v["status"] in ("playable", "renders") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

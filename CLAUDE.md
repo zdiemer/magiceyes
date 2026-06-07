@@ -106,6 +106,30 @@ rootfs-eabi` (Debian Wheezy armel, for Caanoo + EABI Wiz homebrew like Patissier
 from Pollux sonames; set explicitly for non-GLES Caanoo titles). See
 `device-detection-from-elf`.
 
+## Testing & diagnostics (headless triage for broad compatibility)
+
+The point: point a Claude agent (or yourself) at a directory of `.gpe` binaries and learn what to
+fix, without a window. Built on the standalone Linux engine (`bin/me_unicorn`).
+
+- **Structured run report** (`host/engine/report.{c,h}`): one central sink (`me_report`) for every
+  "I don't fully handle this" event — unimplemented syscall, unknown ioctl/MMSP2-register/`/dev`
+  node, missing ld.so symbol (caught by scraping guest stderr), unsupported GLES/blit/audio, host
+  fault. Off by default (zero cost); on via `ME_REPORT=<path>` or `--debug`/`ME_DEBUG`, which
+  writes deduped JSON. The guest shims report via a `\x01MR k c name` stderr sentinel the engine
+  ingests (not a custom syscall — the OABI GPH-SDK toolchain has no `svc`); gated on `ME_DEBUG`
+  forwarded into the guest env.
+- **Harness hooks**: `ME_RUN_SECS=N` self-terminates cleanly (flushing the report) for bounded
+  runs; a host fault makes the standalone engine exit **70** (so a crash ≠ a clean exit);
+  `ME_SHM_NAME` lets parallel engines use separate shm objects.
+- **`tools/test/`** (WSL, reads `/dev/shm`): `run_title.py` runs one binary → a verdict JSON with a
+  status tier (`incompatible`<`crashed`<`black`<`renders`<`playable`) + fps/frames/audio/quirks;
+  `run_corpus.py` runs a whole directory (`--jobs N` parallel) → `SCORECARD.md` +
+  `corpus_report.json` (the agent-facing artifact, with cross-title blocker tallies). `--headed`
+  opens the live viewer for a human. `baseline.py` records/checks golden metrics + perceptual frame
+  hashes (committed under `tools/test/baselines/`, no game imagery) — the anti-regression gate that
+  discourages per-title hacks. `tools/test/smoke.sh` is an asset-free engine self-test (also CI).
+  See `tools/test/README.md`.
+
 ## Dev environment & gotchas (IMPORTANT)
 
 - Host dev is **WSL Ubuntu 24.04** + `qemu-user-static`, the **forked Unicorn** (`~/me-unicorn-fork`,

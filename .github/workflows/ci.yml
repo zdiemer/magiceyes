@@ -42,3 +42,37 @@ jobs:
           name: magiceyes-win64
           path: dist/*.zip
           if-no-files-found: error
+
+  # Functional self-test of the Linux engine: ELF load + SVC syscalls + the structured run report
+  # + ME_RUN_SECS clean stop. No game assets, no window -- so it can run unattended in CI and catch
+  # gross breakage of the run path that the Windows compile-only job can't. Separate job so a fork
+  # build hiccup never blocks the Windows artifact above.
+  engine-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gcc-arm-linux-gnueabi cmake ninja-build python3 git
+
+      - name: Cache Unicorn fork (Linux static lib)
+        id: forkcache
+        uses: actions/cache@v4
+        with:
+          path: ~/me-unicorn-fork
+          key: unicorn-fork-linux-v1-${{ hashFiles('host/engine/fork-patches/*.py') }}
+
+      - name: Build Unicorn fork (Linux) + apply magiceyes patches
+        if: steps.forkcache.outputs.cache-hit != 'true'
+        run: |
+          FORK="$HOME/me-unicorn-fork"
+          git clone --depth 1 --branch 2.0.1 https://github.com/unicorn-engine/unicorn "$FORK"
+          cmake -S "$FORK" -B "$FORK/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DUNICORN_ARCH=arm
+          bash host/engine/fork-patches/apply_and_build.sh
+
+      - name: Build engine + run smoke
+        run: |
+          bash host/engine/build_engine.sh
+          bash tools/test/smoke.sh

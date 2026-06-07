@@ -14,6 +14,15 @@
 #define ME_NR_GL_DRAW     0x000E0003u   /* r0=guest ptr to struct gl_draw : rasterize one draw */
 #define ME_NR_GL_PRESENT  0x000E0004u   /* present cbuf -> shm RGB565 (frame_seq++) */
 
+/* Telemetry: the guest shims surface an unsupported feature into the engine's structured run
+   report (host/engine/report.h) by writing a sentinel line to stderr -- "\x01MR <kind> <code>
+   <name>\n" -- which the engine ingests in its write() handler (me_report_ingest_guest). A line,
+   not a custom syscall, because the OABI GPH-SDK shim toolchain has no `svc`. The kind numbers
+   MUST match enum me_report_kind in report.h. Emitted only when ME_DEBUG is in the guest env. */
+#define ME_RPT_GLES       9    /* MR_UNSUPPORTED_GLES */
+#define ME_RPT_AUDIO      10   /* MR_UNSUPPORTED_AUDIO */
+#define ME_RPT_SDL        11   /* MR_UNSUPPORTED_SDL */
+
 struct gl_array {       /* a client vertex-attribute array (guest pointers; engine derefs them) */
     uint32_t ptr;       /* guest address of the array base (0 / en=0 if disabled) */
     int32_t  size;      /* components per element */

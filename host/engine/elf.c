@@ -223,8 +223,8 @@ uint32_t setup_stack(int argc, char **argv) {
     uint32_t sp = STACK_TOP;
 
     /* env strings (dynamic only) */
-    const char *envs[12]; int nenv = 0;
-    static char envbuf[12][128];
+    const char *envs[16]; int nenv = 0;
+    static char envbuf[16][128];
     if (g_is_dynamic) {
         envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib";
         envs[nenv++] = "HOME=/tmp";
@@ -242,13 +242,18 @@ uint32_t setup_stack(int argc, char **argv) {
         static const char *fwd[] = { "FAKESDL_BLIT_LOG", "FAKESDL_PRESENT_LOG", "FAKESDL_NO_COLORKEY",
                                      "FAKESDL_SRC_DUMP", "FAKESDL_AUDIO_DUMP", "FAKEGLES_LOG",
                                      "FAKEGLES_NORAST" };
-        for (int i = 0; i < (int)(sizeof fwd / sizeof fwd[0]) && nenv < 11; i++) {
+        for (int i = 0; i < (int)(sizeof fwd / sizeof fwd[0]) && nenv < 15; i++) {
             char host[64]; snprintf(host, sizeof host, "ME_%s", fwd[i]);
             const char *v = getenv(host);
             if (v) { snprintf(envbuf[nenv], sizeof envbuf[0], "%s=%s", fwd[i], v); envs[nenv] = envbuf[nenv]; nenv++; }
         }
+        /* Tell the shim to emit structured run-report lines (the engine ingests them off stderr).
+           Off by default so a normal play session does no per-frame report work in the guest. */
+        if ((getenv("ME_DEBUG") || getenv("ME_REPORT")) && nenv < 15) {
+            snprintf(envbuf[nenv], sizeof envbuf[0], "ME_DEBUG=1"); envs[nenv] = envbuf[nenv]; nenv++;
+        }
     }
-    uint32_t envp[12];
+    uint32_t envp[16];
 
     /* push strings, collect guest pointers */
     uint32_t argp[64]; int n = argc < 63 ? argc : 63;

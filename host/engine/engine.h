@@ -25,6 +25,7 @@
 #include <limits.h>
 #include <elf.h>
 #include "gp2xshm.h"
+#include "report.h"   /* structured run telemetry (me_report / me_report_flush_json) */
 
 /* ---- guest virtual memory layout ---- */
 #define STACK_TOP   0x80000000u

@@ -22,7 +22,12 @@ int dev_open(const char *path) {
     else if (!strcmp(path, "/dev/isa1200") ||
              !strcmp(path, "/dev/pollux_clock")) t = DEV_OTHER;
     else if (!strcmp(path, "/dev/shm/gp2x_fb")) t = DEV_SHMFB; /* fake-SDL shim's framebuffer shm */
-    else return -1;
+    else {
+        /* A /dev node we don't model: record it (so the harness/agent learns which device a new
+           title wants) but don't change behaviour -- fall through to the normal open() path. */
+        if (!strncmp(path, "/dev/", 5)) me_report(MR_UNKNOWN_DEV, 0, path, 0);
+        return -1;
+    }
     int i; for (i = 0; i < 64; i++) if (g_devtype[i] == 0) break;  /* reuse freed slots */
     if (i == 64) return -1;
     g_devtype[i] = t; g_fbnum[i] = fbno; if (i + 1 > g_devn) g_devn = i + 1;
@@ -53,7 +58,12 @@ void shm_setup(void) {
     g_shm->magic = GP2XSHM_MAGIC;
     return;
 #else
-    int fd = shm_open(GP2XSHM_NAME, O_CREAT | O_RDWR, 0666);
+    /* ME_SHM_NAME lets several headless engines run in parallel without colliding on one shm
+       object (the corpus harness reads /dev/shm/<name>). The in-guest shim still opens the
+       virtual "/dev/shm/gp2x_fb", which the engine intercepts (DEV_SHMFB) and aliases onto this
+       g_shm regardless of the real object's name -- so no shim change is needed. */
+    const char *shmname = getenv("ME_SHM_NAME"); if (!shmname || !*shmname) shmname = GP2XSHM_NAME;
+    int fd = shm_open(shmname, O_CREAT | O_RDWR, 0666);
     if (fd < 0) return;
     if (ftruncate(fd, sizeof(gp2x_shm_t)) != 0) { /* may pre-exist */ }
     void *p = mmap(NULL, sizeof(gp2x_shm_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -253,7 +263,7 @@ long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
     case 0x4606: { uint32_t yoff = 0; if (arg) uc_mem_read(g_uc, arg + 20, &yoff, 4);
                    fb_pan(yoff); return 0; }                                /* PAN_DISPLAY (yoffset@20) */
     case 0x4611: return 0;                                                  /* FBIOBLANK: accept */
-    default:     return 0;
+    default:     me_report(MR_UNKNOWN_IOCTL, (long)cmd, "fb", 0); return 0;  /* accept unknown fb ioctl */
     }
 }
 
@@ -413,6 +423,8 @@ static void blit_exec(void) {
         }
     }
 done:
+    if (why[0] != 'o' /* != "ok" */)   /* a blit op we couldn't execute (fifo-src, bpp-mismatch, ...) */
+        me_report(MR_UNSUPPORTED_BLIT, 0, why, 0);
     if (getenv("ME_GP2X_BLITLOG"))
         fprintf(stderr, "  BLIT %s: dst=%08x(+%u) %ux%u dbpp=%d src=%08x sctrl=%08x ctrl=%08x fc=%08x\n",
                 why, g_blt.dstaddr, dpixoff, w, h, dbpp, g_blt.srcaddr, g_blt.srcctrl, ctrl, g_blt.forcolor);
@@ -557,7 +569,7 @@ long dsp_ioctl(uint32_t cmd, uint32_t arg) {
         return 0;
     }
     case 0x00: /* RESET */ case 0x01: /* SYNC */ case 0x08: /* POST */ return 0;
-    default: return 0;
+    default: me_report(MR_UNKNOWN_IOCTL, (long)(cmd & 0xff), "dsp", 0); return 0;
     }
     /* publish the negotiated format so a viewer can open the right audio device */
     if (g_shm) {
@@ -600,7 +612,13 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         if (phys && phys_to_guest(phys, &g)) g_fb_guest = g;
         return;
     }
-    if (off != MMSP2_OADRL && off != MMSP2_OADRH) return;
+    if (off != MMSP2_OADRL && off != MMSP2_OADRH) {
+        /* a register we don't decode (the game still sees its own stored value); record the
+           distinct offset so a new title's use of an undecoded block (YUV/MPEG, layer 2, ...)
+           shows up. Deduped by offset; gated so it's free when nobody's listening. */
+        if (me_report_active()) me_report(MR_UNKNOWN_MMIO, (long)off, NULL, 0);
+        return;
+    }
     uint16_t lo = 0, hi = 0;
     uc_mem_read(uc, g_mmsp2_guest + MMSP2_OADRL, &lo, 2);
     uc_mem_read(uc, g_mmsp2_guest + MMSP2_OADRH, &hi, 2);
