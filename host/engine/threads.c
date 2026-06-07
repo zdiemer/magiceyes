@@ -258,6 +258,20 @@ void engine_request_reload(const char *host_path) {
     pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
 }
 
+/* Like engine_request_reload, but called from WITHIN a guest syscall (g_biglock already held, so
+   it must NOT re-lock it). Kicks EVERY uc out -- not just the caller's -- because a chain-load
+   (execve) can be issued from a worker thread (gp2xmenu launches the selected game off its main
+   thread); stopping only the caller left the main thread spinning and the reload never ran. */
+void engine_reload_in_syscall(const char *host_path) {
+    if (!host_path || !*host_path) return;
+    snprintf(g_reload_path, sizeof g_reload_path, "%s", host_path);
+    g_reload_chdir = 1;
+    g_exit = 1;
+    for (int i = 0; i < g_nth; i++) if (g_th[i].uc) uc_emu_stop(g_th[i].uc);
+    futex_wake_all();
+    pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
+}
+
 /* allocate a thread slot; caller fills it + pthread_create. Returns index or -1. */
 int thread_alloc(void) {
     for (int i = 0; i < g_nth; i++) if (g_th[i].state == TH_DEAD && !g_th[i].th) return i;

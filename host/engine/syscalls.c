@@ -688,10 +688,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                Idempotent on a plain ELF / an already-decompressed temp. */
             char fin[PATH_MAX]; const char *r = resolve_input(rp, fin, sizeof fin);
             if (!r) return LERR(ENOENT);
-            snprintf(g_reload_path, sizeof g_reload_path, "%s", r);
-            g_reload_chdir = 1;   /* run the new binary from its own dir (its Data/ is relative) */
-            if (g_trace) fprintf(stderr, "  [execve] reload -> %s (guest '%s')\n", g_reload_path, ep);
-            g_setpc = 1; uc_emu_stop(g_uc);
+            if (g_trace) fprintf(stderr, "  [execve] reload -> %s (guest '%s')\n", fin, ep);
+            /* stop EVERY thread (gp2xmenu may exec the game off a worker thread), record the
+               target, and let the main loop run the reset+load. */
+            g_setpc = 1;
+            engine_reload_in_syscall(fin);
             return 0;
         }
         return LERR(ENOSYS);

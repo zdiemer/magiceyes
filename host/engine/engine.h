@@ -63,6 +63,7 @@ void me_platform_init(void);   /* one-time host setup (Windows: timer res + no E
 
 /* ---- reset/reload (shared by GPEComp re-exec + File->Open hot reload) ---- */
 void engine_request_reload(const char *host_path);  /* viewer thread: stop+reset+load (threads.c) */
+void engine_reload_in_syscall(const char *host_path);  /* execve chain-load (g_biglock held) */
 void engine_stop_all_threads(void);                 /* join every worker, close its uc (threads.c) */
 void mem_reset(void);                               /* free all guest-RAM host backing (mem.c) */
 void devices_reset(void);                           /* zero device/fb/audio/MMSP2 state (devices.c) */
