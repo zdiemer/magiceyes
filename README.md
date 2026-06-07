@@ -18,7 +18,7 @@ Pollux in the Wiz/Caanoo).
   <tr>
     <td align="center"><img src="docs/img/quartz2.png" width="250" alt="Quartz 2"><br><sub><b>Quartz 2</b> — GP2X</sub></td>
     <td align="center"><img src="docs/img/blazar.png" width="250" alt="Blazar"><br><sub><b>Blazar</b> — GP2X</sub></td>
-    <td align="center"><img src="docs/img/payback-action.png" width="250" alt="Payback"><br><sub><b>Payback</b> — GP2X (commercial)</sub></td>
+    <td align="center"><img src="docs/img/propis.png" width="250" alt="Propis"><br><sub><b>Propis</b> — Caanoo</sub></td>
   </tr>
 </table>
 
