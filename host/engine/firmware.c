@@ -1,0 +1,102 @@
+/* magiceyes Unicorn engine — locate a staged device firmware for "boot to firmware".
+ *
+ * Firmware boot runs the device's own gp2xmenu launcher (a normal dynamic ARM ELF) under the
+ * engine, with the firmware rootfs. me_firmware_paths() resolves a device name to its staged
+ * rootfs dir and the gp2xmenu inside it. The in-process stager (fwstage.c) writes staged
+ * firmware to <writable>/fw/<device>; until a device is staged we also accept the pre-extracted
+ * rootfs that already ships under assets/ (Wiz). See firmware-boot-support (memory) + the plan. */
+#include "engine.h"
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#define strcasecmp _stricmp
+#else
+#include <strings.h>
+#endif
+
+static int is_file(const char *p) { struct stat s; return stat(p, &s) == 0 && (s.st_mode & S_IFREG); }
+
+/* Canonicalise to an absolute path. The caller chdir()s into the game's dir before loading,
+   and gp2xmenu's ld.so opens /lib/... via the rootfs prefix, so a relative rootfs/menu path
+   would break once cwd moves. realpath/_fullpath resolve "." and "..". */
+static void abspath(const char *in, char *out, size_t cap) {
+#ifdef _WIN32
+    if (!_fullpath(out, in, (int)cap)) snprintf(out, cap, "%s", in);
+#else
+    char *r = realpath(in, NULL);
+    if (r) { snprintf(out, cap, "%s", r); free(r); }
+    else snprintf(out, cap, "%s", in);
+#endif
+}
+
+/* Canonical staged-dir name for a device alias ("gp2x" -> "f100"). */
+static const char *fw_dir_name(const char *device) {
+    if (!device) return NULL;
+    if (!strcasecmp(device, "wiz"))    return "wiz";
+    if (!strcasecmp(device, "caanoo")) return "caanoo";
+    if (!strcasecmp(device, "f200"))   return "f200";
+    if (!strcasecmp(device, "f100") || !strcasecmp(device, "gp2x")) return "f100";
+    return NULL;
+}
+
+/* Writable staging root (matches where fwstage.c installs + the viewer keeps recent.txt):
+   %APPDATA%\magiceyes on Windows, $HOME/.magiceyes on Linux. */
+static int writable_root(char *out, size_t cap) {
+#ifdef _WIN32
+    const char *base = getenv("APPDATA");
+#else
+    const char *base = getenv("HOME");
+#endif
+    if (!base || !base[0]) return 0;
+#ifdef _WIN32
+    snprintf(out, cap, "%s\\magiceyes", base);
+#else
+    snprintf(out, cap, "%s/.magiceyes", base);
+#endif
+    return 1;
+}
+
+/* If <rootfs>/usr/gp2x/gp2xmenu exists, fill rootfs+menu and return 1. */
+static int try_rootfs(const char *cand, char *rootfs, char *menu, size_t cap) {
+    char m[PATH_MAX];
+    snprintf(m, sizeof m, "%s/usr/gp2x/gp2xmenu", cand);
+    if (!is_file(m)) return 0;
+    abspath(cand, rootfs, cap);                          /* absolute: survives the loader's chdir */
+    snprintf(menu, cap, "%s/usr/gp2x/gp2xmenu", rootfs);
+    return 1;
+}
+
+int me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap) {
+    const char *name = fw_dir_name(device);
+    if (!name) return 0;
+
+    char cand[PATH_MAX], wr[PATH_MAX];
+    /* 1. staged firmware in the writable root (the normal install target) */
+    if (writable_root(wr, sizeof wr)) {
+        snprintf(cand, sizeof cand, "%s/fw/%s", wr, name);
+        if (try_rootfs(cand, rootfs, menu, cap)) return 1;
+    }
+    /* 2. staged firmware beside the exe / under assets */
+    const char *bases[3]; int nb = 0;
+    if (g_exe_dir[0]) { bases[nb++] = g_exe_dir; }
+    bases[nb++] = ".";
+    for (int i = 0; i < nb; i++) {
+        const char *pfx[] = { "fw", "assets/fw", "../assets/fw" };
+        for (int p = 0; p < 3; p++) {
+            snprintf(cand, sizeof cand, "%s/%s/%s", bases[i], pfx[p], name);
+            if (try_rootfs(cand, rootfs, menu, cap)) return 1;
+        }
+    }
+    /* 3. pre-extracted rootfs that already ships (Wiz: assets/rootfs/0/rootfs) — lets firmware
+       boot work before the in-process stager exists. */
+    if (!strcmp(name, "wiz")) {
+        const char *fallback[] = { "rootfs/0/rootfs", "assets/rootfs/0/rootfs",
+                                   "../assets/rootfs/0/rootfs", "rootfs", "assets/rootfs-win" };
+        for (int i = 0; i < nb; i++)
+            for (size_t f = 0; f < sizeof fallback / sizeof fallback[0]; f++) {
+                snprintf(cand, sizeof cand, "%s/%s", bases[i], fallback[f]);
+                if (try_rootfs(cand, rootfs, menu, cap)) return 1;
+            }
+    }
+    return 0;
+}

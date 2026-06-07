@@ -50,6 +50,17 @@ void rewrite_guest_path(const char *in, char *out, size_t cap) {
    device libs + our fake-SDL shim shadowing libSDL (host/win/stage_rootfs.sh). Game assets
    are opened relative to the game's own cwd, so they don't go through here. */
 static char g_rootfs[PATH_MAX]; static int g_rootfs_ok = -1;
+/* Firmware boot pins the active rootfs to a known device dir, so me_rootfs_select() won't
+   re-pick by PT_INTERP (Wiz/F100/F200 all use ld-linux.so.2 and can't be told apart by it).
+   The pin persists across reloads (syscalls_reset doesn't touch it) so a game chain-loaded
+   from gp2xmenu keeps the same firmware rootfs. me_rootfs_set(NULL) unpins. */
+static int g_rootfs_pinned = 0;
+void me_rootfs_set(const char *dir) {
+    if (!dir || !dir[0]) { g_rootfs_pinned = 0; return; }
+    snprintf(g_rootfs, sizeof g_rootfs, "%s", dir);
+    g_rootfs_ok = 1; g_rootfs_pinned = 1;
+    if (g_trace) fprintf(stderr, "  [rootfs] pinned %s\n", g_rootfs);
+}
 
 /* Candidate rootfs dirs. There can be more than one with DIFFERENT ABIs: the firmware
    rootfs is glibc-2.3.6 / ld-linux.so.2 (commercial titles: Deicide 3, Her Knights,
@@ -96,6 +107,7 @@ void me_rootfs_init(void) {
    Returns 1 if a matching rootfs was found+selected. Called from load_elf (all entry
    points) before the interpreter/libs are opened. */
 int me_rootfs_select(const char *interp) {
+    if (g_rootfs_pinned) return g_rootfs_ok == 1;   /* firmware boot pinned a specific rootfs */
     if (!interp || !interp[0]) return g_rootfs_ok == 1;
     rootfs_build_cands();
     const char *b = strrchr(interp, '/'); b = b ? b + 1 : interp;
@@ -121,9 +133,51 @@ int me_rootfs_resolve(const char *guest, char *out, size_t cap) {
     snprintf(out, cap, "%s", hp);
     return 1;
 }
-/* Map a guest path to the host path to actually open/stat: rootfs first (dynamic libs), then
-   the /mnt/tmp redirect (GPEComp temps on Windows), else identity. */
+/* Map the device SD/NAND mount points onto a host games directory, so gp2xmenu (and games it
+   launches) can list /mnt/sd/game etc. ME_GP2X_SD / ME_GP2X_NAND override (set by the GUI's
+   "Set games folder"); NAND defaults to the SD root; the dev default is a "games" dir beside the
+   exe. The roots must be ABSOLUTE -- the loader chdir()s into the game dir, so a relative root
+   would resolve against the wrong cwd. */
+static void mount_root(const char *which, char *out, size_t cap) {
+    const char *env = getenv(which);
+    if (env && env[0]) { snprintf(out, cap, "%s", env); return; }
+    if (!strcmp(which, "ME_GP2X_NAND")) {
+        const char *sd = getenv("ME_GP2X_SD");
+        if (sd && sd[0]) { snprintf(out, cap, "%s", sd); return; }
+    }
+    struct stat s;
+    if (g_exe_dir[0]) {   /* g_exe_dir is absolutised at startup (main) */
+        snprintf(out, cap, "%s/games", g_exe_dir);
+        if (stat(out, &s) == 0) return;
+        snprintf(out, cap, "%s/assets/games", g_exe_dir);
+        if (stat(out, &s) == 0) return;
+        snprintf(out, cap, "%s/games", g_exe_dir);   /* fall back to the first (may not exist yet) */
+        return;
+    }
+    snprintf(out, cap, "%s", "games");
+}
+static int me_mount_resolve(const char *guest, char *out, size_t cap) {
+    if (!g_firmware_mode) return 0;   /* only the firmware menu + games it launches use /mnt/sd|nand */
+    const char *rest = NULL, *which = NULL;
+    if (!strncmp(guest, "/mnt/sd", 7) && (guest[7] == 0 || guest[7] == '/')) {
+        rest = guest + 7; which = "ME_GP2X_SD";
+    } else if (!strncmp(guest, "/mnt/nand", 9) && (guest[9] == 0 || guest[9] == '/')) {
+        rest = guest + 9; which = "ME_GP2X_NAND";
+    }
+    if (!rest) return 0;
+    char root[PATH_MAX]; mount_root(which, root, sizeof root);
+    char tail[PATH_MAX]; snprintf(tail, sizeof tail, "%s", rest);
+#ifdef _WIN32
+    for (char *p = tail; *p; p++) if (*p == '/') *p = '\\';   /* match rewrite_guest_path */
+#endif
+    snprintf(out, cap, "%s%s", root, tail);
+    return 1;
+}
+
+/* Map a guest path to the host path to actually open/stat: SD/NAND games mount first, then rootfs
+   (dynamic libs), then the /mnt/tmp redirect (GPEComp temps on Windows), else identity. */
 static void resolve_path(const char *guest, char *out, size_t cap) {
+    if (me_mount_resolve(guest, out, cap)) return;
     if (me_rootfs_resolve(guest, out, cap)) return;
     rewrite_guest_path(guest, out, cap);
 }
@@ -138,6 +192,21 @@ void read_cstr(uint32_t gaddr, char *out, size_t cap) {
         if (c == 0) return;
     }
     out[i] = 0;
+}
+
+/* The firmware menu gates its SD games scan on the SD partition's block device existing
+   (it stat()s /dev/mmcblk0p1, else shows "Insert the SD card"). We map /mnt/sd to a host games
+   dir, so report the node as a present block device to get past the dialog. Firmware-mode only,
+   so a normal single-game run is unaffected. */
+static int sd_fake_node(const char *p, struct stat *s) {
+    if (!g_firmware_mode) return 0;
+    if (strcmp(p, "/dev/mmcblk0p1") && strcmp(p, "/dev/mmcblk0")) return 0;
+    memset(s, 0, sizeof *s);
+    s->st_mode = S_IFBLK | 0660;
+    s->st_rdev = (179 << 8) | 1;   /* MMC block major 179 */
+    s->st_ino  = 0x6d6d63;         /* 'mmc' */
+    s->st_dev  = 1;
+    return 1;
 }
 
 void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
@@ -599,12 +668,14 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (g_trace) fprintf(stderr, "  [fork] child execve %s -> exit(0)\n", base);
             return g_child_pid;
         }
-        /* A non-fork execve is the GPEComp self-extractor chain-loading the decompressed game:
-           the stub already wrote it (open/write to /mnt/tmp -> redirected to the host scratch
-           dir). Record it as the reload target, stop this uc, and let the main loop reset +
-           load it. This is how inline decompression works in the native engine. */
+        /* A non-fork execve chain-loads a new binary into our single process. Two cases:
+           (1) the GPEComp self-extractor exec'ing its decompressed temp (/mnt/tmp -> host scratch);
+           (2) firmware mode: gp2xmenu exec'ing a selected game (/mnt/sd/.../foo.gpe) or a game
+               exec'ing /usr/gp2x/gp2xmenu to return to the launcher. resolve_path() handles all of
+               them (SD/NAND mount, rootfs, /mnt/tmp redirect). The main loop runs the target
+               through resolve_input() (GPEComp decompress / launcher-script follow) on reload. */
         if (!g_forked) {
-            char rp[PATH_MAX]; rewrite_guest_path(ep, rp, sizeof rp);
+            char rp[PATH_MAX]; resolve_path(ep, rp, sizeof rp);
             struct stat es;
             if (stat(rp, &es) != 0) {   /* garbage/missing target (e.g. a game relaunching itself
                                            with a path built from stubbed getcwd/readlink): fail the
@@ -612,7 +683,13 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                 if (g_trace) fprintf(stderr, "  [execve] target '%s' (guest '%s') missing -> ENOENT\n", rp, ep);
                 return LERR(ENOENT);
             }
-            snprintf(g_reload_path, sizeof g_reload_path, "%s", rp);
+            /* Run the target through the same resolver the CLI + File->Open use, so a GPEComp
+               .gpe launched from gp2xmenu decompresses (and a launcher script is followed).
+               Idempotent on a plain ELF / an already-decompressed temp. */
+            char fin[PATH_MAX]; const char *r = resolve_input(rp, fin, sizeof fin);
+            if (!r) return LERR(ENOENT);
+            snprintf(g_reload_path, sizeof g_reload_path, "%s", r);
+            g_reload_chdir = 1;   /* run the new binary from its own dir (its Data/ is relative) */
             if (g_trace) fprintf(stderr, "  [execve] reload -> %s (guest '%s')\n", g_reload_path, ep);
             g_setpc = 1; uc_emu_stop(g_uc);
             return 0;
@@ -668,9 +745,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 141:  return dir_getdents((int)a0, a1, a2, 0);  /* getdents   (linux_dirent)   */
     case 217:  return dir_getdents((int)a0, a1, a2, 1);  /* getdents64 (linux_dirent64) */
     case 156:  return 0;        /* sched_setscheduler (GP2X games bump their audio thread's prio) */
-    case 12: {  /* chdir(path) -- some games cd before opening assets (Blazar) */
+    case 12: {  /* chdir(path) -- some games cd before opening assets (Blazar); gp2xmenu cd's into
+                   the game dir under /mnt/sd before exec'ing it */
         char p[1024]; read_cstr(a0, p, sizeof p);
-        char rp[PATH_MAX]; rewrite_guest_path(p, rp, sizeof rp);
+        char rp[PATH_MAX]; resolve_path(p, rp, sizeof rp);
         return chdir(rp) == 0 ? 0 : LERR(errno);
     }
     case 183: {  /* getcwd(buf, size) -> bytes incl NUL, or -ERANGE */
@@ -978,8 +1056,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 369:  return 0;  /* prlimit64 */
     case 106: { /* stat(path, buf) */
         char p[1024]; read_cstr(a0, p, sizeof p);
+        struct stat s;
+        if (sd_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
         char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
-        struct stat s; if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
+        if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
         struct memfile *mf = memfd_get((int)a0);
@@ -999,6 +1079,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (!ok && s.st_ino == 0) s.st_ino = hostfd_ino((int)a0);   /* Win: synth unique inode */
         }
         else { read_cstr(a0, p, sizeof p);
+               if (sd_fake_node(p, &s)) { fill_stat64(a1, &s); return 0; }   /* SD present (firmware) */
                int mf = sysfile_open(p);   /* a faked path: report it as a regular file */
                if (mf) { struct memfile *m = memfd_get(mf); struct stat ms; memset(&ms, 0, sizeof ms);
                          ms.st_mode = S_IFREG | 0644; ms.st_size = m->len; free(m->data); m->used = 0;

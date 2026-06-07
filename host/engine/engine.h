@@ -48,6 +48,8 @@ extern int g_reloading;       /* a reset/reload is in flight: the helper skips p
 extern int g_reload_chdir;    /* reload should chdir to the new binary's dir (File->Open: yes;
                                  GPEComp re-exec into the temp: no -- keep the game's cwd) */
 extern char g_reload_path[PATH_MAX];   /* non-empty -> the main loop resets + loads this binary */
+extern int g_firmware_mode;            /* booted a device gp2xmenu: return to it between games */
+extern char g_firmware_menu[PATH_MAX]; /* gp2xmenu path to re-enter after a game exits */
 extern __thread int g_setpc;   /* a syscall set PC (signal entry/sigreturn): skip R0 write */
 extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 
@@ -102,6 +104,10 @@ void glr_present(void);
 void me_rootfs_init(void);   /* pick the rootfs (ME_GP2X_ROOTFS or a default); idempotent */
 int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* 1 = host path in out */
 int  me_rootfs_select(const char *interp);  /* pick the rootfs holding this PT_INTERP (so.2 vs .3) */
+void me_rootfs_set(const char *dir);        /* firmware boot: pin a specific rootfs; NULL = unpin */
+
+/* ---- firmware.c: locate a staged device firmware (rootfs + its gp2xmenu) ---- */
+int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap);  /* 1 if found */
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER };

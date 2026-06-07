@@ -36,6 +36,12 @@ int g_eabi  = 0;   /* current syscall ABI: 1 = EABI (svc #0), 0 = legacy OABI (s
 char g_exe_dir[PATH_MAX] = {0};   /* dir of our own executable (default rootfs search) */
 __thread int g_setpc = 0;   /* a syscall set PC (signal entry / sigreturn): skip R0 write */
 
+/* Firmware boot: we ran the device's gp2xmenu launcher (not a single game). On a game's exit
+   we re-enter the menu instead of going idle, and gp2xmenu's game-launch execve chain-loads.
+   These survive reloads (NOT cleared by engine_reset_globals) so they define the whole session. */
+int g_firmware_mode = 0;
+char g_firmware_menu[PATH_MAX] = {0};   /* path to gp2xmenu to return to between games */
+
 /* synchronous fork state (system()/popen child; see syscalls.c) */
 uc_context *g_fork_ctx = NULL;
 struct snap g_snap[2048];
@@ -210,6 +216,7 @@ static void print_usage(const char *p0) {
         "magiceyes - run GP2X/Wiz games on a PC\n"
         "usage: %s [options] [game.gpe | folder | game.zip]\n"
         "       (with no game, the window opens empty -- use File > Open)\n\n"
+        "      --firmware DEV boot the device firmware menu (gp2xmenu): wiz|caanoo|f100|f200\n"
         "  -s, --scale N      window scale factor (default 3)\n"
         "  -f, --fullscreen   start fullscreen (toggle in-app with F11)\n"
         "      --mute         start muted\n"
@@ -323,10 +330,20 @@ int main(int argc, char **argv) {
         snprintf(g_exe_dir, sizeof g_exe_dir, "%s", argv[0]);
         char *s1 = strrchr(g_exe_dir, '/'), *s2 = strrchr(g_exe_dir, '\\'), *s = s1 > s2 ? s1 : s2;
         if (s) *s = 0; else g_exe_dir[0] = 0;
+        if (g_exe_dir[0]) {   /* absolutise: it seeds rootfs/firmware/games search, and the loader
+                                 chdir()s into the game dir, so a relative base would later break */
+            char abs[PATH_MAX];
+#ifdef _WIN32
+            if (_fullpath(abs, g_exe_dir, sizeof abs)) snprintf(g_exe_dir, sizeof g_exe_dir, "%s", abs);
+#else
+            if (realpath(g_exe_dir, abs)) snprintf(g_exe_dir, sizeof g_exe_dir, "%s", abs);
+#endif
+        }
     }
     me_rootfs_init();     /* locate the device rootfs (dynamic-linked titles); env ME_GP2X_ROOTFS */
     /* ---- CLI: parse flags; the first non-flag positional is the game ---- */
     const char *input = NULL;
+    const char *fw_device = NULL;   /* --firmware <device>: boot that device's gp2xmenu */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (a[0] != '-' || a[1] == 0) { input = a; break; }   /* a bare "-" is not a flag */
@@ -343,12 +360,33 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--threaddump"))                     setenv("ME_THREADDUMP", "1", 1);
         else if (!strcmp(a, "--no-smcfreeze"))                   setenv("ME_GP2X_NOSMCFREEZE", "1", 1);
         else if (!strcmp(a, "--debug"))                          { setenv("ME_DEBUG", "1", 1); setenv("ME_PROF", "1", 1); }
+        else if (!strcmp(a, "--firmware"))                       { if (++i < argc) fw_device = argv[i]; }
         else if (!strcmp(a, "--report"))                         { if (++i < argc) setenv("ME_REPORT", argv[i], 1); }
         else if (!strcmp(a, "--run-secs"))                       { if (++i < argc) setenv("ME_RUN_SECS", argv[i], 1); }
         else { fprintf(stderr, "magiceyes: unknown option '%s'\n", a); print_usage(argv[0]); return 2; }
     }
     if (g_view_scale < 1) g_view_scale = 1;
     if (g_volume < 0) g_volume = 0; else if (g_volume > 100) g_volume = 100;
+
+    /* --firmware <device>: boot the device's gp2xmenu launcher from its staged rootfs. We pin
+       the rootfs (Wiz/F100/F200 share ld-linux.so.2, so PT_INTERP can't disambiguate) and force
+       MAGICEYES_DEVICE (the menu auto-detects as GP2X -> wrong input map for Wiz/Caanoo). The
+       menu then loads via the normal dynamic-ELF path below. */
+    if (fw_device) {
+        char fwroot[PATH_MAX], fwmenu[PATH_MAX];
+        if (!me_firmware_paths(fw_device, fwroot, fwmenu, sizeof fwroot)) {
+            fprintf(stderr, "magiceyes: no staged firmware for device '%s'.\n"
+                            "  Install one first (Firmware -> Install firmware..., or stage a rootfs).\n",
+                            fw_device);
+            return 3;
+        }
+        setenv("MAGICEYES_DEVICE", fw_device, 1);
+        me_rootfs_set(fwroot);
+        g_firmware_mode = 1;
+        snprintf(g_firmware_menu, sizeof g_firmware_menu, "%s", fwmenu);
+        input = g_firmware_menu;
+        fprintf(DIAG, "magiceyes: firmware boot %s -> %s\n", fw_device, fwmenu);
+    }
 
     /* ---- resolve folder/.zip/.gpe -> a runnable binary; reject dynamic-linked titles. With no
        game given, the bundle opens an empty window (File->Open loads one); the standalone engine
@@ -439,12 +477,21 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "me_unicorn: main emu err %s pc=%08x insn=%08x cpsr=%08x(T=%d) lr=%08x\n",
                             uc_strerror(e), pc, insn, cpsr, (cpsr >> 5) & 1, gread(UC_ARM_REG_LR));
                 }
+                /* Firmware mode: a game launched from gp2xmenu exited -> return to the menu (real
+                   hardware re-execs gp2xmenu on game exit). Only when it was a GAME that ended, not
+                   the menu itself (else a menu that quits would loop). */
+                if (g_firmware_mode && g_firmware_menu[0] && strcmp(g_cur_game, g_firmware_menu) != 0) {
+                    engine_stop_all_threads();
+                    snprintf(g_reload_path, sizeof g_reload_path, "%s", g_firmware_menu);
+                    g_reload_chdir = 1; g_exit = 0; g_exit_code = 0;
+                } else {
 #ifdef ME_BUNDLED
-                engine_stop_all_threads();     /* halt lingering workers; keep last frame + window */
-                g_exit = 0; g_exit_code = 0;   /* return to an idle window (menu still open) */
+                    engine_stop_all_threads();     /* halt lingering workers; keep last frame + window */
+                    g_exit = 0; g_exit_code = 0;   /* return to an idle window (menu still open) */
 #else
-                break;                         /* standalone: a finished game ends the process */
+                    break;                         /* standalone: a finished game ends the process */
 #endif
+                }
             }
         }
         if (g_reload_path[0]) {                /* GPEComp re-exec or File->Open */
