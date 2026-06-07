@@ -93,6 +93,12 @@ struct memmap g_mem[64]; int g_nmem = 0;
 uint32_t g_mmsp2_guest = 0;   /* guest addr of the 0xC0000000 reg block */
 uint32_t g_fb_guest = 0;      /* guest addr of the /dev/fb0 framebuffer */
 uint32_t g_fb_guest2 = 0;     /* /dev/fb1 (double-buffering: present the active one) */
+/* Caanoo (Pollux MLC): the firmware menu + some titles drive the display directly via the MLC
+   registers in the 0xC0000000 block, choosing a pixel depth our default RGB565 present doesn't
+   match (the menu uses 24bpp RGB888, pitch 960 -> presented as 16bpp it shears + mis-colours).
+   Capture HSTRIDE (bytes/pixel) + VSTRIDE (pitch) from the MLC layer so present can convert. */
+int g_caanoo_bpp = 0;         /* MLCHSTRIDE (bytes/pixel): 0 = unset (use RGB565), 2/3/4 */
+uint32_t g_caanoo_pitch = 0;  /* MLCVSTRIDE (bytes/row) */
 void record_memmap(uint32_t phys, uint32_t guest, uint32_t len) {
     if (g_nmem < 64) { g_mem[g_nmem] = (struct memmap){phys, guest, len}; g_nmem++; }
 }
@@ -115,6 +121,24 @@ extern int g_pal_have;
 void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
     int nz = 0; long nzc = 0;   /* nzc: # of non-zero indices this frame (accumulation diag) */
+    if (g_device == 2 && g_caanoo_bpp >= 3) {  /* Caanoo MLC 24/32bpp (firmware menu) -> RGB565.
+            Pixels are stored B,G,R[,X] (SDL Rmask=0xff0000); convert + downsample to the shm's
+            RGB565 at the MLC's pitch (VSTRIDE), independent of our 320x240x16 default. */
+        int bpp = g_caanoo_bpp;
+        uint32_t pitch = g_caanoo_pitch ? g_caanoo_pitch : (uint32_t)320 * bpp;
+        uint16_t *dst = (uint16_t *)g_shm->pixels;
+        for (int y = 0; y < 240; y++) {
+            uint8_t *src = guest_to_host(g + (uint32_t)y * pitch); if (!src) break;
+            uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
+            for (int x = 0; x < 320; x++) {   /* memory order is B,G,R (SDL Rmask=0xff0000) */
+                uint8_t b = src[x*bpp+0], gg = src[x*bpp+1], r = src[x*bpp+2];
+                dp[x] = (uint16_t)(((r >> 3) << 11) | ((gg >> 2) << 5) | (b >> 3));
+                if (b | gg | r) { nz = 1; nzc++; }
+            }
+        }
+        g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
+        return;
+    }
     if (g_pal_have) {                       /* 8-bit indexed -> RGB565 via the captured palette */
         uint16_t lut[256];
         for (int i = 0; i < 256; i++)
@@ -610,6 +634,20 @@ static int mlc_config_write(uint32_t off, uint32_t val) {
     return 1;                                               /* known display config, not "unknown" */
 }
 
+/* Caanoo (Pollux) MLC layer registers in the 0xC0000000 block (polluxregs.h): capture the
+   framebuffer geometry + scanout so present_guest shows the right buffer at the right depth.
+   layer0: HSTRIDE0=0x4028 VSTRIDE0=0x402c ADDRESS0=0x4038; layer1: HSTRIDE1=0x405c VSTRIDE1=0x4060
+   ADDRESS1=0x406c (the firmware menu uses layer 1, 24bpp RGB888). */
+static void caanoo_mlc_write(uint32_t off, uint32_t val) {
+    switch (off) {
+    case 0x4028: case 0x405c: g_caanoo_bpp = (int)val; break;     /* MLCHSTRIDE = bytes/pixel */
+    case 0x402c: case 0x4060: g_caanoo_pitch = val; break;        /* MLCVSTRIDE = pitch (bytes/row) */
+    case 0x4038: case 0x406c: { uint32_t gg;                       /* MLCADDRESS = scanout base (flip) */
+        if (val && phys_to_guest(val, &gg)) { g_fb_guest = gg; g_flip_active = 1; g_flip_guest = gg; }
+        break; }
+    }
+}
+
 void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                            int size, int64_t value, void *user) {
     (void)type; (void)user;
@@ -618,6 +656,9 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     uint32_t off = (uint32_t)addr - g_mmsp2_guest;
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  MMSP2 wr %04x sz%d=%08x\n", off, size, (uint32_t)value); }
+    if (g_device == 2 && off >= 0x4000 && off <= 0x44b8) {   /* Pollux MLC (Caanoo) */
+        caanoo_mlc_write(off, (uint32_t)value); return;
+    }
     if (off == MMSP2_PALLT_A || off == MMSP2_PALLT_D) { gp2x_mmio_palette(off, (uint32_t)value); return; }
     if (off == MMSP2_EADRL || off == MMSP2_EADRH) {   /* MLC primary scanout base (single-buffer) */
         uint16_t lo = 0, hi = 0;
@@ -717,6 +758,7 @@ void devices_reset(void) {
     g_blit_guest = 0; memset(&g_blt, 0, sizeof g_blt);
     g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0;
     g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0;
+    g_caanoo_bpp = 0; g_caanoo_pitch = 0;
     g_flip_active = 0; g_flip_guest = 0;
     g_oadr_driven = 0; g_frame_ready = 0;
     g_aud_freq = 44100; g_aud_ch = 2; g_aud_bits = 16;
