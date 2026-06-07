@@ -336,6 +336,7 @@ void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) {
 void glEnable(GLenum c)  {
     if (c==GL_TEXTURE_2D) g_en_tex=1; else if (c==GL_BLEND) g_en_blend=1;
     else if (c==GL_ALPHA_TEST) g_en_atest=1;
+    else GLOG("glEnable(0x%x) [unhandled]\n", c);
 }
 void glDisable(GLenum c) {
     if (c==GL_TEXTURE_2D) g_en_tex=0; else if (c==GL_BLEND) g_en_blend=0;

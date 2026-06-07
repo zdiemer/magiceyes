@@ -2,7 +2,7 @@
 set -u
 GPE="$1"; cd "$(dirname "$GPE")"
 BIN=/mnt/e/Code/magiceyes/bin/me_unicorn
-ME_GLR_LOG=1 "$BIN" "./$(basename "$GPE")" >/tmp/sm.log 2>&1 &
+FAKEGLES_LOG=1 ME_GLR_LOG=1 ME_GLR_EVERYFRAME=1 "$BIN" "./$(basename "$GPE")" >/tmp/sm.log 2>&1 &
 P=$!
 sleep 23
 python3 - <<'PY'
@@ -22,8 +22,14 @@ def grab(tag):
             v=struct.unpack_from('<H',raw,(y*MAXW+x)*2)[0]
             px+=bytes((((v>>11)&0x1f)<<3,((v>>5)&0x3f)<<2,(v&0x1f)<<3))
     Image.frombytes('RGB',(w,h),bytes(px)).save("/tmp/sm_%s.png"%tag); print(tag,"seq",s1)
-tap(160,120); time.sleep(3); grab("a_modeselect")   # start
-tap(78,82);   time.sleep(12); grab("b_afterstory")   # one tap on STORY, then just wait
+def dbl(x,y): tap(x,y); time.sleep(0.12); tap(x,y)
+tap(160,120); time.sleep(3); grab("a_modeselect")    # start
+dbl(78,82); time.sleep(6); grab("b_agentselect")     # double-tap STORY -> AGENT SELECT
+dbl(270,213); time.sleep(6)                          # OK -> STAGE 1-0
+tap(160,210); time.sleep(4)                          # tap box -> into the scene
+# the first dialogue box appears automatically and stays; grab WITHOUT tapping to catch it steady
+for i in range(12):
+    time.sleep(1.5); grab("s_steady%d"%i)
 m.close(); os.close(fd)
 PY
 kill $P 2>/dev/null

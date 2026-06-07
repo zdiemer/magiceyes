@@ -70,9 +70,10 @@ void glr_present(void) {
             dst[(size_t)y * GP2XSHM_MAXW + x] = (uint16_t)(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3));
         }
     g_shm->width = g_glw; g_shm->height = g_glh; g_shm->frame_seq++;
-    if (glr_log()) { static unsigned f=0; if ((f++ % 60)==0) {
+    if (glr_log()) { static unsigned f=0; unsigned step = getenv("ME_GLR_EVERYFRAME")?1:60;
+        if ((f++ % step)==0) {
         int nz=0,n=g_glw*g_glh; for(int i=0;i<n;i++) if(g_glcbuf[i]&0x00FFFFFF){nz++;}
-        fprintf(DIAG,"glr_present #%u cbuf_nonblack=%d/%d\n",f,nz,n); } }
+        fprintf(DIAG,"glr_present #%u cbuf_nonblack=%d/%d ==== SWAP ====\n",f,nz,n); } }
 }
 
 /* ---- the rasterizer (ported from guest fakegles; reads guest mem via guest_to_host) ---- */
@@ -154,9 +155,11 @@ static float bfac(uint32_t f, float sa, float da, float sc, float dc) {
         case GL_DST_ALPHA:return da;case GL_ONE_MINUS_DST_ALPHA:return 1-da;
         case GL_SRC_ALPHA_SATURATE:{float m=sa<1-da?sa:1-da;return m;}default:return 1;}
 }
+static long g_glr_frags = 0;   /* fragments actually written (diagnostic) */
 static void put_frag(const struct gl_draw *d, int x, int y, float fr, float fg, float fb, float fa) {
     if (x<0||y<0||x>=g_glw||y>=g_glh) return;
     if (d->en_atest && !alpha_pass(d->atest_func, d->atest_ref, fa)) return;
+    g_glr_frags++;
     uint32_t *dp = &g_glcbuf[(size_t)y*g_glw+x];
     if (d->en_blend) {
         uint32_t dv=*dp; float dr=(dv&0xff)/255.f,dg=((dv>>8)&0xff)/255.f,db=((dv>>16)&0xff)/255.f,da=((dv>>24)&0xff)/255.f;
@@ -271,34 +274,32 @@ void glr_draw(uint32_t desc_ptr) {
     if (count > 100000) return;
     Vtx *v = malloc((size_t)count * sizeof(Vtx)); if (!v) return;
     for (int i = 0; i < count; i++) fetch(d, first + i, &v[i]);
-    if (glr_log() && count > 6) {   /* batched-triangle draws == text glyph runs */
-        static int n = 0; if (n++ < 40) {
-        int nzrgb = 0, nza = 0, ns = 0;   /* atlas coverage: any colour? any alpha? */
-        if (tx) { int tot = d->tex_w * d->tex_h, step = tot > 4096 ? tot / 4096 : 1;
-                  for (int i = 0; i < tot; i += step) { uint32_t p = tx[i]; ns++;
-                      if (p & 0x00FFFFFF) nzrgb++; if (p & 0xFF000000) nza++; } }
-        /* uv range of this run (are texcoords landing inside the glyph cells?) */
-        float u0 = v[0].u, u1 = v[0].u, t0 = v[0].v, t1 = v[0].v;
-        for (int i = 1; i < count; i++) { if(v[i].u<u0)u0=v[i].u; if(v[i].u>u1)u1=v[i].u;
-                                          if(v[i].v<t0)t0=v[i].v; if(v[i].v>t1)t1=v[i].v; }
-        fprintf(DIAG, "glr_draw TEXT? mode=%u count=%u tex=%08x %dx%d type=%x "
-                "texenv=%x blend=%d(%x,%x) atest=%d(%x,%.2f) ac.en=%d col=(%.2f,%.2f,%.2f,%.2f) "
-                "tx=%s atlas[rgb=%d/%d a=%d/%d] uv=[%.2f,%.2f]x[%.2f,%.2f] xy=(%.0f,%.0f)\n",
-                d->mode, count, d->tex_rgba, d->tex_w, d->tex_h, d->av.type,
-                d->texenv, d->en_blend, d->blend_s, d->blend_d, d->en_atest, d->atest_func, d->atest_ref,
-                d->ac.en, v[0].r, v[0].g, v[0].b, v[0].a, tx ? "ok" : "NULL",
-                nzrgb, ns, nza, ns, u0, u1, t0, t1, v[0].x, v[0].y);
+    /* Per-draw trace: arm once a glyph run (count>6) is seen, then log EVERY draw in order so we
+       can see whether the opaque dialogue box overdraws the text, and where the text lands. */
+    if (glr_log()) {
+        static int armed = 0, logged = 0;
+        if (count > 6) armed = 1;
+        if (armed && logged < 160) {
+            logged++;
+            float minx=v[0].x,maxx=v[0].x,miny=v[0].y,maxy=v[0].y;
+            for (int i=1;i<count;i++){ if(v[i].x<minx)minx=v[i].x; if(v[i].x>maxx)maxx=v[i].x;
+                                       if(v[i].y<miny)miny=v[i].y; if(v[i].y>maxy)maxy=v[i].y; }
+            uint32_t gtex=0; if(tx){int tot=d->tex_w*d->tex_h; for(int i=0;i<tot;i++) if(tx[i]&0xFF000000){gtex=tx[i];break;}}
+            fprintf(DIAG, "D mode=%u cnt=%u tex=%08x %dx%d bbox=[%.0f,%.0f %.0f,%.0f] entex=%d texenv=%x "
+                    "blend=%d(%x,%x) atest=%d(%x,%.2f) col=(%.2f,%.2f,%.2f,%.2f) glyph=%08x\n",
+                    d->mode, count, d->tex_rgba, d->tex_w, d->tex_h, minx, miny, maxx, maxy,
+                    d->en_tex, d->texenv, d->en_blend, d->blend_s, d->blend_d,
+                    d->en_atest, d->atest_func, d->atest_ref, v[0].r, v[0].g, v[0].b, v[0].a, gtex);
         }
     }
-    if (glr_log()) { static int n = 0; if (n++ < 20)
-        fprintf(DIAG, "glr_draw mode=%u count=%u en_tex=%d tex=%08x av.ptr=%08x av.en=%d size=%d type=%x "
-                "v0=(%.1f,%.1f) v1=(%.1f,%.1f) vp=%d,%d,%d,%d col=(%.2f,%.2f,%.2f,%.2f)\n",
-                d->mode, count, d->en_tex, d->tex_rgba, d->av.ptr, d->av.en, d->av.size, d->av.type,
-                v[0].x, v[0].y, count>1?v[1].x:0, count>1?v[1].y:0,
-                d->vp[0],d->vp[1],d->vp[2],d->vp[3], v[0].r,v[0].g,v[0].b,v[0].a); }
-    if (fast_quad(d, tx, v, count)) { free(v); return; }
-    if (d->mode == GL_TRIANGLES)        for (int i=0;i+2<count;i+=3) raster_tri(d,tx,&v[i],&v[i+1],&v[i+2]);
-    else if (d->mode == GL_TRIANGLE_STRIP) for (int i=0;i+2<count;i++)  raster_tri(d,tx,&v[i],&v[i+1],&v[i+2]);
-    else if (d->mode == GL_TRIANGLE_FAN)   for (int i=1;i+1<count;i++)  raster_tri(d,tx,&v[0],&v[i],&v[i+1]);
+    long frags0 = g_glr_frags;
+    int handled_quad = fast_quad(d, tx, v, count);
+    if (!handled_quad) {
+        if (d->mode == GL_TRIANGLES)        for (int i=0;i+2<count;i+=3) raster_tri(d,tx,&v[i],&v[i+1],&v[i+2]);
+        else if (d->mode == GL_TRIANGLE_STRIP) for (int i=0;i+2<count;i++)  raster_tri(d,tx,&v[i],&v[i+1],&v[i+2]);
+        else if (d->mode == GL_TRIANGLE_FAN)   for (int i=1;i+1<count;i++)  raster_tri(d,tx,&v[0],&v[i],&v[i+1]);
+    }
+    if (glr_log() && count > 6) { static int n=0; if (n++ < 30)
+        fprintf(DIAG, "   ^text frags_written=%ld (quadpath=%d)\n", g_glr_frags - frags0, handled_quad); }
     free(v);
 }
