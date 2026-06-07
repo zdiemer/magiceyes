@@ -132,6 +132,19 @@ void fbwatch_cb(uc_engine *uc, uc_mem_type type, uint64_t addr, int size, int64_
                 (uint32_t)addr, (uint32_t)value, g_self ? g_self->tid : -1, gread(UC_ARM_REG_PC));
 }
 
+/* True if no recorded region overlaps [addr,addr+len) -- i.e. the range is free to map. */
+static int range_free(uint32_t addr, uint32_t len) {
+    uint32_t end = addr + len; if (end < addr) return 0;   /* wrap */
+    int ok = 1;
+    pthread_mutex_lock(&g_reg_lock);
+    for (int i = 0; i < g_nreg; i++) {
+        uint32_t a = g_reg[i].addr, e = a + g_reg[i].len;
+        if (addr < e && a < end) { ok = 0; break; }
+    }
+    pthread_mutex_unlock(&g_reg_lock);
+    return ok;
+}
+
 /* unified mmap for old_mmap(90) and mmap2(192); file-backed reads via pread. */
 long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) {
     uint32_t l = ALIGN_UP(len ? len : 1);
@@ -140,21 +153,32 @@ long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) 
         at = ALIGN_DN(addr);
         map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
     } else {
-        for (int i = 0; i < g_nmfree; i++)        /* reuse a freed same-size region */
-            if (g_mfree[i].len == l) { at = g_mfree[i].addr; g_mfree[i] = g_mfree[--g_nmfree]; break; }
-        if (at) {
-            if (!getenv("ME_NOZERO")) {          /* anon mmap memory must read as zero */
-                uint8_t *z = calloc(1, l);
-                if (z) { uc_mem_write(g_uc, at, z, l); free(z); }
-            }
-        } else {
-            /* align power-of-two allocs to their size (2MB thread stacks must be
-               2MB-aligned so sp&~(size-1) finds the LinuxThreads descriptor). */
-            uint32_t align = PAGE;
-            if (l > PAGE && (l & (l - 1)) == 0) align = l > 0x200000u ? 0x200000u : l;
-            g_mmap_next = (g_mmap_next + align - 1) & ~(align - 1);
-            at = g_mmap_next; g_mmap_next += l;
+        /* Honor a non-FIXED address hint when the range is free (Linux mmap semantics). glibc's
+           malloc arena allocator and LinuxThreads stack placement probe DESCENDING hint addresses
+           and retry (munmap + re-mmap) until they get the address they asked for; ignoring the hint
+           made the dynamic-glibc firmware menu loop ~500x at startup -- slow-but-OK on Linux, a
+           multi-second "black screen" on Windows where each mmap is far dearer. Honoring it = 1 try. */
+        if (addr && range_free(ALIGN_DN(addr), l)) {
+            at = ALIGN_DN(addr);                  /* fresh anon mapping -> reads as zero */
             map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+        } else {
+            int reused = 0;
+            for (int i = 0; i < g_nmfree; i++)    /* reuse a freed same-size region */
+                if (g_mfree[i].len == l) { at = g_mfree[i].addr; g_mfree[i] = g_mfree[--g_nmfree]; reused = 1; break; }
+            if (reused) {
+                if (!getenv("ME_NOZERO")) {        /* recycled memory must read as zero */
+                    uint8_t *z = calloc(1, l);
+                    if (z) { uc_mem_write(g_uc, at, z, l); free(z); }
+                }
+            } else {
+                /* align power-of-two allocs to their size (2MB thread stacks must be
+                   2MB-aligned so sp&~(size-1) finds the LinuxThreads descriptor). */
+                uint32_t align = PAGE;
+                if (l > PAGE && (l & (l - 1)) == 0) align = l > 0x200000u ? 0x200000u : l;
+                g_mmap_next = (g_mmap_next + align - 1) & ~(align - 1);
+                at = g_mmap_next; g_mmap_next += l;
+                map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+            }
         }
     }
     if (!(flags & GMAP_ANON) && fd >= 0 && len) {
