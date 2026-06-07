@@ -591,6 +591,25 @@ long dsp_ioctl(uint32_t cmd, uint32_t arg) {
 #define MMSP2_OADRH 0x2910
 #define MMSP2_EADRL 0x2912
 #define MMSP2_EADRH 0x2914
+/* The MMSP2 DPC/MLC display-controller register file (0x2800..0x295f) is the hardware display
+   PIPELINE -- layer bpp, region rectangles, scaling, the gamma/colour LUT, scanout addresses. We
+   bypass all of it: we present the RGB "STL" framebuffer directly at native 320x240 (intercepting
+   only OADR/EADR/PALLT above). Tracing a known-good title (Payback) through ME_GP2X_MLCLOG shows it
+   programs this whole block as a plain full-screen RGB setup -- regions at 0..319/0..239, an
+   IDENTITY gamma ramp at 0x295e, 16bpp at MLC_STL_CNTL (0x28da=0x04ab) -- all of which our direct
+   present already matches, so none of it needs emulating. Flagging each write as unknown_mmio just
+   made working titles look broken. So treat the whole file as known/expected (return 1 -> the
+   caller suppresses the generic unknown_mmio); ME_GP2X_MLCLOG dumps the values when a specific
+   title's display pipeline actually needs investigating (e.g. a real hardware-scaled or
+   YUV-overlay title -- 0x2880 alone can't be reliably decoded as "overlay" without the datasheet,
+   so we don't guess). Offsets: paeryn mmsp2_regs.h. */
+static int mlc_config_write(uint32_t off, uint32_t val) {
+    if (off < 0x2800 || off > 0x295f) return 0;             /* not the display register file */
+    if (getenv("ME_GP2X_MLCLOG"))                           /* on-demand trace of the pipeline setup */
+        fprintf(stderr, "  MLC cfg %04x = %08x\n", off, val);
+    return 1;                                               /* known display config, not "unknown" */
+}
+
 void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                            int size, int64_t value, void *user) {
     (void)type; (void)user;
@@ -613,10 +632,12 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         return;
     }
     if (off != MMSP2_OADRL && off != MMSP2_OADRH) {
-        /* a register we don't decode (the game still sees its own stored value); record the
-           distinct offset so a new title's use of an undecoded block (YUV/MPEG, layer 2, ...)
-           shows up. Deduped by offset; gated so it's free when nobody's listening. */
-        if (me_report_active()) me_report(MR_UNKNOWN_MMIO, (long)off, NULL, 0);
+        /* a register we don't act on (the game still sees its own stored value). Known display-
+           controller config is expected (mlc_config_write surfaces only the meaningful overlay
+           signal); anything else is genuinely undecoded -> record the distinct offset so a new
+           title's use of an unknown block shows up. Deduped; gated so it's free when off. */
+        if (me_report_active() && !mlc_config_write(off, (uint32_t)value))
+            me_report(MR_UNKNOWN_MMIO, (long)off, NULL, 0);
         return;
     }
     uint16_t lo = 0, hi = 0;
