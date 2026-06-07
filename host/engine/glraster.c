@@ -289,8 +289,6 @@ void glr_draw(uint32_t desc_ptr) {
     }
     int count = (int)d->count, first = (int)d->first;
     if (count > 100000) return;
-    { static uint32_t skip = 0xffffffff; if (skip==0xffffffff){ const char*e=getenv("ME_GL_SKIPTEX"); skip=e?(uint32_t)strtoul(e,0,16):0; }
-      if (skip && d->tex_rgba==skip) return; }   /* diagnostic: drop draws of a given texture */
     Vtx *v = malloc((size_t)count * sizeof(Vtx)); if (!v) return;
     for (int i = 0; i < count; i++) fetch(d, first + i, &v[i]);
     /* Per-draw trace: arm once a glyph run (count>6) is seen, then log EVERY draw in order so we
@@ -315,12 +313,6 @@ void glr_draw(uint32_t desc_ptr) {
                     d->en_tex, d->texenv, d->en_blend, d->blend_s, d->blend_d,
                     d->en_atest, d->atest_func, d->atest_ref, v[0].r, v[0].g, v[0].b, v[0].a, gtex);
         }
-    }
-    if (tx && count >= 30 && getenv("ME_GL_DUMPATLAS")) {   /* dump the font atlas once for inspection */
-        static int done = 0; if (!done) { done = 1;
-            FILE *af = fopen(getenv("ME_GL_DUMPATLAS"), "wb");
-            if (af) { fprintf(af, "%d %d\n", d->tex_w, d->tex_h);
-                      fwrite(tx, 4, (size_t)d->tex_w * d->tex_h, af); fclose(af); } }
     }
     long frags0 = g_glr_frags;
     int handled_quad = fast_quad(d, tx, v, count);

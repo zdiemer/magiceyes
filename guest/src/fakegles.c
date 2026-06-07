@@ -447,7 +447,10 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
     } else {
         memset(tx->rgba, 0, (size_t)w * h * 4);
     }
-    GLOG("glTexImage2D id=%u %dx%d fmt=%x type=%x\n", g_bound_tex, w, h, format, type);
+    if (gl_log()) { int nz=0,na=0,tot=w*h,step=tot>4096?tot/4096:1,ns=0;
+        for(int i=0;i<tot;i+=step){uint32_t p=tx->rgba[i];ns++; if(p&0x00FFFFFF)nz++; if(p&0xFF000000)na++;}
+        GLOG("glTexImage2D id=%u %dx%d fmt=%x type=%x  content[rgb=%d/%d a=%d/%d]\n",
+             g_bound_tex, w, h, format, type, nz, ns, na, ns); }
 }
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei w, GLsizei h,
                             GLint border, GLsizei imageSize, const GLvoid *data) {

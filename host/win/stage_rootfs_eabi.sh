@@ -86,6 +86,22 @@ for f in *.so*; do
 done
 # rg NEEDs libSDL_gfx.so.0 but Wheezy's soname is libSDL_gfx.so.13 (rotozoomSurface ABI is stable)
 G=$(ls libSDL_gfx.so.13* 2>/dev/null | head -1); [ -n "${G:-}" ] && cp -f "$G" libSDL_gfx.so.0
+cd "$REPO"
+
+echo "== glibc gconv modules (iconv: dynamic-text encoding conversion) =="
+# Propis/Rhythmos convert their stored text via glibc iconv() before qtype4 rasterization.
+# iconv_open() reads the gconv-modules config + dlopens converter .so files from the LITERAL
+# path /usr/lib/$MA/gconv/. Our flat rootfs put the .so under /lib (where iconv can't find them)
+# and never staged the config, so iconv_open failed -> empty converted string -> blank text
+# surfaces (the "empty text box": agent name/stats, story dialogue). Stage the real gconv dir.
+GC="$ST/usr/lib/$MA/gconv"
+if [ -d "$GC" ]; then
+  mkdir -p "$DST/usr/lib/$MA/gconv"
+  cp -fLr "$GC/." "$DST/usr/lib/$MA/gconv/" 2>/dev/null || true
+  echo "   staged $(find "$DST/usr/lib/$MA/gconv" -type f | wc -l) gconv files (config + modules)"
+else
+  echo "   WARNING: no gconv dir in libc6 extraction ($GC) -- iconv text will stay blank"
+fi
 
 echo "== fake-SDL shim + empty soname stubs (titles NEED these only to LOAD) =="
 for n in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do cp -f "$SH/libSDL-1.2.so.0" "$DST/lib/$n"; done

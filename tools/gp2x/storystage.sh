@@ -4,7 +4,7 @@
 set -u
 GPE="$1"; cd "$(dirname "$GPE")"
 BIN=/mnt/e/Code/magiceyes/bin/me_unicorn
-FAKEGLES_LOG=1 ME_GLR_LOG=1 ME_GLR_ALLDRAWS=1 ME_GLR_EVERYFRAME=1 ME_GLR_VERTS=1 "$BIN" "./$(basename "$GPE")" >/tmp/st.log 2>&1 &
+ME_OPENLOG=1 ME_FAKEGLES_LOG=1 ME_GLR_LOG=1 ME_GLR_ALLDRAWS=1 ME_GLR_EVERYFRAME=1 ME_GLR_VERTS=1 "$BIN" "./$(basename "$GPE")" >/tmp/st.log 2>&1 &
 P=$!
 sleep 23
 python3 - <<'PY'
