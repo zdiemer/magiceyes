@@ -142,10 +142,11 @@ uint32_t load_elf(const char *path) {
          3. a positive Caanoo marker (Pollux SoC sonames/device nodes, or a _Pollux filename)
             -> Caanoo (these never appear on GP2X or Wiz);
          4. a positive Wiz marker (the GPH Wiz SDL extensions / the Wiz toolkit lib) -> Wiz;
-         5. otherwise -> GP2X.
-       (Note: an ld-linux.so.3 binary is never GP2X -- GP2X firmware is ld.so.2 only -- but
-       without a Pollux marker we can't tell EABI-Wiz from Caanoo, so it falls to GP2X like any
-       other ambiguous case; set MAGICEYES_DEVICE for those.) */
+         5. interp is ld-linux.so.3 -> Caanoo. GP2X firmware is ld.so.2-ONLY, so an so.3 binary
+            is never GP2X; Caanoo is the dominant so.3 device. This also catches Caanoo titles
+            with no Pollux soname (e.g. Liar: Redemption -- plain SDL, but needs Caanoo input).
+            The rare so.3 Wiz title (Patissier) lands here too; override with MAGICEYES_DEVICE=wiz.
+         6. otherwise (ld.so.2, no marker) -> GP2X (the unavoidable GP2X<->Wiz ambiguity). */
     int dev = -1;
     const char *envdev = getenv("MAGICEYES_DEVICE");
     if (envdev) {
@@ -171,7 +172,10 @@ uint32_t load_elf(const char *path) {
         int wiz = 0;
         for (unsigned k = 0; k < sizeof wiz_sig / sizeof wiz_sig[0]; k++)
             if (buf_has(buf, sz, wiz_sig[k])) { wiz = 1; break; }
-        dev = caanoo ? 2 : (wiz ? 1 : 0);
+        /* ld-linux.so.3 = the newer CodeSourcery/GPH toolchain; GP2X never shipped it, so an
+           so.3 binary is Caanoo (or the rare so.3 Wiz title -> override). Catches Liar et al. */
+        int so3 = strstr(interp, "ld-linux.so.3") != NULL;
+        dev = caanoo ? 2 : (wiz ? 1 : (so3 ? 2 : 0));
     }
     g_device = dev;
     g_caanoo_dev = (dev == 2);   /* the shim's per-device joystick map keys on this */
