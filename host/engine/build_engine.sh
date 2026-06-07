@@ -12,7 +12,7 @@ if [ -n "${ME_DEBUG_BUILD:-}" ]; then
 else
   OUT="$REPO/bin/me_unicorn";     OPT="-O2"
 fi
-cc $OPT -Wall -o "$OUT" "$REPO"/host/engine/*.c \
+cc $OPT -Wall -o "$OUT" "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c \
   -I "$REPO/host/engine" -I "$FORK/include" -I "$REPO/guest/src" \
   "$FORK/build/libunicorn.a" -lpthread -lm -lrt
 echo "built $OUT (engine: host/engine/*.c, fork: $FORK)"

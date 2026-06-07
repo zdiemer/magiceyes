@@ -106,8 +106,9 @@ int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* 1 = host p
 int  me_rootfs_select(const char *interp);  /* pick the rootfs holding this PT_INTERP (so.2 vs .3) */
 void me_rootfs_set(const char *dir);        /* firmware boot: pin a specific rootfs; NULL = unpin */
 
-/* ---- firmware.c: locate a staged device firmware (rootfs + its gp2xmenu) ---- */
+/* ---- firmware.c: locate / install a device firmware ---- */
 int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap);  /* 1 if found */
+int  me_firmware_install(const char *file, const char *device);  /* stage a .zip/.img; 0 = ok */
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER };

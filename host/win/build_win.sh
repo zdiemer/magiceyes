@@ -8,7 +8,7 @@ CC=x86_64-w64-mingw32-gcc
 [ -f "$FORK/build-win/libunicorn.a" ] || { echo "no Windows fork lib ($FORK/build-win); run host/win/build_fork_win.sh"; exit 1; }
 mkdir -p "$REPO/bin"
 $CC -O2 -Wall -o "$REPO/bin/me_unicorn.exe" \
-  "$REPO"/host/engine/*.c "$REPO/host/win/posix_compat.c" \
+  "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/host/engine" -I "$FORK/include" -I "$REPO/guest/src" \
   "$FORK/build-win/libunicorn.a" \
   -lpthread -lm -lws2_32 -lbcrypt -lwinmm -static

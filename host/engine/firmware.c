@@ -6,6 +6,7 @@
  * firmware to <writable>/fw/<device>; until a device is staged we also accept the pre-extracted
  * rootfs that already ships under assets/ (Wiz). See firmware-boot-support (memory) + the plan. */
 #include "engine.h"
+#include "fwstage.h"
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -64,6 +65,29 @@ static int try_rootfs(const char *cand, char *rootfs, char *menu, size_t cap) {
     abspath(cand, rootfs, cap);                          /* absolute: survives the loader's chdir */
     snprintf(menu, cap, "%s/usr/gp2x/gp2xmenu", rootfs);
     return 1;
+}
+
+/* ---- install: stage a firmware file into the writable per-device dir ---- */
+static void cli_progress(void *ud, const char *msg, int pct) {
+    (void)ud; if (msg) fprintf(stderr, "  [install %3d%%] %s\n", pct, msg);
+}
+int me_firmware_install(const char *file, const char *device) {
+    fw_info info;
+    if (!fw_detect(file, &info)) {
+        fprintf(stderr, "magiceyes: '%s': %s\n", file, info.detail); return -1;
+    }
+    const char *dev = (device && device[0]) ? device : info.device;
+    const char *name = fw_dir_name(dev);
+    if (!name) { fprintf(stderr, "magiceyes: unknown firmware device '%s'\n", dev ? dev : "?"); return -1; }
+    char wr[PATH_MAX], dest[PATH_MAX];
+    if (!writable_root(wr, sizeof wr)) { fprintf(stderr, "magiceyes: no writable dir (set APPDATA/HOME)\n"); return -1; }
+    snprintf(dest, sizeof dest, "%s/fw/%s", wr, name);
+    fprintf(stderr, "magiceyes: installing %s -> %s\n", info.detail, dest);
+    int rc = fw_stage(file, dev, dest, cli_progress, NULL);
+    if (rc == 0) fprintf(stderr, "magiceyes: '%s' firmware installed. Boot it with: --firmware %s\n", name, name);
+    else if (rc == -2) fprintf(stderr, "magiceyes: staging for this format isn't implemented yet.\n");
+    else fprintf(stderr, "magiceyes: firmware install failed (%d).\n", rc);
+    return rc;
 }
 
 int me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap) {

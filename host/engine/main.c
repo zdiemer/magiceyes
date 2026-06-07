@@ -217,6 +217,7 @@ static void print_usage(const char *p0) {
         "usage: %s [options] [game.gpe | folder | game.zip]\n"
         "       (with no game, the window opens empty -- use File > Open)\n\n"
         "      --firmware DEV boot the device firmware menu (gp2xmenu): wiz|caanoo|f100|f200\n"
+        "      --install-firmware F  stage a firmware .zip/.img into the per-device dir, then exit\n"
         "  -s, --scale N      window scale factor (default 3)\n"
         "  -f, --fullscreen   start fullscreen (toggle in-app with F11)\n"
         "      --mute         start muted\n"
@@ -344,6 +345,7 @@ int main(int argc, char **argv) {
     /* ---- CLI: parse flags; the first non-flag positional is the game ---- */
     const char *input = NULL;
     const char *fw_device = NULL;   /* --firmware <device>: boot that device's gp2xmenu */
+    const char *fw_install = NULL;  /* --install-firmware <file>: stage a firmware then exit */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (a[0] != '-' || a[1] == 0) { input = a; break; }   /* a bare "-" is not a flag */
@@ -361,12 +363,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-smcfreeze"))                   setenv("ME_GP2X_NOSMCFREEZE", "1", 1);
         else if (!strcmp(a, "--debug"))                          { setenv("ME_DEBUG", "1", 1); setenv("ME_PROF", "1", 1); }
         else if (!strcmp(a, "--firmware"))                       { if (++i < argc) fw_device = argv[i]; }
+        else if (!strcmp(a, "--install-firmware"))               { if (++i < argc) fw_install = argv[i]; }
         else if (!strcmp(a, "--report"))                         { if (++i < argc) setenv("ME_REPORT", argv[i], 1); }
         else if (!strcmp(a, "--run-secs"))                       { if (++i < argc) setenv("ME_RUN_SECS", argv[i], 1); }
         else { fprintf(stderr, "magiceyes: unknown option '%s'\n", a); print_usage(argv[0]); return 2; }
     }
     if (g_view_scale < 1) g_view_scale = 1;
     if (g_volume < 0) g_volume = 0; else if (g_volume > 100) g_volume = 100;
+
+    /* --install-firmware <file>: stage a .zip/.img into the per-device dir, then exit. */
+    if (fw_install) return me_firmware_install(fw_install, fw_device);
 
     /* --firmware <device>: boot the device's gp2xmenu launcher from its staged rootfs. We pin
        the rootfs (Wiz/F100/F200 share ld-linux.so.2, so PT_INTERP can't disambiguate) and force

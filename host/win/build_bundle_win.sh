@@ -23,7 +23,7 @@ DEFS=(-DME_BUNDLED)
 # entry point (MinGW's GUI CRT calls main; the viewer already sets SDL_MAIN_HANDLED). For terminal
 # launches, me_platform_init() AttachConsole()s the parent so --help/--version/diagnostics still show.
 $CC -O2 -Wall -mwindows "${DEFS[@]}" -o "$REPO/bin/magiceyes.exe" \
-  "$REPO"/host/engine/*.c "$REPO/host/viewer.c" "$REPO/host/png_write.c" "$REPO/host/win/posix_compat.c" \
+  "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c "$REPO/host/viewer.c" "$REPO/host/png_write.c" "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/host/engine" -I "$FORK/include" \
   -I "$REPO/guest/src" -I "$SDL/include" \
   -L "$SDL/lib" "$FORK/build-win/libunicorn.a" \
