@@ -97,19 +97,23 @@ static float read_comp(const uint8_t *b, uint32_t type, int c) {
     default:                return 0;
     }
 }
-/* host base pointer for array element idx, or NULL */
-static const uint8_t *elem(const struct gl_array *a, int idx) {
-    if (!a->en || !a->ptr) return NULL;
-    int stride = a->stride ? a->stride : a->size * type_size(a->type);
-    return (const uint8_t *)guest_to_host(a->ptr + (uint32_t)idx * stride);
+/* Copy array element idx into buf (the bytes are contiguous in GUEST space but their host
+   backing may span non-contiguous region mmaps, so read_guest stitches it). 1 on success. */
+static int elem(const struct gl_array *a, int idx, uint8_t *buf, int bufsz) {
+    if (!a->en || !a->ptr || a->size <= 0) return 0;
+    int esz = a->size * type_size(a->type);
+    if (esz <= 0 || esz > bufsz) return 0;
+    int stride = a->stride ? a->stride : esz;
+    return read_guest(buf, a->ptr + (uint32_t)idx * stride, (uint32_t)esz) == 0;
 }
 static void fetch(const struct gl_draw *d, int idx, Vtx *o) {
+    uint8_t buf[64];
     float px=0,py=0,pz=0,pw=1;
-    const uint8_t *p = elem(&d->av, idx);
-    if (p) { px=read_comp(p,d->av.type,0);
-             if (d->av.size>=2) py=read_comp(p,d->av.type,1);
-             if (d->av.size>=3) pz=read_comp(p,d->av.type,2);
-             if (d->av.size>=4) pw=read_comp(p,d->av.type,3); }
+    if (elem(&d->av, idx, buf, sizeof buf)) {
+             px=read_comp(buf,d->av.type,0);
+             if (d->av.size>=2) py=read_comp(buf,d->av.type,1);
+             if (d->av.size>=3) pz=read_comp(buf,d->av.type,2);
+             if (d->av.size>=4) pw=read_comp(buf,d->av.type,3); }
     float eye[4], clip[4];
     m_xform(d->mv, px,py,pz,pw, eye);
     m_xform(d->proj, eye[0],eye[1],eye[2],eye[3], clip);
@@ -119,12 +123,12 @@ static void fetch(const struct gl_draw *d, int idx, Vtx *o) {
     o->y = (float)g_glh - (d->vp[1] + (ndy*0.5f+0.5f)*d->vp[3]);
     o->w = cw;
     o->u=o->v=0;
-    const uint8_t *t = elem(&d->at, idx);
-    if (t) { o->u=read_comp(t,d->at.type,0); if (d->at.size>=2) o->v=read_comp(t,d->at.type,1); }
-    const uint8_t *c = elem(&d->ac, idx);
-    if (c) { float sc=(d->ac.type==GL_UNSIGNED_BYTE||d->ac.type==GL_BYTE)?1/255.f:1.f;
-             o->r=read_comp(c,d->ac.type,0)*sc; o->g=read_comp(c,d->ac.type,1)*sc;
-             o->b=read_comp(c,d->ac.type,2)*sc; o->a=(d->ac.size>=4)?read_comp(c,d->ac.type,3)*sc:1.f; }
+    if (elem(&d->at, idx, buf, sizeof buf)) {
+        o->u=read_comp(buf,d->at.type,0); if (d->at.size>=2) o->v=read_comp(buf,d->at.type,1); }
+    if (elem(&d->ac, idx, buf, sizeof buf)) {
+             float sc=(d->ac.type==GL_UNSIGNED_BYTE||d->ac.type==GL_BYTE)?1/255.f:1.f;
+             o->r=read_comp(buf,d->ac.type,0)*sc; o->g=read_comp(buf,d->ac.type,1)*sc;
+             o->b=read_comp(buf,d->ac.type,2)*sc; o->a=(d->ac.size>=4)?read_comp(buf,d->ac.type,3)*sc:1.f; }
     else { o->r=d->cur_color[0]; o->g=d->cur_color[1]; o->b=d->cur_color[2]; o->a=d->cur_color[3]; }
 }
 
@@ -241,18 +245,35 @@ static int fast_quad(const struct gl_draw *d, const uint32_t *tx, const Vtx *v, 
 }
 
 /* Rasterize one draw. desc_ptr = guest address of a struct gl_draw. */
+/* contiguous scratch for the bound texture (a guest texture may span non-contiguous host
+   regions; copy it flat so the rasterizer can index it). Serialized by the syscall biglock. */
+static uint32_t *g_texbuf = NULL; static size_t g_texbuf_cap = 0;
+
 void glr_draw(uint32_t desc_ptr) {
     ensure_cbuf(); if (!g_glcbuf) return;
-    const struct gl_draw *d = (const struct gl_draw *)guest_to_host(desc_ptr);
+    struct gl_draw dd;
+    if (read_guest(&dd, desc_ptr, sizeof dd) != 0) return;   /* descriptor unmapped */
+    const struct gl_draw *d = &dd;
     if (glr_log()) { static int n = 0; if (n++ < 8)
-        fprintf(stderr, "glr_draw ENTER desc=%08x host=%p count=%d av.en=%d av.ptr=%08x\n",
-                desc_ptr, (void*)d, d?(int)d->count:-1, d?d->av.en:-1, d?d->av.ptr:0); }
-    if (!d || (int)d->count <= 0 || !d->av.en) return;
-    const uint32_t *tx = (d->en_tex && d->tex_rgba) ? (const uint32_t *)guest_to_host(d->tex_rgba) : NULL;
+        fprintf(stderr, "glr_draw ENTER desc=%08x count=%d av.en=%d av.ptr=%08x\n",
+                desc_ptr, (int)d->count, d->av.en, d->av.ptr); }
+    if ((int)d->count <= 0 || !d->av.en) return;
+    /* copy the texture into contiguous scratch (handles a texture that spans host regions, and
+       can't fault on a wild address since read_guest validates every region it crosses). */
+    const uint32_t *tx = NULL;
+    if (d->en_tex && d->tex_rgba && d->tex_w > 0 && d->tex_h > 0 &&
+        (long)d->tex_w * d->tex_h <= 4096 * 4096) {
+        size_t need = (size_t)d->tex_w * d->tex_h;
+        if (need > g_texbuf_cap) { free(g_texbuf); g_texbuf = malloc(need * 4); g_texbuf_cap = g_texbuf ? need : 0; }
+        if (g_texbuf && read_guest(g_texbuf, d->tex_rgba, (uint32_t)(need * 4u)) == 0) tx = g_texbuf;
+    }
     int count = (int)d->count, first = (int)d->first;
     if (count > 100000) return;
     Vtx *v = malloc((size_t)count * sizeof(Vtx)); if (!v) return;
     for (int i = 0; i < count; i++) fetch(d, first + i, &v[i]);
+    if (glr_log() && (count > 6 || (d->en_tex && (long)d->tex_w*d->tex_h > 65536)))
+        fprintf(stderr, "glr_draw FAT mode=%u count=%u en_tex=%d tex=%08x tw=%d th=%d av.ptr=%08x stride=%d type=%x size=%d\n",
+                d->mode, count, d->en_tex, d->tex_rgba, d->tex_w, d->tex_h, d->av.ptr, d->av.stride, d->av.type, d->av.size);
     if (glr_log()) { static int n = 0; if (n++ < 20)
         fprintf(stderr, "glr_draw mode=%u count=%u en_tex=%d tex=%08x av.ptr=%08x av.en=%d size=%d type=%x "
                 "v0=(%.1f,%.1f) v1=(%.1f,%.1f) vp=%d,%d,%d,%d col=(%.2f,%.2f,%.2f,%.2f)\n",

@@ -66,6 +66,28 @@ void *guest_to_host(uint32_t gaddr) {
     return h;
 }
 
+/* Copy len bytes of guest memory at gaddr into dst, walking region boundaries: a guest buffer
+   is contiguous in GUEST space but its host backings are separate mmaps (one per ensure_mapped
+   range) that are NOT contiguous in host space -- so a guest texture/array spanning two regions
+   cannot be read through a single host pointer (works by luck on Linux where the mmaps land
+   adjacent; faults on Windows where they don't). This stitches the pieces. Returns 0 on success,
+   -1 if any byte of the range is unmapped (caller treats that as "no data"). */
+int read_guest(void *dst, uint32_t gaddr, uint32_t len) {
+    uint8_t *d = dst;
+    if (gaddr + len < gaddr) return -1;               /* 32-bit wrap */
+    pthread_mutex_lock(&g_reg_lock);
+    while (len) {
+        struct gregion *r = find_region(gaddr);
+        if (!r) { pthread_mutex_unlock(&g_reg_lock); return -1; }
+        uint32_t avail = r->addr + r->len - gaddr;
+        uint32_t n = len < avail ? len : avail;
+        memcpy(d, (uint8_t *)r->host + (gaddr - r->addr), n);
+        d += n; gaddr += n; len -= n;
+    }
+    pthread_mutex_unlock(&g_reg_lock);
+    return 0;
+}
+
 /* Free every guest-RAM host backing (the registry owns it; uc_close only drops the uc's
    view of these uc_mem_map_ptr mappings). Called between games by engine_reset_and_load
    AFTER all worker ucs and the main uc are closed -- nothing maps these pointers anymore. */
