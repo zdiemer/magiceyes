@@ -5,10 +5,15 @@
 #include "engine.h"
 #ifdef _WIN32
 #include <direct.h>
+#include <io.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #define ME_CHDIR(p) _chdir(p)
 #else
 #define ME_CHDIR(p) chdir(p)
 #endif
+
+FILE *g_log = NULL;   /* ME_LOGFILE diagnostic sink (see engine.h DIAG) */
 
 /* chdir into the directory holding `path` so the game finds its Data/ (relative opens). */
 static void chdir_to_dir_of(const char *path) {
@@ -155,7 +160,7 @@ static void *helper_thread(void *arg) {
         if (prof && now - prof_t >= 2.0) {
             double dt = now - prof_t; uint32_t fs = g_shm ? g_shm->frame_seq : 0;
             extern unsigned long g_fpa_n, g_fpa_ops;
-            fprintf(stderr, "PROF: %.1f fps  mmsp2_rd=%.0f/s wr=%.0f/s fault=%.0f/s  fpa=%.0f/s(ops=%.0f/s)\n",
+            fprintf(DIAG, "PROF: %.1f fps  mmsp2_rd=%.0f/s wr=%.0f/s fault=%.0f/s  fpa=%.0f/s(ops=%.0f/s)\n",
                     (fs - prof_fs) / dt, g_n_rd / dt, g_n_wr / dt, g_n_fault / dt, g_fpa_n / dt, g_fpa_ops / dt);
             prof_fs = fs; prof_t = now; g_n_rd = g_n_wr = g_n_fault = 0; g_fpa_n = g_fpa_ops = 0;
         }
@@ -283,9 +288,14 @@ static uint32_t engine_reset_and_load(const char *path) {
 }
 
 int main(int argc, char **argv) {
-    const char *logf = getenv("ME_LOGFILE");   /* redirect diagnostics to a file -- the only way to
+    const char *logf = getenv("ME_LOGFILE");   /* divert diagnostics to a file -- the only way to
                                                   see logs from the -mwindows bundle (no console) */
-    if (logf && *logf) freopen(logf, "w", stderr);
+    if (logf && *logf) {
+        g_log = fopen(logf, "w");               /* a dedicated FILE* the rest of the engine never
+                                                   reopens (stderr redirection is fragile in the
+                                                   GUI-subsystem bundle); held for the whole run. */
+        if (g_log) { setvbuf(g_log, NULL, _IONBF, 0); fputs("== magiceyes log start ==\n", g_log); }
+    }
     setvbuf(stderr, NULL, _IONBF, 0);   /* diagnostics must survive a kill (msvcrt fully buffers
                                            a redirected stderr otherwise -> lost logs on Windows) */
     me_platform_init();   /* Windows: 1ms timer + opt out of EcoQoS throttling (else a backgrounded

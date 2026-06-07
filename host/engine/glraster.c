@@ -72,7 +72,7 @@ void glr_present(void) {
     g_shm->width = g_glw; g_shm->height = g_glh; g_shm->frame_seq++;
     if (glr_log()) { static unsigned f=0; if ((f++ % 60)==0) {
         int nz=0,n=g_glw*g_glh; for(int i=0;i<n;i++) if(g_glcbuf[i]&0x00FFFFFF){nz++;}
-        fprintf(stderr,"glr_present #%u cbuf_nonblack=%d/%d\n",f,nz,n); } }
+        fprintf(DIAG,"glr_present #%u cbuf_nonblack=%d/%d\n",f,nz,n); } }
 }
 
 /* ---- the rasterizer (ported from guest fakegles; reads guest mem via guest_to_host) ---- */
@@ -255,7 +255,7 @@ void glr_draw(uint32_t desc_ptr) {
     if (read_guest(&dd, desc_ptr, sizeof dd) != 0) return;   /* descriptor unmapped */
     const struct gl_draw *d = &dd;
     if (glr_log()) { static int n = 0; if (n++ < 8)
-        fprintf(stderr, "glr_draw ENTER desc=%08x count=%d av.en=%d av.ptr=%08x\n",
+        fprintf(DIAG, "glr_draw ENTER desc=%08x count=%d av.en=%d av.ptr=%08x\n",
                 desc_ptr, (int)d->count, d->av.en, d->av.ptr); }
     if ((int)d->count <= 0 || !d->av.en) return;
     /* copy the texture into contiguous scratch (handles a texture that spans host regions, and
@@ -271,11 +271,27 @@ void glr_draw(uint32_t desc_ptr) {
     if (count > 100000) return;
     Vtx *v = malloc((size_t)count * sizeof(Vtx)); if (!v) return;
     for (int i = 0; i < count; i++) fetch(d, first + i, &v[i]);
-    if (glr_log() && (count > 6 || (d->en_tex && (long)d->tex_w*d->tex_h > 65536)))
-        fprintf(stderr, "glr_draw FAT mode=%u count=%u en_tex=%d tex=%08x tw=%d th=%d av.ptr=%08x stride=%d type=%x size=%d\n",
-                d->mode, count, d->en_tex, d->tex_rgba, d->tex_w, d->tex_h, d->av.ptr, d->av.stride, d->av.type, d->av.size);
+    if (glr_log() && count > 6) {   /* batched-triangle draws == text glyph runs */
+        static int n = 0; if (n++ < 40) {
+        int nzrgb = 0, nza = 0, ns = 0;   /* atlas coverage: any colour? any alpha? */
+        if (tx) { int tot = d->tex_w * d->tex_h, step = tot > 4096 ? tot / 4096 : 1;
+                  for (int i = 0; i < tot; i += step) { uint32_t p = tx[i]; ns++;
+                      if (p & 0x00FFFFFF) nzrgb++; if (p & 0xFF000000) nza++; } }
+        /* uv range of this run (are texcoords landing inside the glyph cells?) */
+        float u0 = v[0].u, u1 = v[0].u, t0 = v[0].v, t1 = v[0].v;
+        for (int i = 1; i < count; i++) { if(v[i].u<u0)u0=v[i].u; if(v[i].u>u1)u1=v[i].u;
+                                          if(v[i].v<t0)t0=v[i].v; if(v[i].v>t1)t1=v[i].v; }
+        fprintf(DIAG, "glr_draw TEXT? mode=%u count=%u tex=%08x %dx%d type=%x "
+                "texenv=%x blend=%d(%x,%x) atest=%d(%x,%.2f) ac.en=%d col=(%.2f,%.2f,%.2f,%.2f) "
+                "tx=%s atlas[rgb=%d/%d a=%d/%d] uv=[%.2f,%.2f]x[%.2f,%.2f] xy=(%.0f,%.0f)\n",
+                d->mode, count, d->tex_rgba, d->tex_w, d->tex_h, d->av.type,
+                d->texenv, d->en_blend, d->blend_s, d->blend_d, d->en_atest, d->atest_func, d->atest_ref,
+                d->ac.en, v[0].r, v[0].g, v[0].b, v[0].a, tx ? "ok" : "NULL",
+                nzrgb, ns, nza, ns, u0, u1, t0, t1, v[0].x, v[0].y);
+        }
+    }
     if (glr_log()) { static int n = 0; if (n++ < 20)
-        fprintf(stderr, "glr_draw mode=%u count=%u en_tex=%d tex=%08x av.ptr=%08x av.en=%d size=%d type=%x "
+        fprintf(DIAG, "glr_draw mode=%u count=%u en_tex=%d tex=%08x av.ptr=%08x av.en=%d size=%d type=%x "
                 "v0=(%.1f,%.1f) v1=(%.1f,%.1f) vp=%d,%d,%d,%d col=(%.2f,%.2f,%.2f,%.2f)\n",
                 d->mode, count, d->en_tex, d->tex_rgba, d->av.ptr, d->av.en, d->av.size, d->av.type,
                 v[0].x, v[0].y, count>1?v[1].x:0, count>1?v[1].y:0,

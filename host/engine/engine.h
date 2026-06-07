@@ -40,6 +40,9 @@ extern __thread uc_engine *g_uc;   /* per host thread: the calling guest thread'
 extern uint32_t g_brk, g_brk_start, g_mmap_next;
 extern int g_exit, g_exit_code, g_trace, g_scret;
 extern int g_shutdown;        /* real quit: ends helper + viewer (g_exit is the per-run CPU bail) */
+extern FILE *g_log;           /* ME_LOGFILE diagnostic sink (robust on the -mwindows bundle where
+                                 stderr redirection is fragile); NULL -> use stderr. */
+#define DIAG (g_log ? g_log : stderr)
 extern int g_reloading;       /* a reset/reload is in flight: the helper skips present */
 extern int g_reload_chdir;    /* reload should chdir to the new binary's dir (File->Open: yes;
                                  GPEComp re-exec into the temp: no -- keep the game's cwd) */

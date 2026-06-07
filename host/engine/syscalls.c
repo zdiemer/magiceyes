@@ -469,6 +469,14 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                       BIGLOCK_UNLOCK(); usleep(us); BIGLOCK_LOCK(); }
             return r; }
         if (dev_type((int)a0)) { free(tmp); return a2; }  /* other devices: accept + discard */
+        /* route guest stdout/stderr through the C streams so they follow ME_LOGFILE's freopen
+           (on the -mwindows bundle a raw write(2,..) doesn't reach the redirected stderr, so
+           guest FAKEGLES_LOG/printf output was being lost). */
+        if ((int)a0 == 1 || (int)a0 == 2) {
+            FILE *s = g_log ? g_log : ((int)a0 == 1 ? stdout : stderr);
+            size_t w = a2 ? fwrite(tmp, 1, a2, s) : 0; fflush(s); free(tmp);
+            return (long)w;
+        }
         long r = write((int)a0, tmp, a2); free(tmp);
         return r < 0 ? -errno : r;
     }
