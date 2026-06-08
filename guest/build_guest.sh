@@ -48,7 +48,7 @@ cp -rf "$SDK/DGE/include/." "$BLD/inc/"
 
 echo "building libSDL-1.2.so.0 ..."
 $GCC $CFLAGS -I "$BLD/inc/SDL" -I "$BLD/inc" -I "$BLD" \
-  -Wl,-soname,libSDL-1.2.so.0 -o "$BLD/libSDL-1.2.so.0" "$BLD/fakesdl.c" -lrt -ldl
+  -Wl,-soname,libSDL-1.2.so.0 -o "$BLD/libSDL-1.2.so.0" "$BLD/fakesdl.c" -lrt -ldl -lpthread
 
 for soname in libinkadrm.so.0 libdrmcode.so.0; do
   echo "building $soname ..."

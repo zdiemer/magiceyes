@@ -22,6 +22,9 @@
 #include "SDL_error.h"
 #include "SDL_rwops.h"
 #include "SDL_version.h"
+#include "SDL_mutex.h"
+#include "SDL_thread.h"
+#include "SDL_wiz_dev.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +39,7 @@
 #include <time.h>
 #include <dlfcn.h>
 #include <setjmp.h>
+#include <pthread.h>
 
 #include "gp2xshm.h"
 #include "glcmd.h"      /* ME_NR_REPORT: surface unsupported SDL features into the engine's run report */
@@ -745,6 +749,91 @@ void SDL_Delay(Uint32 ms) {
     struct timespec ts; ts.tv_sec = ms / 1000; ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
 }
+
+/* --------------------------------------------------------- threads & timers
+   The Wiz firmware gp2xmenu (unlike the standalone titles we run under qemu) drives its UI/audio
+   from SDL threads + timer callbacks, so it imports SDL's threading API. Firmware boot runs only on
+   the native engine, where guest LinuxThreads clone() works (the forked Unicorn relaxes do_fork --
+   the same path Payback's native threads use), so back these with real pthreads. Standalone titles
+   never import these symbols, so the qemu backend (where clone() fails -- see the audio note above)
+   is unaffected; the new libpthread DT_NEEDED only matters once a thread is actually created. */
+struct SDL_mutex { pthread_mutex_t m; };
+SDL_mutex *SDL_CreateMutex(void) {
+    SDL_mutex *x = malloc(sizeof *x);
+    if (x) pthread_mutex_init(&x->m, NULL);
+    return x;
+}
+int  SDL_mutexP(SDL_mutex *x) { return x ? pthread_mutex_lock(&x->m)   : -1; }  /* SDL_LockMutex   */
+int  SDL_mutexV(SDL_mutex *x) { return x ? pthread_mutex_unlock(&x->m) : -1; }  /* SDL_UnlockMutex */
+void SDL_DestroyMutex(SDL_mutex *x) { if (x) { pthread_mutex_destroy(&x->m); free(x); } }
+
+struct SDL_cond { pthread_cond_t c; };
+SDL_cond *SDL_CreateCond(void) {
+    SDL_cond *x = malloc(sizeof *x);
+    if (x) pthread_cond_init(&x->c, NULL);
+    return x;
+}
+void SDL_DestroyCond(SDL_cond *x) { if (x) { pthread_cond_destroy(&x->c); free(x); } }
+
+struct SDL_Thread { pthread_t t; int (*fn)(void *); void *data; };
+static void *sdl_thread_trampoline(void *p) {
+    struct SDL_Thread *th = p;
+    th->fn(th->data);
+    return NULL;
+}
+SDL_Thread *SDL_CreateThread(int (*fn)(void *), void *data) {
+    struct SDL_Thread *th = malloc(sizeof *th);
+    if (!th) return NULL;
+    th->fn = fn; th->data = data;
+    if (pthread_create(&th->t, NULL, sdl_thread_trampoline, th) != 0) { free(th); return NULL; }
+    return th;
+}
+void SDL_WaitThread(SDL_Thread *th, int *status) {
+    if (!th) return;
+    pthread_join(th->t, NULL);
+    if (status) *status = 0;
+    free(th);
+}
+
+/* SDL 1.2 timer: fire `cb` every `interval` ms; cb returns 0 to stop or the next interval. The menu
+   uses only a couple, so one helper thread per timer is fine. */
+struct sdl_timer { pthread_t t; volatile int run; Uint32 iv; SDL_NewTimerCallback cb; void *param; };
+static void *sdl_timer_thread(void *p) {
+    struct sdl_timer *tm = p;
+    while (tm->run) {
+        struct timespec ts; ts.tv_sec = tm->iv / 1000; ts.tv_nsec = (long)(tm->iv % 1000) * 1000000L;
+        nanosleep(&ts, NULL);
+        if (!tm->run) break;
+        Uint32 nx = tm->cb(tm->iv, tm->param);
+        if (nx == 0) break;
+        tm->iv = nx;
+    }
+    return NULL;
+}
+SDL_TimerID SDL_AddTimer(Uint32 interval, SDL_NewTimerCallback cb, void *param) {
+    if (!cb || interval == 0) return NULL;
+    struct sdl_timer *tm = malloc(sizeof *tm);
+    if (!tm) return NULL;
+    tm->run = 1; tm->iv = interval; tm->cb = cb; tm->param = param;
+    if (pthread_create(&tm->t, NULL, sdl_timer_thread, tm) != 0) { free(tm); return NULL; }
+    return (SDL_TimerID)tm;
+}
+SDL_bool SDL_RemoveTimer(SDL_TimerID id) {
+    struct sdl_timer *tm = (struct sdl_timer *)id;
+    if (!tm) return SDL_FALSE;
+    tm->run = 0;
+    pthread_join(tm->t, NULL);
+    free(tm);
+    return SDL_TRUE;
+}
+
+/* GPH Wiz device extensions the menu probes (battery / board id / device-iface lifecycle). No
+   hardware here -> report a healthy battery + success so the menu neither warns nor auto-powers-off.
+   (Battery scale is unknown; a high reading is safe against any low-battery threshold.) */
+int SDL_WizDevIfInit(Uint32 init) { (void)init; return 0; }
+int SDL_WizDevIfQuit(void) { return 0; }
+int SDL_GetBattryCheck(Uint16 *battry_status) { if (battry_status) *battry_status = 0x0fff; return 0; }
+int SDL_GetGphBoard(unsigned char *board_num) { if (board_num) *board_num = 0; return 0; }
 
 /* ------------------------------------------------------------------ audio */
 /* Closed-loop: produce only enough to keep ~CUSHION chunks ahead of what the
