@@ -16,7 +16,10 @@
 #define SYSCLKEN    0x904u
 #define DUALINT920  0x3b40u   /* 920 <- 940 */
 #define DUALINT940  0x3b42u   /* 940 <- 920 */
-#define MMSP2_PHYS  0xC0000000u
+/* The 940 sees the MMSP2 register block at 0xBE000000 (NOT the 920's 0xC0000000): the gpu940
+   firmware reads this base from its global @0x6a90 (= 0xbe000000) and indexes the MLC regs off it.
+   Matches the firmware's CP15 MPU region base. */
+#define MMSP2_PHYS  0xBE000000u
 #define MMSP2_LEN   0x10000u
 
 static uc_engine *g_uc940;
