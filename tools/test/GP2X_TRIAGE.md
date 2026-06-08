@@ -91,10 +91,11 @@ WindandWater/Revolt render black at ~9 fps; retrovirus also logs `SDL_LoadObject
 `SDL_LoadObject`/`SDL_LoadFunction` to return NULL gracefully; then chase the lib NULL deref. (Needs
 the GPH-SDK toolchain rebuild of the shim — heavier; see `wiz-titles-revival`.)
 
-### E. `egoboo2x` / `egoboo-cramfs` — runs, searching for data
-SDL inits and the game reaches `searching : './modules/*.mod'` at 101 fps but stays black — likely
-no module found under the current cwd / data layout. **Fix:** verify the cwd + module path; may be a
-data-layout or `glob`/`readdir` gap rather than rendering.
+### E. `egoboo2x` / `egoboo-cramfs` — needs the **ARM940 second core**
+Not a data problem: it finds its `modules/*.mod`, loads `setup.txt`/`controls.txt`/`basicdat`, and
+sets 320×240×16 — but ships `gpu940`/`gpu940_225`/`load940` and offloads **3D rendering to the GP2X's
+second CPU (ARM940)**, which the engine doesn't run (ARM920 main core only). The 940 never renders →
+black. **Fix:** emulate the ARM940 + the 920↔940 IPC (DualCPU regs / shared memory). Major feature.
 
 ### F. Terminal/PTY console games — *niche* — `nethack` (×2), `rogue`
 `nethack` (ascii port) needs `/dev/ptmx` + `openpty`/`forkpty`; `rogue` reaches
