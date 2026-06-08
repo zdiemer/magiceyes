@@ -44,6 +44,8 @@ extern int g_shutdown;        /* real quit: ends helper + viewer (g_exit is the 
 extern FILE *g_log;           /* ME_LOGFILE diagnostic sink (robust on the -mwindows bundle where
                                  stderr redirection is fragile); NULL -> use stderr. */
 #define DIAG (g_log ? g_log : stderr)
+extern int g_fwlog;                       /* ME_FWLOG: firmware/viewer debug logging to DIAG */
+void me_log(const char *fmt, ...);        /* logs to DIAG when g_fwlog (visible in the bundle log) */
 extern int g_reloading;       /* a reset/reload is in flight: the helper skips present */
 extern int g_reload_chdir;    /* reload should chdir to the new binary's dir (File->Open: yes;
                                  GPEComp re-exec into the temp: no -- keep the game's cwd) */

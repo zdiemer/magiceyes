@@ -34,6 +34,8 @@ void engine_request_reload(const char *host_path);
 int  me_firmware_install(const char *file, const char *device);    /* stage a firmware .zip/.img */
 int  me_firmware_boot_request(const char *device);                 /* boot a staged firmware menu */
 int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap);  /* installed? */
+extern int g_fwlog;                        /* ME_FWLOG: debug logging to the engine log */
+void me_log(const char *fmt, ...);
 #define ME_WINMENU 1
 #endif
 
@@ -509,6 +511,24 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB565,
         SDL_TEXTUREACCESS_STREAMING, w, h);
     int cur_w = w, cur_h = h;
+#ifdef ME_BUNDLED
+    if (g_fwlog) {
+        int nd = SDL_GetNumRenderDrivers();
+        for (int i = 0; i < nd; i++) { SDL_RendererInfo di;
+            if (SDL_GetRenderDriverInfo(i, &di) == 0)
+                me_log("[fw] viewer: available driver[%d]='%s' flags=%x\n", i, di.name, di.flags); }
+        me_log("[fw] viewer: (override with env SDL_RENDER_DRIVER=software|opengl|direct3d11)\n");
+        SDL_RendererInfo ri;
+        if (ren && SDL_GetRendererInfo(ren, &ri) == 0) {
+            int has565 = 0;
+            for (Uint32 i = 0; i < ri.num_texture_formats; i++)
+                if (ri.texture_formats[i] == SDL_PIXELFORMAT_RGB565) has565 = 1;
+            me_log("[fw] viewer: renderer='%s' flags=%x RGB565=%d maxtex=%dx%d initial-tex=%p err='%s'\n",
+                   ri.name, ri.flags, has565, ri.max_texture_width, ri.max_texture_height,
+                   (void *)tex, SDL_GetError());
+        } else me_log("[fw] viewer: SDL_GetRendererInfo failed (ren=%p) err='%s'\n", (void *)ren, SDL_GetError());
+    }
+#endif
 
 #ifdef ME_WINMENU
     SDL_SysWMinfo wmi; SDL_VERSION(&wmi.version); HWND hwnd = NULL;
@@ -624,6 +644,13 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
           }
         }
 
+#ifdef ME_BUNDLED
+        if (g_fwlog) { static Uint32 lt = 0; Uint32 nw = SDL_GetTicks();
+            if (nw - lt >= 1000) { lt = nw;
+                me_log("[fw] viewer: shm %dx%d seq=%u | cur %dx%d last_seq=%u tex=%p present=%d\n",
+                       (int)shm->width, (int)shm->height, shm->frame_seq, cur_w, cur_h,
+                       last_seq, (void *)tex, (shm->frame_seq != last_seq && cur_w > 0)); } }
+#endif
         /* resize texture if the game changed mode */
         if ((int)shm->width != cur_w || (int)shm->height != cur_h) {
             cur_w = (int)shm->width; cur_h = (int)shm->height;
@@ -633,16 +660,30 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
                 tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB565,
                     SDL_TEXTUREACCESS_STREAMING, cur_w, cur_h);
                 SDL_RenderSetLogicalSize(ren, cur_w, cur_h);
+#ifdef ME_BUNDLED
+                if (g_fwlog) me_log("[fw] viewer: texture (re)created %dx%d tex=%p err='%s'\n",
+                                    cur_w, cur_h, (void *)tex, SDL_GetError());
+#endif
             }
         }
 
         if (shm->frame_seq != last_seq && cur_w > 0) {
             last_seq = shm->frame_seq;
             /* shm rows are GP2XSHM_MAXW wide; upload only cur_w x cur_h */
-            SDL_UpdateTexture(tex, NULL, shm->pixels, GP2XSHM_MAXW * 2);
-            SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex, NULL, NULL);
+            int e1 = SDL_UpdateTexture(tex, NULL, shm->pixels, GP2XSHM_MAXW * 2);
+            int e2 = SDL_RenderClear(ren);
+            int e3 = SDL_RenderCopy(ren, tex, NULL, NULL);
             SDL_RenderPresent(ren);
+#ifdef ME_BUNDLED
+            if (g_fwlog) { static Uint32 lp = 0; Uint32 nw = SDL_GetTicks();
+                if (nw - lp >= 1000) { lp = nw;   /* sample the centre row of the shm: is there content? */
+                    const uint16_t *px = (const uint16_t *)shm->pixels + (size_t)(cur_h / 2) * GP2XSHM_MAXW;
+                    int nz = 0; for (int x = 0; x < cur_w; x++) if (px[x]) nz++;
+                    me_log("[fw] present: UpdateTexture=%d RenderClear=%d RenderCopy=%d shm_nz_row=%d/%d err='%s'\n",
+                           e1, e2, e3, nz, cur_w, SDL_GetError()); } }
+#else
+            (void)e1; (void)e2; (void)e3;
+#endif
         } else if (shm->frame_seq == 0) {
             /* no game has presented yet -> paint black so the window doesn't show its
                uninitialised backbuffer (the white strip); stop once a game renders. */

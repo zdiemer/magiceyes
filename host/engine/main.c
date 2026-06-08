@@ -3,6 +3,7 @@
  * run on their own host threads (threads.c); a helper thread presents the framebuffer.
  * g_uc/g_self/g_th/g_biglock live in threads.c. */
 #include "engine.h"
+#include <stdarg.h>
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
@@ -14,6 +15,15 @@
 #endif
 
 FILE *g_log = NULL;   /* ME_LOGFILE diagnostic sink (see engine.h DIAG) */
+
+/* ME_FWLOG: opt-in firmware/viewer debug logging that goes to DIAG (the ME_LOGFILE), so it is
+   visible from the -mwindows bundle (which has no stderr). Callable from viewer.c too. */
+int g_fwlog = 0;
+void me_log(const char *fmt, ...) {
+    if (!g_fwlog) return;
+    va_list ap; va_start(ap, fmt); vfprintf(DIAG, fmt, ap); va_end(ap);
+    fflush(DIAG);
+}
 
 /* chdir into the directory holding `path` so the game finds its Data/ (relative opens). */
 static void chdir_to_dir_of(const char *path) {
@@ -274,6 +284,8 @@ static uint32_t engine_load_game(const char *path) {
     map_kuser_page();
     shm_reset_for_new_game();
     uint32_t entry = load_elf(path);
+    me_log("[fw] engine_load_game '%s' -> entry=%08x device=%d firmware_mode=%d\n",
+           path, entry, g_device, g_firmware_mode);
     if (!entry) { uc_close(u); g_uc = NULL; return 0; }   /* bad/missing binary: caller goes idle */
     if (g_shm) {   /* device for the viewer header; classified from the ELF in load_elf (g_device) */
         g_shm->device  = (uint8_t)g_device;
@@ -436,6 +448,10 @@ int main(int argc, char **argv) {
     }
 
     if (getenv("ME_TRACE")) g_trace = 1;
+#ifdef ME_DEV
+    g_fwlog = 1;   /* the magiceyes-dev build logs the firmware/viewer diagnostics by default */
+#endif
+    if (getenv("ME_FWLOG")) g_fwlog = 1;
     if (getenv("ME_SCRET")) g_scret = 1;
     if (getenv("ME_THREADDUMP")) g_threaddump = 1;
     /* Structured run telemetry (host/engine/report.c). ME_REPORT=<path> writes the JSON the

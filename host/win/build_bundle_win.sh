@@ -22,7 +22,12 @@ DEFS=(-DME_BUNDLED)
 # -mwindows = GUI subsystem: double-clicking spawns NO stray console window. main() is still the
 # entry point (MinGW's GUI CRT calls main; the viewer already sets SDL_MAIN_HANDLED). For terminal
 # launches, me_platform_init() AttachConsole()s the parent so --help/--version/diagnostics still show.
-$CC -O2 -Wall -mwindows "${DEFS[@]}" -o "$REPO/bin/magiceyes.exe" \
+# ME_DEV_BUILD=1 -> magiceyes-dev.exe, a CONSOLE-subsystem build (no -mwindows): stderr/ME_TRACE
+# go straight to the terminal (the GUI window still opens), so the engine's diagnostics are visible
+# while debugging -- the -mwindows release build has no stderr.
+if [ -n "${ME_DEV_BUILD:-}" ]; then OUT="$REPO/bin/magiceyes-dev.exe"; SUBSYS=(); DEFS+=(-DME_DEV);
+else OUT="$REPO/bin/magiceyes.exe"; SUBSYS=(-mwindows); fi
+$CC -O2 -Wall "${SUBSYS[@]}" "${DEFS[@]}" -o "$OUT" \
   "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c "$REPO/host/viewer.c" "$REPO/host/png_write.c" "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/host/engine" -I "$FORK/include" \
   -I "$REPO/guest/src" -I "$SDL/include" \
@@ -30,4 +35,4 @@ $CC -O2 -Wall -mwindows "${DEFS[@]}" -o "$REPO/bin/magiceyes.exe" \
   -static-libgcc -Wl,-Bstatic -lpthread -Wl,-Bdynamic \
   -lSDL2 -lm -lws2_32 -lbcrypt -lwinmm -lcomdlg32 -luser32 -lgdi32 -lshell32 -lole32
 cp -f "$SDL/bin/SDL2.dll" "$REPO/bin/"
-echo "built $REPO/bin/magiceyes.exe (+ SDL2.dll)"
+echo "built $OUT (+ SDL2.dll)"
