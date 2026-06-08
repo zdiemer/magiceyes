@@ -74,6 +74,8 @@ void syscalls_reset(void);                          /* close host fds, free memf
 
 /* ---- loader.c: resolve folder/.zip/.gpe -> a runnable binary, classify static/dynamic ---- */
 const char *resolve_input(const char *in, char *out, size_t cap);  /* NULL + message on error */
+extern char g_launch_args[8][256];  /* launcher-script args to forward to the guest argv */
+extern int  g_launch_nargs;
 int classify_elf(const char *path);   /* 0 = static ET_EXEC ok, 1 = dynamic (deferred), -1 = error */
 int read_elf_interp(const char *path, char *out, size_t cap);  /* PT_INTERP string; 1 if found */
 

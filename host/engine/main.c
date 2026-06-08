@@ -291,8 +291,9 @@ static uint32_t engine_load_game(const char *path) {
         g_shm->device  = (uint8_t)g_device;
         g_shm->backend = 0;   /* the shim/engine sets the real backend once it presents a frame */
     }
-    char *av[1]; av[0] = (char *)path;
-    uint32_t sp = setup_stack(1, av);
+    char *av[1 + 8]; int ac = 0; av[ac++] = (char *)path;   /* + launcher-script args (BermudaSyndrome) */
+    for (int i = 0; i < g_launch_nargs && ac < 1 + 8; i++) av[ac++] = g_launch_args[i];
+    uint32_t sp = setup_stack(ac, av);
     gwrite(UC_ARM_REG_SP, sp);
     memset(&g_th[0], 0, sizeof g_th[0]);
     g_th[0].uc = u; g_th[0].th = 0; g_th[0].tid = g_next_tid++; g_th[0].ppid = 1;

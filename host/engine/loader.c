@@ -19,6 +19,13 @@
 #define LMKDIR(p) mkdir(p, 0777)
 #endif
 
+/* Launcher-script arguments to forward to the guest (e.g. BermudaSyndrome's
+   "./BS_gp2x.bin --datapath=./DATA"): captured from the script line that names the binary, and
+   pushed after argv[0] by engine_load_game. Reset per resolve_input. */
+char g_launch_args[8][256];
+int  g_launch_nargs = 0;
+#define ME_SCRIPT_SEP " \t\r\n;|&\"'"
+
 /* recursive .gpe scan (depth-limited): a folder/zip usually wraps the game in subdirs. */
 struct gpelist { char paths[16][PATH_MAX]; int n; };
 static void scan_gpe(const char *dir, int depth, struct gpelist *gl) {
@@ -112,17 +119,23 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     if (f) {
         char line[512];
         while (fgets(line, sizeof line, f)) {
-            for (char *tok = strtok(line, " \t\r\n;|&\"'"); tok; tok = strtok(NULL, " \t\r\n;|&\"'")) {
+            for (char *tok = strtok(line, ME_SCRIPT_SEP); tok; tok = strtok(NULL, ME_SCRIPT_SEP)) {
                 const char *name = tok;
                 while (*name == '.' || *name == '/' || *name == '\\') name++;   /* strip ./ ../ */
                 if (!*name) continue;
                 char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", dir, name);
-                if (file_is_runnable_elf(cand)) { fclose(f); snprintf(out, cap, "%s", cand); return out; }
-                const char *tb = path_base(name);
-                for (int i = 0; i < elf.n; i++)
-                    if (!strcasecmp(path_base(elf.paths[i]), tb)) {
-                        fclose(f); snprintf(out, cap, "%s", elf.paths[i]); return out;
-                    }
+                int hit = file_is_runnable_elf(cand);
+                if (hit) snprintf(out, cap, "%s", cand);
+                else {
+                    const char *tb = path_base(name);
+                    for (int i = 0; i < elf.n; i++)
+                        if (!strcasecmp(path_base(elf.paths[i]), tb)) { snprintf(out, cap, "%s", elf.paths[i]); hit = 1; break; }
+                }
+                if (hit) {   /* forward the binary's own args from this line (--datapath=./DATA ...) */
+                    for (char *a = strtok(NULL, ME_SCRIPT_SEP); a && g_launch_nargs < 8; a = strtok(NULL, ME_SCRIPT_SEP))
+                        snprintf(g_launch_args[g_launch_nargs++], sizeof g_launch_args[0], "%s", a);
+                    fclose(f); return out;
+                }
             }
         }
         fclose(f);
@@ -288,6 +301,7 @@ static int extract_zip(const char *zip, char *destbuf, size_t cap) {
 }
 
 const char *resolve_input(const char *in, char *out, size_t cap) {
+    g_launch_nargs = 0;   /* fresh per load; populated if we follow a launcher script with args */
     struct stat st;
     if (stat(in, &st)) { fprintf(stderr, "magiceyes: '%s': %s\n", in, strerror(errno)); return NULL; }
     if (S_ISDIR(st.st_mode)) return resolve_dir(in, out, cap);

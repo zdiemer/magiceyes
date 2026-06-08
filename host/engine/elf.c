@@ -222,12 +222,22 @@ uint32_t setup_stack(int argc, char **argv) {
     map_region(STACK_TOP - STACK_SIZE, STACK_SIZE, UC_PROT_READ | UC_PROT_WRITE);
     uint32_t sp = STACK_TOP;
 
-    /* env strings (dynamic only) */
-    const char *envs[16]; int nenv = 0;
-    static char envbuf[16][128];
+    /* env strings. A baseline set is pushed for EVERY title (not just dynamic ones): static GP2X
+       games otherwise get an empty environment, and a getenv() that returns NULL fed straight into
+       a std::string ctor aborts before the first frame (openglad2x: "basic_string::_S_construct
+       NULL not valid"). These mirror what the GP2X firmware exports; harmless to games that ignore
+       env. */
+    const char *envs[24]; int nenv = 0;
+    static char envbuf[24][128];
+    envs[nenv++] = "HOME=/tmp";
+    envs[nenv++] = "PWD=.";
+    envs[nenv++] = "TERM=linux";
+    envs[nenv++] = "USER=root";
+    envs[nenv++] = "LOGNAME=root";
+    envs[nenv++] = "LANG=C";
+    envs[nenv++] = "TMPDIR=/tmp";
     if (g_is_dynamic) {
         envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib";
-        envs[nenv++] = "HOME=/tmp";
         const char *f = getenv("ME_GP2X_FPS");
         snprintf(envbuf[nenv], sizeof envbuf[0], "FAKESDL_FPS=%s", f ? f : "60"); envs[nenv] = envbuf[nenv]; nenv++;
         /* device profile for the shim's per-device joystick map (GP2X/Wiz default vs Caanoo's
@@ -253,7 +263,7 @@ uint32_t setup_stack(int argc, char **argv) {
             snprintf(envbuf[nenv], sizeof envbuf[0], "ME_DEBUG=1"); envs[nenv] = envbuf[nenv]; nenv++;
         }
     }
-    uint32_t envp[16];
+    uint32_t envp[24];
 
     /* push strings, collect guest pointers */
     uint32_t argp[64]; int n = argc < 63 ? argc : 63;

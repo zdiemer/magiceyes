@@ -177,6 +177,14 @@ static int me_mount_resolve(const char *guest, char *out, size_t cap) {
 /* Map a guest path to the host path to actually open/stat: SD/NAND games mount first, then rootfs
    (dynamic libs), then the /mnt/tmp redirect (GPEComp temps on Windows), else identity. */
 static void resolve_path(const char *guest, char *out, size_t cap) {
+    /* Some titles use DOS-style backslash separators (BermudaSyndrome opens "..\bermuda.ovr").
+       Backslash isn't a separator on the host, so normalise it to '/' before resolving. */
+    char norm[PATH_MAX];
+    if (strchr(guest, '\\')) {
+        size_t i = 0; for (; guest[i] && i < sizeof norm - 1; i++)
+            norm[i] = (guest[i] == '\\') ? '/' : guest[i];
+        norm[i] = 0; guest = norm;
+    }
     if (me_mount_resolve(guest, out, cap)) return;
     if (me_rootfs_resolve(guest, out, cap)) return;
     rewrite_guest_path(guest, out, cap);
