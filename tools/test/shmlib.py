@@ -65,6 +65,60 @@ def set_buttons(path, mask):
         return False
 
 
+def set_input(path, buttons, tx=0, ty=0, td=0):
+    """Write buttons + touch (x,y guest pixels; down 0/1) the engine reads back as input."""
+    try:
+        with open(path, "r+b") as f:
+            f.seek(OFF["buttons"]); f.write(struct.pack("<I", buttons & 0xffffffff))
+            f.seek(OFF["touch_x"]); f.write(struct.pack("<hhI", int(tx), int(ty), 1 if td else 0))
+        return True
+    except OSError:
+        return False
+
+
+def load_recording(path):
+    """Parse a viewer input recording (see host/viewer.c). Returns a sorted list of events:
+       {"frame": n, "type": "B"|"T", "btn": m} or {..., "type":"T", "x","y","down"}."""
+    evs = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line[0] == "#":
+                continue
+            p = line.split()
+            if p[0] in ("T", "t") and len(p) >= 5:
+                evs.append({"frame": int(p[1]), "type": "T",
+                            "x": int(p[2]), "y": int(p[3]), "down": int(p[4])})
+            elif len(p) >= 2:
+                evs.append({"frame": int(p[0]), "type": "B", "btn": int(p[1], 16)})
+    evs.sort(key=lambda e: e["frame"])
+    return evs
+
+
+class Replayer:
+    """Applies a parsed recording to the shm, keyed to the engine's frame_seq (run with
+       ME_FAKESDL_VTIME=<fps> so frame_seq -> game state is deterministic). Call apply(path, frame)
+       each poll; it writes the held button+touch state for that frame."""
+    def __init__(self, events):
+        self.ev = events
+        self.i = 0
+        self.btn = 0
+        self.tx = self.ty = self.td = 0
+
+    def last_frame(self):
+        return self.ev[-1]["frame"] if self.ev else 0
+
+    def apply(self, path, frame):
+        while self.i < len(self.ev) and self.ev[self.i]["frame"] <= frame:
+            e = self.ev[self.i]; self.i += 1
+            if e["type"] == "T":
+                self.tx, self.ty, self.td = e["x"], e["y"], e["down"]
+            else:
+                self.btn = e["btn"]
+        set_input(path, self.btn, self.tx, self.ty, self.td)
+        return self.i >= len(self.ev)
+
+
 def buttons_mask(names):
     m = 0
     for n in names:

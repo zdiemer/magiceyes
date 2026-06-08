@@ -40,7 +40,7 @@ def parse_press(script):
 
 
 def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
-            press=None, headed=False, extra_env=None, quiet=False):
+            press=None, headed=False, extra_env=None, quiet=False, replay=None):
     engine = engine or os.path.join(REPO, "bin", "me_unicorn")
     if not os.path.exists(engine):
         return {"title": os.path.basename(game), "path": game, "status": "error",
@@ -56,9 +56,19 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     except OSError:
         pass
 
+    # Deterministic input replay: apply a recorded playthrough keyed to frame_seq, with the shim's
+    # virtual clock on (ME_FAKESDL_VTIME) so frame_seq -> game state is reproducible across hosts.
+    rep = None
+    REPLAY_FPS = 60
+    if replay:
+        rep = shmlib.Replayer(shmlib.load_recording(replay))
+        secs = max(secs, rep.last_frame() / REPLAY_FPS + 6)   # long enough to play the recording
+
     env = dict(os.environ)
     env.update({"ME_REPORT": report_path, "ME_LOGFILE": log_path,
                 "ME_RUN_SECS": str(secs), "ME_SHM_NAME": shm_name, "ME_PROF": "1"})
+    if rep is not None:
+        env["ME_FAKESDL_VTIME"] = str(REPLAY_FPS)   # deterministic per-frame clock for the replay
     if extra_env:
         env.update(extra_env)
 
@@ -80,11 +90,15 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     audio_active = 0
     aw_max = 0
     next_cap = 1.0                  # first capture ~1s in
+    replay_hashes = []              # [[frame_seq, hash], ...] -- deterministic frame-keyed captures
+    CAP_FRAMES = 120                # capture a frame hash every 120 frames during replay
+    next_cap_frame = CAP_FRAMES
     press_seq = parse_press(press)
     press_idx = 0
     press_next_at = 2.0 if press_seq else None   # start the input script ~2s in (after boot)
     hold_until = 0.0
     held_mask = 0
+    poll = 0.02 if rep is not None else 0.1      # finer polling tracks frames during replay
     hard_deadline = t0 + secs + 12  # backstop if the engine ignores ME_RUN_SECS / hangs
 
     while True:
@@ -110,9 +124,21 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
                     nz_samples.append(shmlib.nonzero_ratio(spath, h["width"], h["height"]))
                     frame_hashes.append("0x%016x" % shmlib.dhash(spath, h["width"], h["height"]))
                 next_cap += 2.0
+            if rep is not None:
+                # frame-keyed deterministic input + frame-keyed hash captures (for the baseline).
+                # Only capture WITHIN the recorded input range: after the last input the game
+                # free-runs (audio threads etc.) and isn't reliably frame-deterministic.
+                rep.apply(spath, last_seq)
+                if (last_seq >= next_cap_frame and next_cap_frame <= rep.last_frame()
+                        and h["width"]):
+                    # key by the target frame (deterministic) -- the observed frame may jitter by
+                    # 1-2; gold/got therefore always share keys to compare.
+                    replay_hashes.append([int(next_cap_frame),
+                                          "0x%016x" % shmlib.dhash(spath, h["width"], h["height"])])
+                    next_cap_frame += CAP_FRAMES
             # input script: press the next chord when its time comes, release when its hold ends
             el = now - t0
-            if press_next_at is not None and el >= press_next_at:
+            if rep is None and press_next_at is not None and el >= press_next_at:
                 names, dur = press_seq[press_idx]
                 held_mask = shmlib.buttons_mask(names)
                 shmlib.set_buttons(spath, held_mask)
@@ -122,7 +148,7 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
             elif held_mask and now >= hold_until:
                 held_mask = 0
                 shmlib.set_buttons(spath, 0)
-        time.sleep(0.1)
+        time.sleep(poll)
 
     # let the process finish + flush its report
     try:
@@ -160,6 +186,8 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
         "quirks": _quirks(report),
         "report_counts": (report or {}).get("counts", {}),
         "frame_hashes": frame_hashes,
+        "replay": replay,
+        "replay_hashes": replay_hashes,   # [[frame_seq, hash], ...] -- deterministic, for baselines
         "frame_pngs": frame_pngs,
         "log": log_path,
         "report": report_path,
@@ -228,11 +256,13 @@ def main():
     ap.add_argument("--out", default=None, help="output dir (default: a temp dir)")
     ap.add_argument("--shm-name", default="gp2x_fb")
     ap.add_argument("--press", default=None, help='e.g. "UP:0.5,A:0.2,B+DOWN:0.3"')
+    ap.add_argument("--replay", default=None,
+                    help="play back a recorded input file (frame-keyed; forces deterministic vtime)")
     ap.add_argument("--headed", action="store_true", help="also open the live viewer window")
     ap.add_argument("--json", action="store_true", help="print the full verdict JSON")
     a = ap.parse_args()
     v = run_one(a.game, secs=a.secs, engine=a.engine, out_dir=a.out, shm_name=a.shm_name,
-                press=a.press, headed=a.headed)
+                press=a.press, headed=a.headed, replay=a.replay)
     if a.json:
         print(json.dumps(v, indent=2))
     else:

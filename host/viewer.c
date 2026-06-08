@@ -174,6 +174,7 @@ enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
        IDM_SCALE1 = 1010, IDM_SCALE2, IDM_SCALE3, IDM_SCALE4, IDM_FULLSCREEN,
        IDM_MUTE = 1020, IDM_VOL25, IDM_VOL50, IDM_VOL75, IDM_VOL100,
        IDM_ABOUT = 1030, IDM_CONTROLS,
+       IDM_RECORD = 1035,
        IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200, IDM_SET_GAMES,
        IDM_RECENT0 = 1100 };
 #define MAX_RECENT 8
@@ -264,6 +265,8 @@ static void build_menu(HWND hwnd) {
     AppendMenuA(view, MF_STRING, IDM_SCALE4, "Scale &4x");
     AppendMenuA(view, MF_SEPARATOR, 0, NULL);
     AppendMenuA(view, MF_STRING, IDM_FULLSCREEN, "&Fullscreen\tF11");
+    AppendMenuA(view, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(view, MF_STRING, IDM_RECORD, "&Record input\tF9");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View");
     HMENU audio = CreatePopupMenu();
     AppendMenuA(audio, MF_STRING, IDM_MUTE, "&Mute");
@@ -358,9 +361,11 @@ static void boot_firmware(HWND hwnd, const char *dev) {
         MessageBoxA(hwnd, "That firmware isn't installed yet.\nUse Firmware > Install firmware...",
                     "magiceyes", MB_ICONWARNING);
 }
+static void input_record_toggle(void);   /* defined with the record/replay module below */
 static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     switch (id) {
     case IDM_OPEN:   do_open_dialog(hwnd); break;
+    case IDM_RECORD: input_record_toggle(); break;
     case IDM_RELOAD: if (g_last_game[0]) start_game(g_last_game); break;
     case IDM_EXIT:   { SDL_Event q; memset(&q, 0, sizeof q); q.type = SDL_QUIT; SDL_PushEvent(&q); } break;
     case IDM_SCALE1: apply_scale(win, 1); break;
@@ -464,6 +469,90 @@ static void save_screenshot(int w, int h) {
     fprintf(stderr, rc == 0 ? "[screenshot] saved %s\n" : "[screenshot] FAILED to write %s\n", path);
 }
 
+/* ---- input record / replay -------------------------------------------------
+ * A recording is "<frame_seq> <buttons_hex>" lines (one per button-state CHANGE), keyed to the
+ * shim's frame counter. Record live (F9 / Record menu / ME_INPUT_RECORD=<path>), replay with
+ * ME_INPUT_REPLAY=<path>. For the replay to be DETERMINISTIC across hosts (so a recording is a
+ * stable regression input), run with FAKESDL_VTIME=<fps> so the game's clock advances per-frame
+ * rather than by wall-clock; otherwise a given frame_seq maps to slightly different game state on
+ * a slower/faster machine. Shared, line-for-line, with the headless harness (tools/test). */
+static FILE *g_rec = NULL; static uint32_t g_rec_prevb = 0; static char g_rec_path[1024];
+static int g_rec_ptx = -1, g_rec_pty = -1, g_rec_ptd = -1;   /* last-recorded touch state */
+/* recording lines: "<frame> <buttons_hex>" (button change) and "T <frame> <x> <y> <down>" (touch
+   change). x/y are guest pixels; down is 0/1. The bare-number line is buttons (back-compatible). */
+struct rep_ev { uint32_t frame; char type; uint32_t btn; int x, y, down; };
+static struct rep_ev *g_rep = NULL;
+static int g_rep_n = 0, g_rep_i = 0, g_rep_on = 0, g_rep_done = 0;
+static uint32_t g_rep_btn = 0; static int g_rep_tx = 0, g_rep_ty = 0, g_rep_td = 0;  /* held state */
+
+static void input_record_close(void) {
+    if (g_rec) { fclose(g_rec); g_rec = NULL; me_log("[fw] viewer: saved recording %s\n", g_rec_path); }
+}
+static void input_record_open(const char *path) {
+    input_record_close();
+    g_rec = fopen(path, "w");
+    if (!g_rec) { me_log("[fw] viewer: record: can't write %s\n", path); return; }
+    snprintf(g_rec_path, sizeof g_rec_path, "%s", path);
+    fprintf(g_rec, "# magiceyes-input v1\n");
+    g_rec_prevb = ~0u; g_rec_ptx = g_rec_pty = -999999; g_rec_ptd = -1;  /* force the opening state */
+    me_log("[fw] viewer: recording input -> %s\n", path);
+}
+/* F9 / menu: toggle recording to "<game-basename>.rec" in the cwd (= the game's dir). */
+static void input_record_toggle(void) {
+    if (g_rec) { input_record_close(); return; }
+    const char *g = g_cur_game[0] ? g_cur_game : "recording";
+    const char *s1 = strrchr(g, '/'), *s2 = strrchr(g, '\\'), *s = s1 > s2 ? s1 : s2;
+    char name[300]; snprintf(name, sizeof name, "%s", s ? s + 1 : g);
+    char *dot = strrchr(name, '.'); if (dot) *dot = 0;
+    char path[512]; snprintf(path, sizeof path, "%s.rec", name);
+    input_record_open(path);
+}
+static void input_replay_load(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { me_log("[fw] viewer: replay: can't open %s\n", path); return; }
+    int cap = 64; g_rep = malloc((size_t)cap * sizeof *g_rep); g_rep_n = 0;
+    char line[160];
+    while (g_rep && fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        struct rep_ev e; memset(&e, 0, sizeof e);
+        unsigned fr, bt;
+        if ((line[0] == 'T' || line[0] == 't') &&
+            sscanf(line + 1, "%u %d %d %d", &fr, &e.x, &e.y, &e.down) == 4) { e.type = 'T'; e.frame = fr; }
+        else if (sscanf(line, "%u %x", &fr, &bt) == 2) { e.type = 'B'; e.frame = fr; e.btn = bt; }
+        else continue;
+        if (g_rep_n >= cap) { cap *= 2; g_rep = realloc(g_rep, (size_t)cap * sizeof *g_rep); if (!g_rep) break; }
+        g_rep[g_rep_n++] = e;
+    }
+    fclose(f);
+    g_rep_on = g_rep && g_rep_n > 0;
+    me_log("[fw] viewer: replay %d events from %s (use FAKESDL_VTIME for determinism)\n", g_rep_n, path);
+}
+/* Per-frame: apply replayed input (buttons + touch via *tx/*ty/*td) at this frame_seq, or record
+   changes of the live keyboard+touch. Returns the button bitmap to apply. */
+static uint32_t input_step(gp2x_shm_t *shm, uint32_t kbd, int *tx, int *ty, int *td) {
+    uint32_t f = shm->frame_seq;
+    if (g_rep_on) {
+        while (g_rep_i < g_rep_n && g_rep[g_rep_i].frame <= f) {
+            struct rep_ev *e = &g_rep[g_rep_i++];
+            if (e->type == 'T') { g_rep_tx = e->x; g_rep_ty = e->y; g_rep_td = e->down; }
+            else g_rep_btn = e->btn;
+        }
+        *tx = g_rep_tx; *ty = g_rep_ty; *td = g_rep_td;
+        if (g_rep_i >= g_rep_n && !g_rep_done) { g_rep_done = 1;
+            me_log("[fw] viewer: replay complete at frame %u\n", f); }
+        return g_rep_btn;
+    }
+    if (g_rec) {
+        if (kbd != g_rec_prevb) { fprintf(g_rec, "%u %08x\n", f, kbd); g_rec_prevb = kbd; }
+        if (*tx != g_rec_ptx || *ty != g_rec_pty || *td != g_rec_ptd) {
+            fprintf(g_rec, "T %u %d %d %d\n", f, *tx, *ty, *td);
+            g_rec_ptx = *tx; g_rec_pty = *ty; g_rec_ptd = *td;
+        }
+        fflush(g_rec);
+    }
+    return kbd;
+}
+
 /* Run the viewer on an already-mapped shm. In the two-process build `main` maps the shm and
    calls this; in the single-process bundle the engine passes its in-process g_shm here from a
    worker thread (host/engine/main.c) -- same pointer the engine writes, so input/audio/frames
@@ -545,6 +634,9 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     int running = 1;
     int touch_x = 0, touch_y = 0, touch_down = 0;   /* touchscreen, in guest pixels */
 
+    { const char *rp = getenv("ME_INPUT_RECORD"); if (rp && *rp) input_record_open(rp);
+      const char *vp = getenv("ME_INPUT_REPLAY"); if (vp && *vp) input_replay_load(vp); }
+
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -561,6 +653,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
                 else if (kc == SDLK_F11 || (kc == SDLK_RETURN && (mod & KMOD_ALT)))
                     toggle_fullscreen(win);
                 else if (kc == SDLK_F12) save_screenshot(cur_w, cur_h);
+                else if (kc == SDLK_F9) input_record_toggle();   /* start/stop input recording */
 #ifdef ME_WINMENU
                 else if (kc == SDLK_o && (mod & KMOD_CTRL) && hwnd) do_open_dialog(hwnd);
 #endif
@@ -613,15 +706,15 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
         if (k[SDL_SCANCODE_RSHIFT] || k[SDL_SCANCODE_BACKSPACE]) b |= 1u << GP2X_SELECT;
         if (k[SDL_SCANCODE_Q]) b |= 1u << GP2X_L;
         if (k[SDL_SCANCODE_W]) b |= 1u << GP2X_R;
-        if (!getenv("ME_VIEWER_NOINPUT")) shm->buttons = b;  /* allow scripted input */
-
-        /* mouse -> touchscreen (Caanoo); coords come from the (logical-mapped) mouse events above. */
-        if (!getenv("ME_VIEWER_NOINPUT")) {
-            int tx = touch_x, ty = touch_y;
-            if (tx < 0) tx = 0; if (cur_w > 0 && tx >= cur_w) tx = cur_w - 1;
-            if (ty < 0) ty = 0; if (cur_h > 0 && ty >= cur_h) ty = cur_h - 1;
-            shm->touch_x = (int16_t)tx; shm->touch_y = (int16_t)ty;
-            shm->touch_down = (uint32_t)touch_down;
+        /* clamp the live touch (Caanoo; mouse -> guest pixels), then record/replay buttons+touch
+           together (frame_seq-keyed; see the module above) and apply. */
+        int tx = touch_x, ty = touch_y, td = touch_down;
+        if (tx < 0) tx = 0; if (cur_w > 0 && tx >= cur_w) tx = cur_w - 1;
+        if (ty < 0) ty = 0; if (cur_h > 0 && ty >= cur_h) ty = cur_h - 1;
+        b = input_step(shm, b, &tx, &ty, &td);
+        if (g_rep_on || !getenv("ME_VIEWER_NOINPUT")) {
+            shm->buttons = b;
+            shm->touch_x = (int16_t)tx; shm->touch_y = (int16_t)ty; shm->touch_down = (uint32_t)td;
         }
 
         /* audio is serviced on its own thread (see audio_thread) */
@@ -636,9 +729,10 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
               static const char *bk[]  = { "FB", "SDL", "GL" };
               int di = shm->device  < 3 ? shm->device  : 0;
               int bi = shm->backend < 3 ? shm->backend : 0;
-              char title[160];
-              snprintf(title, sizeof title, "magiceyes  |  %s  |  %s  |  %.0f fps",
-                       dev[di], bk[bi], fps);
+              const char *ind = g_rec ? "  |  [REC]" : (g_rep_on && !g_rep_done) ? "  |  [REPLAY]" : "";
+              char title[200];
+              snprintf(title, sizeof title, "magiceyes  |  %s  |  %s  |  %.0f fps%s",
+                       dev[di], bk[bi], fps, ind);
               SDL_SetWindowTitle(win, title);
               t0 = now; s0 = shm->frame_seq;
           }

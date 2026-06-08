@@ -1,0 +1,54 @@
+{
+  "title": "d3return_en.gpe",
+  "device": "GP2X",
+  "status": "playable",
+  "fps": 45.8,
+  "frames": 969,
+  "audio_active": 1,
+  "allowed_unimplemented": [],
+  "frame_hashes": [
+    "0x0000000000000000",
+    "0x0000506858380000",
+    "0x000000c4e0000000",
+    "0x001735b6ab6b0b00",
+    "0x000635b6ab6b0b00",
+    "0x000635b6ab6b0b00",
+    "0x000635b6ab6b0b00",
+    "0x001735b6ab6b0b00",
+    "0x00268f93b1733300",
+    "0x000aaf33b1733300",
+    "0x001b9f2a8c0f0300"
+  ],
+  "replay": "d3return_en.gpe.rec",
+  "replay_hashes": [
+    [
+      120,
+      "0x000000c4e0000000"
+    ],
+    [
+      240,
+      "0x001735b6ab6b0b00"
+    ],
+    [
+      360,
+      "0x000635b6ab6b0b00"
+    ],
+    [
+      480,
+      "0x000635b6ab6b0b00"
+    ],
+    [
+      600,
+      "0x000635b6ab6b0b00"
+    ],
+    [
+      720,
+      "0x000aab73b1733300"
+    ],
+    [
+      840,
+      "0x0006af3331733300"
+    ]
+  ],
+  "secs": 20.0
+}

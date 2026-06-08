@@ -59,6 +59,24 @@ static unsigned long g_start_ms = 0;
 static unsigned int g_prev_buttons = 0;
 static int g_inited = 0;
 
+/* Virtual clock (FAKESDL_VTIME=fps): SDL_GetTicks advances by a fixed step per SDL_Flip (and by
+   the requested ms per SDL_Delay) instead of by wall-clock, so the game's time-driven logic
+   becomes a deterministic function of the frame count -- the basis for reproducible input
+   record/replay regression tests (a recording's frame numbers map to the same game state on any
+   host, fast or slow). 0 = off (real wall-clock; default; behaviour unchanged). Only correct for
+   flip/Delay-driven titles; a pure SDL_GetTicks busy-spin would stall, so we nudge the clock
+   forward after a long run of GetTicks calls with no flip (g_vtime_spin). */
+static int g_vtime_fps = -1;          /* -1 = not yet read from env; 0 = off */
+static unsigned long g_vclock_ms = 0; /* the virtual clock (ms) */
+static int g_vtime_spin = 0;          /* GetTicks calls since the clock last advanced */
+static int vtime_on(void) {
+    if (g_vtime_fps < 0) { const char *e = getenv("FAKESDL_VTIME"); g_vtime_fps = e ? atoi(e) : 0;
+                           if (g_vtime_fps < 0) g_vtime_fps = 0; }
+    return g_vtime_fps > 0;
+}
+static void vtime_step_flip(void) { if (vtime_on()) { g_vclock_ms += 1000UL / (unsigned)g_vtime_fps;
+                                                      g_vtime_spin = 0; } }
+
 /* When a GLES title is ALSO loaded (Caanoo Propis/Rhythmos use SDL for input/audio/timing but
    EGL+GLES for rendering), the fakegles shim owns the shm framebuffer. Suppress every SDL present
    (SDL_Flip + the continuous-scanout fallback) so they can't overwrite the GL frame. Weak ref:
@@ -278,6 +296,7 @@ static void scanout_maybe(void) {
 int SDL_Flip(SDL_Surface *s) {
     present(s ? s : g_screen);
     g_last_flip_ms = now_ms();   /* explicit flip: suppress the scanout fallback */
+    vtime_step_flip();           /* advance the virtual clock one frame (FAKESDL_VTIME) */
     pump_audio();
     static unsigned long last = 0;
     static long frame_ms = -1;
@@ -709,10 +728,20 @@ Uint8 SDL_GetRelativeMouseState(int *x, int *y) { if (x) *x = 0; if (y) *y = 0; 
 void SDL_WarpMouse(Uint16 x, Uint16 y) { (void)x; (void)y; }
 
 /* ------------------------------------------------------------------- time */
-Uint32 SDL_GetTicks(void) { scanout_maybe(); return (Uint32)(now_ms() - g_start_ms); }
+Uint32 SDL_GetTicks(void) {
+    scanout_maybe();
+    if (vtime_on()) {
+        /* anti-stall: a title that polls GetTicks WITHOUT flipping/delaying would freeze the
+           virtual clock; after a long spin, nudge it so such loops still progress (rare). */
+        if (++g_vtime_spin > 100000) { g_vclock_ms += 1; g_vtime_spin = 0; }
+        return (Uint32)g_vclock_ms;
+    }
+    return (Uint32)(now_ms() - g_start_ms);
+}
 void SDL_Delay(Uint32 ms) {
     pump_audio();
     scanout_maybe();   /* present scanout-mode titles (no SDL_Flip) from their delay loop */
+    if (vtime_on()) { g_vclock_ms += ms; g_vtime_spin = 0; }   /* delay advances the virtual clock */
     struct timespec ts; ts.tv_sec = ms / 1000; ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
 }

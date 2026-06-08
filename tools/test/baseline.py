@@ -24,6 +24,7 @@ import run_title, shmlib
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_DIR = os.path.join(REPO, "tools", "test", "baselines")
+REC_DIR = os.path.join(REPO, "tools", "test", "recordings")   # committed input streams (no imagery)
 STATUS_RANK = {"error": 0, "crashed": 1, "incompatible": 2, "black": 3, "renders": 4, "playable": 5}
 
 
@@ -31,10 +32,18 @@ def slug(path):
     return re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(path.rstrip("/\\")))[:48]
 
 
+def recording_for(path):
+    """A committed input recording for this title (tools/test/recordings/<slug>.rec), or None.
+       When present, the baseline replays it -> a deterministic, frame-keyed regression gate."""
+    rec = os.path.join(REC_DIR, slug(path) + ".rec")
+    return rec if os.path.exists(rec) else None
+
+
 def record(paths, secs, bdir, engine=None):
     os.makedirs(bdir, exist_ok=True)
     for p in paths:
-        v = run_title.run_one(p, secs=secs, engine=engine, shm_name="gp2x_fb", quiet=True)
+        rec = recording_for(p)
+        v = run_title.run_one(p, secs=secs, engine=engine, shm_name="gp2x_fb", quiet=True, replay=rec)
         base = {
             "title": v["title"],
             "device": v.get("device"),
@@ -44,12 +53,16 @@ def record(paths, secs, bdir, engine=None):
             "audio_active": v.get("audio_active", 0),
             "allowed_unimplemented": v.get("unimplemented", []),
             "frame_hashes": v.get("frame_hashes", []),
+            "replay": os.path.basename(rec) if rec else None,
+            "replay_hashes": v.get("replay_hashes", []),   # deterministic frame-keyed (if recording)
             "secs": secs,
         }
         with open(os.path.join(bdir, slug(p) + ".json"), "w") as f:
             json.dump(base, f, indent=2)
-        print("recorded %-28s %-10s fps=%-5s frames=%-5s hashes=%d" % (
-            v["title"][:28], v["status"], v.get("fps"), v.get("frames"), len(base["frame_hashes"])))
+        tag = " replay=%s" % base["replay"] if rec else ""
+        print("recorded %-28s %-10s fps=%-5s frames=%-5s hashes=%d%s" % (
+            v["title"][:28], v["status"], v.get("fps"), v.get("frames"),
+            len(base["replay_hashes"]) or len(base["frame_hashes"]), tag))
 
 
 def check(paths, secs, bdir, fps_tol, frame_dist, engine=None):
@@ -62,7 +75,8 @@ def check(paths, secs, bdir, fps_tol, frame_dist, engine=None):
             continue
         with open(bpath) as f:
             base = json.load(f)
-        v = run_title.run_one(p, secs=secs, engine=engine, shm_name="gp2x_fb", quiet=True)
+        v = run_title.run_one(p, secs=secs, engine=engine, shm_name="gp2x_fb", quiet=True,
+                              replay=recording_for(p))
         problems = _compare(base, v, fps_tol, frame_dist)
         checked += 1
         if problems:
@@ -89,8 +103,22 @@ def _compare(base, v, fps_tol, frame_dist):
     new_sc = sorted(set(v.get("unimplemented", [])) - set(base.get("allowed_unimplemented", [])))
     if new_sc:
         out.append("new unimplemented syscalls: %s" % ", ".join(str(c) for c in new_sc))
-    # frames: only enforce when the title is supposed to render and we have golden hashes
-    if STATUS_RANK.get(base["status"], 0) >= 3 and base.get("frame_hashes"):
+    # frames: a deterministic replay gives frame-keyed golden hashes -> compare each frame to its
+    # own golden (a strong, position-sensitive gate). Otherwise fall back to the looser "any
+    # captured frame must perceptually match any golden frame" used for time-based captures.
+    if STATUS_RANK.get(base["status"], 0) >= 3 and base.get("replay_hashes"):
+        gold = {int(fr): int(h, 16) for fr, h in base["replay_hashes"]}
+        got = {int(fr): int(h, 16) for fr, h in v.get("replay_hashes", [])}
+        if not got:
+            out.append("replay rendered no frames to hash")
+        else:
+            bad = []
+            for fr, gh in sorted(gold.items()):
+                if fr in got and shmlib.hamming(got[fr], gh) > frame_dist:
+                    bad.append("f%d d%d" % (fr, shmlib.hamming(got[fr], gh)))
+            if bad:
+                out.append("replay frames diverged (> %d): %s" % (frame_dist, ", ".join(bad[:6])))
+    elif STATUS_RANK.get(base["status"], 0) >= 3 and base.get("frame_hashes"):
         gold = [int(h, 16) for h in base["frame_hashes"]]
         got = [int(h, 16) for h in v.get("frame_hashes", [])]
         if not got:

@@ -1,0 +1,6 @@
+# magiceyes-input v1
+# game=d3return_en.gpe (intro -> menu -> start; the black-screen repro path)
+878 00004000
+879 00000000
+897 00004000
+904 00000000

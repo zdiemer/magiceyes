@@ -251,15 +251,15 @@ uint32_t setup_stack(int argc, char **argv) {
            build here, not the host environment): ME_FAKESDL_FOO -> FAKESDL_FOO in the guest. */
         static const char *fwd[] = { "FAKESDL_BLIT_LOG", "FAKESDL_PRESENT_LOG", "FAKESDL_NO_COLORKEY",
                                      "FAKESDL_SRC_DUMP", "FAKESDL_AUDIO_DUMP", "FAKEGLES_LOG",
-                                     "FAKEGLES_NORAST" };
-        for (int i = 0; i < (int)(sizeof fwd / sizeof fwd[0]) && nenv < 15; i++) {
+                                     "FAKEGLES_NORAST", "FAKESDL_VTIME" };
+        for (int i = 0; i < (int)(sizeof fwd / sizeof fwd[0]) && nenv < 20; i++) {
             char host[64]; snprintf(host, sizeof host, "ME_%s", fwd[i]);
             const char *v = getenv(host);
             if (v) { snprintf(envbuf[nenv], sizeof envbuf[0], "%s=%s", fwd[i], v); envs[nenv] = envbuf[nenv]; nenv++; }
         }
         /* Tell the shim to emit structured run-report lines (the engine ingests them off stderr).
            Off by default so a normal play session does no per-frame report work in the guest. */
-        if ((getenv("ME_DEBUG") || getenv("ME_REPORT")) && nenv < 15) {
+        if ((getenv("ME_DEBUG") || getenv("ME_REPORT")) && nenv < 22) {
             snprintf(envbuf[nenv], sizeof envbuf[0], "ME_DEBUG=1"); envs[nenv] = envbuf[nenv]; nenv++;
         }
     }

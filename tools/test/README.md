@@ -73,3 +73,19 @@ the engine's structured run report:
 
 See `baseline.py` — records golden metrics + perceptual frame hashes for the known-good set and
 fails any change that regresses them. Run it before committing engine/shim changes.
+
+### Recorded-input regression (deterministic playthroughs)
+
+For titles where booting isn't enough (a scripted path matters), drop a recorded input stream at
+`tools/test/recordings/<title-slug>.rec` (see that folder's README). `baseline.py` then **replays**
+it deterministically and gates per-frame:
+
+- **Record** a playthrough in the viewer with **F9** / *View ▸ Record input* (set
+  `ME_FAKESDL_VTIME=60` while recording so the frame numbers are reproducible), then copy the
+  `.rec` here.
+- `run_title.py --replay <rec>` plays it back (forces `ME_FAKESDL_VTIME=60` — a virtual clock that
+  advances per-frame, so a given `frame_seq` is the same game state on any host).
+- `baseline.py --record/--check` automatically uses a recording when one exists and compares the
+  golden frame hash *at each captured frame* (a stronger, position-sensitive gate than the loose
+  time-sampled hashes). Captures are bounded to the recorded input range (the free-running tail
+  after the last input isn't frame-deterministic).
