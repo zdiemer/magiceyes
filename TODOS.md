@@ -382,6 +382,16 @@ dynamic-libSDL titles like Deicide 3 itself + Cave Story).
 
 ## Backlog
 
+### Headless harness: test both Linux and Windows binaries
+The triage harness (`tools/test/`) currently runs the Linux engine (`bin/me_unicorn`). Extend it to
+also exercise the **native Windows binary** (`bin/magiceyes.exe`) so the corpus sweep / scorecard
+covers both targets and catches host-portability regressions (the black-screen class of bugs).
+
+### Regression tests: record + replay inputs for parity
+Have `baseline.py` (and the run harness) **record the input stream** alongside the golden
+metrics/frame hashes, then **replay** it on later runs and assert parity (same inputs → same frames /
+fps / audio). Makes regressions reproducible and catches input-path drift, not just black-box render.
+
 ### rootfs extraction helper
 `tools/extract_rootfs.sh`: firmware zip/image → a `MAGICEYES_ROOTFS` tree
 (Wiz: ubifs via `ubireader`; GP2X: cramfs/ext2 — TBD from firmware layout).
