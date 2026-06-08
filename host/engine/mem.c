@@ -15,6 +15,7 @@ struct gregion { uint32_t addr, len; int perms; void *host; int external; };
 static struct gregion g_reg[2048];
 static int g_nreg = 0;
 static pthread_mutex_t g_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+static int range_free(uint32_t addr, uint32_t len);   /* defined below; used by pram_map */
 
 static struct gregion *find_region(uint32_t pg) {   /* registry entry covering guest page pg */
     for (int i = 0; i < g_nreg; i++)
@@ -97,6 +98,7 @@ void mem_reset(void) {
     g_nreg = 0;
     pthread_mutex_unlock(&g_reg_lock);
     g_nmfree = 0;
+    if (g_pram) { munmap(g_pram, PRAM_SIZE); g_pram = NULL; }   /* shared phys RAM (external regs already dropped) */
 }
 
 /* Map [guest,guest+len) onto an EXTERNAL host buffer (not engine-owned) into the current uc and
@@ -114,12 +116,56 @@ void mem_register_external(uint32_t guest, uint32_t len, void *host) {
     pthread_mutex_unlock(&g_reg_lock);
 }
 
-/* Map every recorded region into a fresh uc — the native-thread factory. */
+/* Map every recorded region into a fresh uc — the native-thread (and ARM940 second-core) factory. */
 void uc_map_all(uc_engine *u) {
     pthread_mutex_lock(&g_reg_lock);
     for (int i = 0; i < g_nreg; i++)
         uc_mem_map_ptr(u, g_reg[i].addr, g_reg[i].len, g_reg[i].perms, g_reg[i].host);
     pthread_mutex_unlock(&g_reg_lock);
+}
+
+/* ---- shared GP2X physical RAM (upper memory) -------------------------------
+ * The GP2X has 64MB SDRAM; games mmap /dev/mem at the upper region (phys 0x02000000+) for
+ * framebuffers, the ARM940 code area, and gpu940's shared command buffer. Real hardware has ONE
+ * physical RAM, so multiple mmaps of the same phys — by the 920, and by the 940 once it runs —
+ * must alias the SAME bytes. Back the whole upper region with one host allocation; every /dev/mem
+ * mmap of it becomes a window. (Previously each mmap got its own anon pages, so a second mapping
+ * of the same phys saw different memory — the DangerMouse double-map / 940-share bug.) */
+uint8_t *g_pram = NULL;
+static void ensure_pram(void) {
+    if (g_pram) return;
+    g_pram = mmap(NULL, PRAM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (g_pram == MAP_FAILED) die("pram mmap", UC_ERR_OK);
+}
+int phys_in_pram(uint32_t phys, uint32_t len) {
+    return phys >= PRAM_BASE && (uint64_t)phys + (len ? len : 1) <= (uint64_t)PRAM_BASE + PRAM_SIZE;
+}
+/* Host pointer for a GP2X physical address in the shared upper RAM (used by the 940 loader). */
+void *pram_host(uint32_t phys) {
+    if (!g_pram || phys < PRAM_BASE || phys >= PRAM_BASE + PRAM_SIZE) return NULL;
+    return g_pram + (phys - PRAM_BASE);
+}
+/* Map a window of shared physical RAM at a free guest vaddr; returns the guest addr. RWX so the
+ * 920 (or a worker uc) can also execute from it if a game runs code out of upper RAM. */
+long pram_map(uint32_t phys, uint32_t len, uint32_t hint) {
+    ensure_pram();
+    uint32_t l = ALIGN_UP(len ? len : 1), at;
+    if (hint && range_free(ALIGN_DN(hint), l)) at = ALIGN_DN(hint);
+    else {
+        uint32_t align = PAGE;
+        if (l > PAGE && (l & (l - 1)) == 0) align = l > 0x200000u ? 0x200000u : l;
+        g_mmap_next = (g_mmap_next + align - 1) & ~(align - 1);
+        at = g_mmap_next; g_mmap_next += l;
+    }
+    void *host = g_pram + (phys - PRAM_BASE);
+    int perms = UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC;
+    pthread_mutex_lock(&g_reg_lock);
+    uc_err e = uc_mem_map_ptr(g_uc, at, l, perms, host);
+    if (e && e != UC_ERR_MAP) die("pram map", e);
+    if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
+        g_reg[g_nreg++] = (struct gregion){at, l, perms, host, 1};   /* external: shared, never freed here */
+    pthread_mutex_unlock(&g_reg_lock);
+    return at;
 }
 
 /* TEMP (ME_FBWATCH): count guest writes into the framebuffer to tell whether the render code
@@ -192,9 +238,16 @@ long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) 
 
 /* device mmap: give RAM, track phys->guest, and hook MMSP2 reg writes for flips. */
 long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys) {
-    uint32_t at = do_mmap(addr, len, flags | GMAP_ANON, -1, 0);
-    fprintf(stderr, "  DEV mmap type=%d phys=%08x -> guest=%08x len=%08x\n",
-            type, phys, at, len);
+    uint32_t at;
+    /* /dev/mem mapping of GP2X upper RAM -> a window into the shared physical-RAM backing, so the
+       920, repeat mappings, and the ARM940 all alias the same bytes. MMSP2 reg windows
+       (phys 0xC0000000 / 0xE0020000) are NOT RAM and keep the per-mapping anon path below. */
+    if (type == DEV_MEM && phys_in_pram(phys, len))
+        at = (uint32_t)pram_map(phys, len, addr);
+    else
+        at = do_mmap(addr, len, flags | GMAP_ANON, -1, 0);
+    fprintf(stderr, "  DEV mmap type=%d phys=%08x -> guest=%08x len=%08x%s\n",
+            type, phys, at, len, (type == DEV_MEM && phys_in_pram(phys, len)) ? " [pram]" : "");
     if (type == DEV_FB) {                                 /* track up to 2 fb buffers */
         /* Advertise/record a synthetic phys per fb (matches FBIOGET_FSCREENINFO.smem_start)
            so an MLC OADR flip — or a blitter dst — that targets that phys resolves back here. */

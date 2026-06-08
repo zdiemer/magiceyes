@@ -33,6 +33,8 @@
 #define MMAP_BASE   0x40000000u
 #define MMAP_END    0x70000000u
 #define PAGE        0x1000u
+#define PRAM_BASE   0x02000000u           /* GP2X upper physical RAM (shared 920/940 area) */
+#define PRAM_SIZE   0x02000000u           /* 32MB: phys 0x02000000 .. 0x04000000 */
 #define ALIGN_DN(x) ((x) & ~(PAGE - 1))
 #define ALIGN_UP(x) (((x) + PAGE - 1) & ~(PAGE - 1))
 
@@ -86,7 +88,12 @@ void map_region(uint32_t addr, uint32_t size, uint32_t perms);   /* host-backed 
 void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms);
 void *guest_to_host(uint32_t gaddr);   /* host ptr backing a guest addr (host-atomic ops) */
 int read_guest(void *dst, uint32_t gaddr, uint32_t len); /* copy guest bytes (spans regions); 0 ok, -1 unmapped */
-void uc_map_all(uc_engine *u);   /* map all guest regions into a fresh uc (thread factory) */
+void uc_map_all(uc_engine *u);   /* map all guest regions into a fresh uc (thread/940 factory) */
+/* shared GP2X physical RAM (upper memory): one host backing, /dev/mem mmaps are windows into it */
+extern uint8_t *g_pram;
+int   phys_in_pram(uint32_t phys, uint32_t len);
+long  pram_map(uint32_t phys, uint32_t len, uint32_t hint);   /* map a window; returns guest addr */
+void *pram_host(uint32_t phys);                               /* host ptr for a phys addr, or NULL */
 uint32_t gread(uint32_t reg);
 void gwrite(uint32_t reg, uint32_t v);
 
