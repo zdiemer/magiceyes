@@ -28,7 +28,8 @@ DEFS=(-DME_BUNDLED)
 if [ -n "${ME_DEV_BUILD:-}" ]; then OUT="$REPO/bin/magiceyes-dev.exe"; SUBSYS=(); DEFS+=(-DME_DEV);
 else OUT="$REPO/bin/magiceyes.exe"; SUBSYS=(-mwindows); fi
 $CC -O2 -Wall "${SUBSYS[@]}" "${DEFS[@]}" -o "$OUT" \
-  "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c "$REPO/host/viewer.c" "$REPO/host/png_write.c" "$REPO/host/win/posix_compat.c" \
+  "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c "$REPO/host/viewer.c" "$REPO/host/png_write.c" \
+  "$REPO/host/input_config.c" "$REPO/host/settings_ui.c" "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/host/engine" -I "$FORK/include" \
   -I "$REPO/guest/src" -I "$SDL/include" \
   -L "$SDL/lib" "$FORK/build-win/libunicorn.a" \

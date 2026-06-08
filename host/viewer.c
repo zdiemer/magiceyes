@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include "gp2xshm.h"
+#include "input_config.h"
+#include "settings_ui.h"
 
 #if defined(_WIN32) && defined(ME_BUNDLED)
 /* Native Win32 menu bar (File/View/Audio/Help) on the SDL window. The window proc + SDL's
@@ -46,9 +48,21 @@ void me_log(const char *fmt, ...);
 extern volatile int g_fault_pending;
 extern volatile uintptr_t g_fault_addr;
 extern char g_cur_game[];
+#else
+/* Standalone viewer (no engine): the record/replay module below logs via the engine's me_log
+   and names recordings after the engine's current-game string -- provide light fallbacks so the
+   two-process viewer.exe/viewer still builds. */
+#include <stdarg.h>
+static char g_cur_game[1];
+static void me_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); }
 #endif
 
 static gp2x_shm_t *shm;
+/* gamepad + remappable input bindings + the keybind settings overlay */
+#define ME_MAXPADS 4
+static SDL_GameController *g_pads[ME_MAXPADS]; static int g_npads = 0;
+static ic_config g_ic;
+static su_state  g_su;
 static unsigned long long g_consumed = 0;   /* real audio bytes played (B/s stat) */
 static unsigned long long g_fed = 0;        /* all bytes queued incl. silence pad */
 static volatile int g_view_mute = 0;        /* Audio->Mute / --mute */
@@ -173,7 +187,7 @@ static void toggle_fullscreen(SDL_Window *win) { apply_fullscreen(win, !g_cur_fs
 enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
        IDM_SCALE1 = 1010, IDM_SCALE2, IDM_SCALE3, IDM_SCALE4, IDM_FULLSCREEN,
        IDM_MUTE = 1020, IDM_VOL25, IDM_VOL50, IDM_VOL75, IDM_VOL100,
-       IDM_ABOUT = 1030, IDM_CONTROLS,
+       IDM_ABOUT = 1030, IDM_CONTROLS, IDM_SETTINGS,
        IDM_RECORD = 1035,
        IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200, IDM_SET_GAMES,
        IDM_RECENT0 = 1100 };
@@ -286,6 +300,9 @@ static void build_menu(HWND hwnd) {
     AppendMenuA(fw, MF_SEPARATOR, 0, NULL);
     AppendMenuA(fw, MF_STRING, IDM_SET_GAMES, "Set &games folder...");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)fw, "Fir&mware");
+    HMENU inp = CreatePopupMenu();
+    AppendMenuA(inp, MF_STRING, IDM_SETTINGS, "&Keybindings...\tF1");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)inp, "&Input");
     HMENU help = CreatePopupMenu();
     AppendMenuA(help, MF_STRING, IDM_CONTROLS, "&Controls");
     AppendMenuA(help, MF_STRING, IDM_ABOUT, "&About");
@@ -387,6 +404,7 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_VOL50:  g_view_volume = 50;  g_view_mute = 0; break;
     case IDM_VOL75:  g_view_volume = 75;  g_view_mute = 0; break;
     case IDM_VOL100: g_view_volume = 100; g_view_mute = 0; break;
+    case IDM_SETTINGS:   su_open(&g_su, (int)shm->device); break;
     case IDM_FW_INSTALL: do_install_firmware(hwnd); break;
     case IDM_FW_WIZ:     boot_firmware(hwnd, "wiz"); break;
     case IDM_FW_CAANOO:  boot_firmware(hwnd, "caanoo"); break;
@@ -395,7 +413,11 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_SET_GAMES:  pick_games_folder(hwnd); break;
     case IDM_CONTROLS:
         MessageBoxA(hwnd, "D-pad:    Arrow keys\nA/B/X/Y:  Z / X / A / S\nStart:    Enter\n"
-                          "Select:   Backspace\nL / R:    Q / W\nFullscreen: F11\nQuit:     Esc",
+                          "Select:   Backspace\nL / R:    Q / W\nVol +/-:  = / -\n"
+                          "Gamepads work too (Xbox layout).\n\n"
+                          "Rebind any of these per system (GP2X/Wiz/Caanoo) in\n"
+                          "Input > Keybindings (or press F1).\n\n"
+                          "Fullscreen: F11\nQuit:     Esc",
                     "Controls", MB_OK); break;
     case IDM_ABOUT:
         MessageBoxA(hwnd, "magiceyes\nRun GP2X / Wiz games on a PC.\ngithub.com/zdiemer/magiceyes",
@@ -586,7 +608,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
        stream under latency spikes. */
     if (!getenv("PULSE_LATENCY_MSEC")) setenv("PULSE_LATENCY_MSEC", "120", 1);
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1;
     }
     int w = shm->width ? (int)shm->width : 320;
@@ -642,22 +664,48 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     int running = 1;
     int touch_x = 0, touch_y = 0, touch_down = 0;   /* touchscreen, in guest pixels */
 
+    /* input bindings (defaults + bindings.conf) + the keybind settings overlay. Done after
+       SDL_Init so the scancode/controller name APIs the loader uses are available. Open any
+       controllers already attached; hotplug is handled in the event loop. */
+    ic_load(&g_ic);
+    su_init(&g_su, &g_ic);
+    for (int i = 0; i < SDL_NumJoysticks() && g_npads < ME_MAXPADS; i++)
+        if (SDL_IsGameController(i)) { SDL_GameController *c = SDL_GameControllerOpen(i);
+            if (c) g_pads[g_npads++] = c; }
+
     { const char *rp = getenv("ME_INPUT_RECORD"); if (rp && *rp) input_record_open(rp);
       const char *vp = getenv("ME_INPUT_REPLAY"); if (vp && *vp) input_replay_load(vp); }
 
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            /* window close + controller hotplug are processed regardless of the overlay */
+            if (e.type == SDL_QUIT) { running = 0; continue; }
+            if (e.type == SDL_CONTROLLERDEVICEADDED) {
+                if (g_npads < ME_MAXPADS) { SDL_GameController *c = SDL_GameControllerOpen(e.cdevice.which);
+                    if (c) g_pads[g_npads++] = c; }
+                continue;
+            }
+            if (e.type == SDL_CONTROLLERDEVICEREMOVED) {
+                for (int i = 0; i < g_npads; i++)
+                    if (g_pads[i] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pads[i])) == e.cdevice.which) {
+                        SDL_GameControllerClose(g_pads[i]);
+                        g_pads[i] = g_pads[--g_npads]; g_pads[g_npads] = NULL; break;
+                    }
+                continue;
+            }
+            /* keybind settings overlay: while open it owns all input -- consume + skip the rest */
+            if (su_is_open(&g_su)) { su_handle_event(&g_su, &e); continue; }
             /* mouse -> touchscreen. With SDL_RenderSetLogicalSize the EVENT coords are already in
                guest (logical) pixels (unlike SDL_GetMouseState, which is window pixels). */
             if (e.type == SDL_MOUSEMOTION) { touch_x = e.motion.x; touch_y = e.motion.y; }
             else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                 touch_down = 1; touch_x = e.button.x; touch_y = e.button.y; }
             else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) touch_down = 0;
-            if (e.type == SDL_QUIT) running = 0;
             if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode kc = e.key.keysym.sym; Uint16 mod = e.key.keysym.mod;
-                if (kc == SDLK_ESCAPE) running = 0;
+                if (kc == SDLK_F1) su_open(&g_su, (int)shm->device);   /* open keybind settings */
+                else if (kc == SDLK_ESCAPE) running = 0;
                 else if (kc == SDLK_F11 || (kc == SDLK_RETURN && (mod & KMOD_ALT)))
                     toggle_fullscreen(win);
                 else if (kc == SDLK_F12) save_screenshot(cur_w, cur_h);
@@ -693,36 +741,25 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
 #endif
         shm->viewer_heartbeat++;   /* tell the producer a viewer is consuming a_read */
 
-        /* keyboard -> GP2X buttons */
+        /* host input -> canonical GP2X buttons via the active per-device binding profile
+           (keyboard + gamepad; ic_compute_buttons derives the 8-way diagonals). The guest shim
+           handles any device-native button reorder/axes, so we always write the GP2X layout. */
         const Uint8 *k = SDL_GetKeyboardState(NULL);
-        uint32_t b = 0;
-        int up = k[SDL_SCANCODE_UP], dn = k[SDL_SCANCODE_DOWN];
-        int lf = k[SDL_SCANCODE_LEFT], rt = k[SDL_SCANCODE_RIGHT];
-        if (up) b |= 1u << GP2X_UP;
-        if (dn) b |= 1u << GP2X_DOWN;
-        if (lf) b |= 1u << GP2X_LEFT;
-        if (rt) b |= 1u << GP2X_RIGHT;
-        if (up && lf) b |= 1u << GP2X_UPLEFT;
-        if (up && rt) b |= 1u << GP2X_UPRIGHT;
-        if (dn && lf) b |= 1u << GP2X_DOWNLEFT;
-        if (dn && rt) b |= 1u << GP2X_DOWNRIGHT;
-        if (k[SDL_SCANCODE_Z]) b |= 1u << GP2X_A;
-        if (k[SDL_SCANCODE_X]) b |= 1u << GP2X_B;
-        if (k[SDL_SCANCODE_A]) b |= 1u << GP2X_X;
-        if (k[SDL_SCANCODE_S]) b |= 1u << GP2X_Y;
-        if (k[SDL_SCANCODE_RETURN]) b |= 1u << GP2X_START;
-        if (k[SDL_SCANCODE_RSHIFT] || k[SDL_SCANCODE_BACKSPACE]) b |= 1u << GP2X_SELECT;
-        if (k[SDL_SCANCODE_Q]) b |= 1u << GP2X_L;
-        if (k[SDL_SCANCODE_W]) b |= 1u << GP2X_R;
+        uint32_t b = su_is_open(&g_su) ? 0u
+                   : ic_compute_buttons(&g_ic, k, g_pads, g_npads, (int)shm->device);
         /* clamp the live touch (Caanoo; mouse -> guest pixels), then record/replay buttons+touch
            together (frame_seq-keyed; see the module above) and apply. */
         int tx = touch_x, ty = touch_y, td = touch_down;
         if (tx < 0) tx = 0; if (cur_w > 0 && tx >= cur_w) tx = cur_w - 1;
         if (ty < 0) ty = 0; if (cur_h > 0 && ty >= cur_h) ty = cur_h - 1;
-        b = input_step(shm, b, &tx, &ty, &td);
-        if (g_rep_on || !getenv("ME_VIEWER_NOINPUT")) {
-            shm->buttons = b;
-            shm->touch_x = (int16_t)tx; shm->touch_y = (int16_t)ty; shm->touch_down = (uint32_t)td;
+        if (su_is_open(&g_su)) {
+            shm->buttons = 0;            /* pause game input while editing keybinds */
+        } else {
+            b = input_step(shm, b, &tx, &ty, &td);
+            if (g_rep_on || !getenv("ME_VIEWER_NOINPUT")) {
+                shm->buttons = b;
+                shm->touch_x = (int16_t)tx; shm->touch_y = (int16_t)ty; shm->touch_down = (uint32_t)td;
+            }
         }
 
         /* audio is serviced on its own thread (see audio_thread) */
@@ -769,7 +806,17 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
             }
         }
 
-        if (shm->frame_seq != last_seq && cur_w > 0) {
+        if (su_is_open(&g_su)) {
+            /* settings overlay owns the screen: re-present every loop (the game may not be
+               producing new frames) -- last frame underneath, then the overlay on top. */
+            if (cur_w > 0) { SDL_UpdateTexture(tex, NULL, shm->pixels, GP2XSHM_MAXW * 2);
+                             SDL_RenderClear(ren); SDL_RenderCopy(ren, tex, NULL, NULL); }
+            else SDL_RenderClear(ren);
+            su_render(&g_su, ren, cur_w > 0 ? cur_w : g_base_w, cur_h > 0 ? cur_h : g_base_h);
+            SDL_RenderPresent(ren);
+            last_seq = shm->frame_seq;
+            SDL_Delay(16);
+        } else if (shm->frame_seq != last_seq && cur_w > 0) {
             last_seq = shm->frame_seq;
             /* shm rows are GP2XSHM_MAXW wide; upload only cur_w x cur_h */
             int e1 = SDL_UpdateTexture(tex, NULL, shm->pixels, GP2XSHM_MAXW * 2);

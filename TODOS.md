@@ -6,9 +6,18 @@ its own repo.
 
 ## Planned features (roadmap)
 
-- **Controller support** — gamepad input through the viewer (in addition to the keyboard map).
-- **Rebinding support** — user-remappable bindings (config file / in-app remap UI).
-- **Per-system keybinding support** — distinct binding profiles per device (GP2X / Wiz / Caanoo).
+- **Controller support** — *DONE.* SDL_GameController gamepad input through the viewer
+  (Xbox-layout defaults: dpad+left stick, ABXY, LB/RB, Start/Back, triggers→volume, stick-click),
+  with hotplug. Lives alongside the keyboard map in `host/input_config.c` (`ic_compute_buttons`).
+- **Rebinding support** — *DONE.* User-remappable bindings via a config file
+  (`<appdata>/magiceyes/bindings.conf`, hand-rolled INI-ish, one `[section]` per device) AND an
+  in-app remap UI: the **keybind settings overlay** (`host/settings_ui.c`, F1 / Input menu) lets
+  the user rebind any button by pressing a key or gamepad button, clear, and reset-to-defaults.
+- **Per-system keybinding support** — *DONE.* Distinct binding profiles per device (GP2X / Wiz /
+  Caanoo), selectable as tabs in the settings overlay; the viewer applies the profile for the live
+  `shm->device`. Volume buttons (VOLUP/VOLDOWN) are bindable too (some games use them as controls).
+  *Note:* the viewer always writes the canonical GP2X bit layout; Caanoo native button reorder/axes
+  stay guest-side (`guest/src/fakesdl.c`), so profiles only map host input → canonical bit.
 - **Ensure save support** — verify games can persist save data across runs on every backend/device.
   *Native engine: DONE* — a per-game write overlay redirects game-data writes (and read-back) to
   a portable `<exe_dir>/saves/<gamekey>/`, so saves survive even from a read-only ROM dir or the
@@ -26,7 +35,10 @@ its own repo.
   never write into the user's game folders. (cwd already decoupled via `g_game_root`, so the temp
   location no longer affects asset resolution — this is purely about not littering ROM dirs.)
 - **End-to-end firmware support** — boot the device firmware, then launch games from the SD card.
-- **Touchscreen support for GP2X and Wiz** — touch input beyond the current Caanoo mouse→touch path.
+- **Touchscreen support for GP2X and Wiz** — the viewer mouse→`shm->touch_*` path is device-agnostic
+  and already feeds GP2X(F200)/Wiz titles that read the SDL mouse (verified viewer-side). *Remaining:*
+  guest-side backing for titles that read touch via tslib `ts_read` or raw `/dev/input/event` instead
+  of the SDL mouse (back those with the same shm.touch fields in `guest/src/fakesdl.c`/`devices.c`).
 - **Vulkan backend for Caanoo's GPU** — replace/augment the software GLES1.1 rasterizer with Vulkan.
 
 ## DONE: pivoted the GP2X backend from Unicorn to forked qemu-user
@@ -382,14 +394,15 @@ GP2X-specific libs (`libmedia`, etc.) come from the F100/F200 firmware patch tar
   likely unsupported (flag per-title).
 - **Caanoo** (Pollux, like Wiz): once the shim handles Pollux too, mostly mirrors Wiz
   + its own rootfs/button map (analog stick).
-  - **Per-device input bindings + remapping** (TODO): GP2X, Wiz, and Caanoo have different
-    controller layouts and the shim now switches joystick maps by device (GP2X/Wiz = the GP2X
-    19-button order; Caanoo = analog-stick axes + native button order A,X,B,Y,L,R,START,HOLD,I,
-    II,TAT), selected by `MAGICEYES_DEVICE` (auto-detected for Caanoo GLES titles via their
-    Pollux sonames in `host/engine/elf.c`; set it explicitly for non-GLES Caanoo titles like
-    Liar). Still wanted: proper per-device profiles (a real device enum, not just a joystick-map
-    bool) covering button names + the viewer key/gamepad bindings, and **user-remappable**
-    bindings (a config file / in-app remap UI). The shim map lives in `guest/src/fakesdl.c`
+  - **Per-device input bindings + remapping** (DONE on the viewer side): GP2X, Wiz, and Caanoo
+    have different controller layouts and the shim switches joystick maps by device (GP2X/Wiz =
+    the GP2X 19-button order; Caanoo = analog-stick axes + native button order A,X,B,Y,L,R,START,
+    HOLD,I,II,TAT), selected by `MAGICEYES_DEVICE` (auto-detected for Caanoo GLES titles via their
+    Pollux sonames in `host/engine/elf.c`; set it explicitly for non-GLES Caanoo titles like Liar).
+    The viewer now has **per-device binding profiles** (keyboard + gamepad) + **user-remappable
+    bindings** (`host/input_config.c` model/defaults/load-save to `bindings.conf`; in-app remap
+    overlay `host/settings_ui.c`, opened with F1 / Input menu). The viewer writes the canonical
+    GP2X bit layout; the device-native reorder/axes still live in `guest/src/fakesdl.c`
     (`joymap_caanoo`, `g_caanoo_btn`, `caanoo_axis`).
   - **Touchscreen via the viewer** (DONE): viewer mouse → `shm.touch_{x,y,down}` (guest pixels,
     via `SDL_RenderSetLogicalSize` mapping) → the fake-SDL shim emits SDL mouse motion/button
