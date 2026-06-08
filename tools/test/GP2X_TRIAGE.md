@@ -48,10 +48,12 @@ Ordered by leverage. Findings below come from per-title traces (`ME_DEBUG`, `ME_
 **Not** a device-node problem (the touchscreen open failing is harmless). Trace shows both mmap
 `/dev/mem` at phys `0x02000000` (upper 32 MB) and their MLC `OADR` flip to `0x03101000`/`0x03381000`
 **resolves fine** ("FLIP … ok", "BLIT ok" — solid fills + copies land). The real blocker is an early
-**mem-fault `@~0x7f7ffc30`** (read, just below the mapped stack top `0x80000000`) that kills the
-render thread before steady-state → 0 frames. **Fix:** investigate stack sizing / a guard-page
-probe near `STACK_TOP`; likely the main thread needs a larger mapped stack (grow `STACK_SIZE` or
-map on-demand below SP). Medium.
+**read mem-fault just below the mapped stack** (`pc=0x1d95cc` DangerMouse, `0x16c200` Nat2007) that
+kills the render thread → 0 frames. *Tried and ruled out:* growing `STACK_SIZE` only moves the fault
+to the same relative offset, and a zero-filled skirt below the stack just makes it fault deeper — so
+the code **scans memory downward until it hits an unmapped page** rather than reading one fixed slot.
+**Fix:** disassemble around those PCs to see what the loop is walking (likely a memory probe that
+should terminate on a sentinel we're not providing). Medium-deep.
 
 ### B. "Black but running" reversed-preacher family — *medium*, 4 titles, one engine
 `para3`, `game bIld 2`, `_-the reversed preacher II-_`, `_-The Reversed Preacher 3-_` — same Korean
