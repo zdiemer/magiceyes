@@ -15,6 +15,15 @@ struct gregion { uint32_t addr, len; int perms; void *host; int external; };
 static struct gregion g_reg[2048];
 static int g_nreg = 0;
 static pthread_mutex_t g_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Per-thread "I hold g_reg_lock" flag so the crash guard can release it if a host fault hits a
+   guest thread mid-region-op (read_guest's memcpy, ensure_mapped's uc_mem_map_ptr, pram_map)
+   -- else every later memory op deadlocks. EVERY g_reg_lock lock/unlock goes through these. */
+static __thread int g_holds_reglock = 0;
+#define REGLOCK_LOCK()   do { pthread_mutex_lock(&g_reg_lock);   g_holds_reglock = 1; } while (0)
+#define REGLOCK_UNLOCK() do { g_holds_reglock = 0; pthread_mutex_unlock(&g_reg_lock); } while (0)
+void guard_release_reglock(void) {
+    if (g_holds_reglock) { g_holds_reglock = 0; pthread_mutex_unlock(&g_reg_lock); }
+}
 static int range_free(uint32_t addr, uint32_t len);   /* defined below; used by pram_map */
 
 static struct gregion *find_region(uint32_t pg) {   /* registry entry covering guest page pg */
@@ -31,7 +40,7 @@ static struct gregion *find_region(uint32_t pg) {   /* registry entry covering g
    fresh one. */
 void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms) {
     uint32_t end = ALIGN_UP(addr + size), p = ALIGN_DN(addr);
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     while (p < end) {
         struct gregion *r = find_region(p);
         if (r) {                                  /* existing backing -> map it into u */
@@ -51,7 +60,7 @@ void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms) {
             p = run;
         }
     }
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
 }
 
 void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
@@ -60,10 +69,10 @@ void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
 
 /* Host pointer backing guest address gaddr (for host-atomic ops, e.g. kuser cmpxchg). */
 void *guest_to_host(uint32_t gaddr) {
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     struct gregion *r = find_region(ALIGN_DN(gaddr));
     void *h = r ? (uint8_t *)r->host + (gaddr - r->addr) : NULL;
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
     return h;
 }
 
@@ -76,16 +85,16 @@ void *guest_to_host(uint32_t gaddr) {
 int read_guest(void *dst, uint32_t gaddr, uint32_t len) {
     uint8_t *d = dst;
     if (gaddr + len < gaddr) return -1;               /* 32-bit wrap */
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     while (len) {
         struct gregion *r = find_region(gaddr);
-        if (!r) { pthread_mutex_unlock(&g_reg_lock); return -1; }
+        if (!r) { REGLOCK_UNLOCK(); return -1; }
         uint32_t avail = r->addr + r->len - gaddr;
         uint32_t n = len < avail ? len : avail;
         memcpy(d, (uint8_t *)r->host + (gaddr - r->addr), n);
         d += n; gaddr += n; len -= n;
     }
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
     return 0;
 }
 
@@ -93,10 +102,10 @@ int read_guest(void *dst, uint32_t gaddr, uint32_t len) {
    view of these uc_mem_map_ptr mappings). Called between games by engine_reset_and_load
    AFTER all worker ucs and the main uc are closed -- nothing maps these pointers anymore. */
 void mem_reset(void) {
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     for (int i = 0; i < g_nreg; i++) if (!g_reg[i].external) munmap(g_reg[i].host, g_reg[i].len);
     g_nreg = 0;
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
     g_nmfree = 0;
     if (g_pram) { munmap(g_pram, PRAM_SIZE); g_pram = NULL; }   /* shared phys RAM (external regs already dropped) */
 }
@@ -106,22 +115,22 @@ void mem_reset(void) {
    to alias the shim's gp2x_fb mmap onto the engine's g_shm (zero-copy shared framebuffer). */
 void mem_register_external(uint32_t guest, uint32_t len, void *host) {
     uint32_t l = ALIGN_UP(len);
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     if (!find_region(guest)) {
         uc_err e = uc_mem_map_ptr(g_uc, guest, l, UC_PROT_READ | UC_PROT_WRITE, host);
         if (e && e != UC_ERR_MAP) die("uc_mem_map_ptr external", e);
         if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
             g_reg[g_nreg++] = (struct gregion){guest, l, UC_PROT_READ | UC_PROT_WRITE, host, 1};
     }
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
 }
 
 /* Map every recorded region into a fresh uc — the native-thread (and ARM940 second-core) factory. */
 void uc_map_all(uc_engine *u) {
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     for (int i = 0; i < g_nreg; i++)
         uc_mem_map_ptr(u, g_reg[i].addr, g_reg[i].len, g_reg[i].perms, g_reg[i].host);
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
 }
 
 /* ---- shared GP2X physical RAM (upper memory) -------------------------------
@@ -162,12 +171,12 @@ long pram_map(uint32_t phys, uint32_t len, uint32_t hint) {
     }
     void *host = g_pram + (phys - PRAM_BASE);
     int perms = UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC;
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     uc_err e = uc_mem_map_ptr(g_uc, at, l, perms, host);
     if (e && e != UC_ERR_MAP) die("pram map", e);
     if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
         g_reg[g_nreg++] = (struct gregion){at, l, perms, host, 1};   /* external: shared, never freed here */
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
     return at;
 }
 
@@ -185,12 +194,12 @@ void fbwatch_cb(uc_engine *uc, uc_mem_type type, uint64_t addr, int size, int64_
 static int range_free(uint32_t addr, uint32_t len) {
     uint32_t end = addr + len; if (end < addr) return 0;   /* wrap */
     int ok = 1;
-    pthread_mutex_lock(&g_reg_lock);
+    REGLOCK_LOCK();
     for (int i = 0; i < g_nreg; i++) {
         uint32_t a = g_reg[i].addr, e = a + g_reg[i].len;
         if (addr < e && a < end) { ok = 0; break; }
     }
-    pthread_mutex_unlock(&g_reg_lock);
+    REGLOCK_UNLOCK();
     return ok;
 }
 

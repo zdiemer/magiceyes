@@ -291,6 +291,7 @@ void guard_init(void);                 /* install handlers (Linux); Windows: tim
 int  guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f);  /* -1 on fault */
 int  guarded_present(void);            /* 0 ok, -1 if present faulted (frame skipped) */
 void guard_release_biglock(void);      /* unlock g_biglock iff the faulting thread held it */
+void guard_release_reglock(void);      /* unlock g_reg_lock iff the faulting thread held it */
 /* Recovery handoff to the viewer (bundle only): the engine flags a crashed game; the viewer
    thread polls and pops a MessageBox. (Not in gp2x_shm_t -- that ABI is shared with the guest.) */
 extern volatile int g_fault_pending;

@@ -84,6 +84,7 @@ int guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f) {
     if (g_returned) {                       /* came back via the handler -> a host fault */
         if (f) { f->faulted = 1; f->addr = g_faddr; f->pc = g_fpc; }
         guard_release_biglock();
+        guard_release_reglock();
         return -1;
     }
     g_armed = 1;
@@ -141,6 +142,7 @@ int guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f) {
         g_armed = 0;
         if (f) { f->faulted = 1; f->addr = g_faddr; f->pc = 0; }
         guard_release_biglock();
+        guard_release_reglock();
         return -1;
     }
     g_armed = 1;

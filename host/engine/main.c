@@ -38,6 +38,11 @@ uint32_t g_mmap_next = MMAP_BASE;
 int g_exit = 0, g_exit_code = 0;
 int g_shutdown = 0;   /* real quit (ends helper+viewer); g_exit is the transient per-run CPU bail */
 int g_reloading = 0;  /* a reset/reload is in flight -> the helper thread skips present */
+/* Serialises the helper thread's framebuffer present against engine_reset_and_load's teardown,
+   so present_active() can never dereference guest-RAM host pointers while mem_reset() is
+   munmapping them. The outermost lock (only ever co-held by helper-vs-teardown, which are
+   mutually exclusive) -> no ordering inversion with g_biglock/g_reg_lock. */
+static pthread_mutex_t g_present_lock = PTHREAD_MUTEX_INITIALIZER;
 int g_reload_chdir = 0;   /* File->Open: chdir to the new game's dir; GPEComp re-exec: keep cwd */
 char g_reload_path[PATH_MAX] = {0};   /* non-empty -> the main loop resets + loads this binary */
 int g_trace = 0;
@@ -175,8 +180,16 @@ static void *helper_thread(void *arg) {
         /* Present off the guest render thread: frame-synced to the game's OADR write
            (g_frame_ready) once it drives present, else an async fallback. Skip while a reload
            is tearing down/rebuilding guest memory (g_fb_guest is being reset). */
+        /* Hold g_present_lock across BOTH guest-RAM touches: a reload tearing down guest memory
+           (mem_reset) must wait for an in-flight present to finish, and a present can't start
+           once teardown holds the lock. The ME_AUDIOCLEAR deref is in here too -- it's a guest
+           pointer that mem_reset would also free. On a present host-fault the guard's recovery
+           point is below this frame, so guarded_present() returns -1 normally and the unlock
+           still runs (no leak). */
+        pthread_mutex_lock(&g_present_lock);
         if (!g_reloading && g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; guarded_present(); }
-        if (acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
+        if (!g_reloading && acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
+        pthread_mutex_unlock(&g_present_lock);
         double now = host_now();
         if (run_secs > 0 && !run_stopped && now - run_t0 >= run_secs) {
             run_stopped = 1;
@@ -205,10 +218,13 @@ static void *helper_thread(void *arg) {
 static void *test_reload_thread(void *arg) {
     (void)arg;
     char *list = strdup(getenv("ME_TEST_RELOAD"));
+    /* ME_TEST_RELOAD_NODELAY: reload back-to-back (no inter-reload gap) so the helper's present
+       overlaps the teardown -- the stress repro for the present/teardown race. */
+    int nodelay = getenv("ME_TEST_RELOAD_NODELAY") != NULL;
     int secs = getenv("ME_TEST_RELOAD_SECS") ? atoi(getenv("ME_TEST_RELOAD_SECS")) : 6;
     if (secs < 1) secs = 1;
     for (char *p = strtok(list, ";"); p && !g_shutdown; p = strtok(NULL, ";")) {
-        for (int i = 0; i < secs * 10 && !g_shutdown; i++) usleep(100000);
+        for (int i = 0; !nodelay && i < secs * 10 && !g_shutdown; i++) usleep(100000);
         char bin[PATH_MAX]; const char *r = resolve_input(p, bin, sizeof bin);
         if (!r || classify_elf(r) < 0) { fprintf(stderr, "[test-reload] skip '%s'\n", p); continue; }
         fprintf(stderr, "[test-reload] -> %s\n", r);
@@ -324,6 +340,9 @@ static void engine_reset_globals(void) {
    process (and the viewer/helper threads + shm) alive. Returns the new entry PC, or 0 if the
    load failed. Used by both the GPEComp re-exec (case 11) and File->Open hot reload. */
 static uint32_t engine_reset_and_load(const char *path) {
+    pthread_mutex_lock(&g_present_lock);   /* quiesce the helper present: drain any in-flight
+                                              present, then block new ones for the whole teardown
+                                              +load (held until after g_reloading is cleared) */
     g_reloading = 1;
     me940_stop();                                       /* halt the 2nd core before its RAM is freed */
     engine_stop_all_threads();                          /* join workers, close their ucs */
@@ -338,6 +357,7 @@ static uint32_t engine_reset_and_load(const char *path) {
     if (g_940_firmware[0]) me940_load_and_start(g_940_firmware);
     uint32_t entry = engine_load_game(path);
     g_reloading = 0;
+    pthread_mutex_unlock(&g_present_lock);   /* new guest RAM is mapped -> present may resume */
     if (g_trace) fprintf(stderr, "  [reload] -> %s entry=%08x\n", path, entry);
     return entry;
 }
