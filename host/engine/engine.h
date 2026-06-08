@@ -130,8 +130,10 @@ int  me_rootfs_select(const char *interp);  /* pick the rootfs holding this PT_I
 void me_rootfs_set(const char *dir);        /* firmware boot: pin a specific rootfs; NULL = unpin */
 
 /* ---- firmware.c: locate / install a device firmware ---- */
+int  me_writable_root(char *out, size_t cap);  /* %APPDATA%\magiceyes | $HOME/.magiceyes; 1=ok */
 int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap);  /* 1 if found */
 int  me_firmware_install(const char *file, const char *device);  /* stage a .zip/.img; 0 = ok */
+void me_firmware_sync_overlays(void);  /* heal shim overlay on already-installed OABI firmware */
 int  me_firmware_boot_request(const char *device);  /* GUI: pin rootfs + reload its gp2xmenu; 1=ok */
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */

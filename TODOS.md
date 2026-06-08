@@ -252,9 +252,16 @@ runs a growing set of titles with no WSL/qemu at run time. Detail: CLAUDE.md + t
   shipped in the "Deicide 3" pack) bypass SDL and poke MMSP2/Pollux directly → the dynamic-libSDL
   shim path doesn't cover them; need the MMSP2 device emulation (see "Wiz raw arcade ports" below).
   Untested but expected unsupported via the shim.
-- **EABI rootfs is an extra asset**: `assets/rootfs-eabi` is gitignored and rebuilt from Debian
-  Wheezy armel by `host/win/stage_rootfs_eabi.sh` (needs `arm-linux-gnueabi-gcc`, `dpkg-deb`,
-  network to archive.debian.org). Other EABI homebrew should "just work" once it's staged.
+- **EABI rootfs is now BUNDLED (seamless provisioning, 2026-06)**: the FOSS `assets/rootfs-eabi`
+  (Debian Wheezy armel + our shims, no proprietary fonts) ships in the dist zip next to the exe, so
+  EABI homebrew + Caanoo titles run with zero setup. Maintainers build it once with
+  `EABI_REDIST=1 bash host/win/stage_rootfs_eabi.sh` before `host/win/package.sh`. Firmware-derived
+  parts come from the in-process **Firmware -> Install firmware** flow: Wiz/commercial titles get
+  the firmware glibc rootfs (with our shim/DRM-stubs overlaid by `firmware.c fw_overlay_oabi`) added
+  to the rootfs candidate search; Caanoo titles get their `/usr/gp2x/*.ttf` fonts overlaid as data
+  (`syscalls.c me_rootfs_resolve`). The engine names the exact firmware to install when a title
+  needs it (`main.c`/`viewer.c`). The old `stage_rootfs_eabi.sh` build step is no longer required of
+  end users.
 - **8-bit audio in general**: the shim now honours 8-bit device formats (S8/U8) in
   ConvertAudio/MixAudio, but the Her Knights case shows 8-bit titles can still have upstream
   issues — re-check any other 8-bit-audio title.
@@ -392,10 +399,12 @@ Have `baseline.py` (and the run harness) **record the input stream** alongside t
 metrics/frame hashes, then **replay** it on later runs and assert parity (same inputs → same frames /
 fps / audio). Makes regressions reproducible and catches input-path drift, not just black-box render.
 
-### rootfs extraction helper
-`tools/extract_rootfs.sh`: firmware zip/image → a `MAGICEYES_ROOTFS` tree
-(Wiz: ubifs via `ubireader`; GP2X: cramfs/ext2 — TBD from firmware layout).
-Plus a README "from firmware to rootfs" section so it's not tribal knowledge.
+### rootfs extraction helper — DONE (in-process)
+Superseded by the in-process firmware stager (`host/engine/fwstage.c` + `host/engine/extract/`):
+**Firmware -> Install firmware** (or `--install-firmware <zip|img>`) extracts Wiz UBIFS / Caanoo
+YAFFS2 / F100/F200 firmware to `%APPDATA%\magiceyes\fw\<device>` on native Windows (no WSL/ubireader),
+and `firmware.c` overlays our shim/DRM-stubs (OABI) + the rootfs candidate search picks it up. The old
+WSL `stage_rootfs*.sh` scripts remain as the maintainer-side build path.
 
 ### Consolidate debug switches
 Fold the env-gated probes in `fakesdl.c` (`FAKESDL_BLIT_LOG`, `FAKESDL_SRC_DUMP`,

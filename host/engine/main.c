@@ -391,6 +391,7 @@ int main(int argc, char **argv) {
         }
     }
     me_rootfs_init();     /* locate the device rootfs (dynamic-linked titles); env ME_GP2X_ROOTFS */
+    me_firmware_sync_overlays();   /* heal an older firmware install's libSDL/DRM overlay in place */
     /* ---- CLI: parse flags; the first non-flag positional is the game ---- */
     const char *input = NULL;
     const char *fw_device = NULL;   /* --firmware <device>: boot that device's gp2xmenu */
@@ -463,10 +464,17 @@ int main(int argc, char **argv) {
             if (!read_elf_interp(bin, interp, sizeof interp))
                 snprintf(interp, sizeof interp, "/lib/ld-linux.so.2");
             if (!me_rootfs_select(interp)) {
-                fprintf(stderr, "magiceyes: '%s' needs interpreter '%s' but no device rootfs provides it.\n"
-                                "  Build one with host/win/stage_rootfs.sh (firmware, ld-linux.so.2) or the\n"
-                                "  EABI rootfs (ld-linux.so.3), and set ME_GP2X_ROOTFS / place it at <exe>/rootfs.\n",
-                                bin, interp);
+                me_report(MR_MISSING_ROOTFS_LIB, 0, interp, 0);
+                if (strstr(interp, "ld-linux.so.3"))   /* EABI: rootfs-eabi ships with magiceyes */
+                    fprintf(stderr, "magiceyes: '%s' needs the EABI runtime that ships with magiceyes,\n"
+                                    "  but it's missing. Reinstall magiceyes (it bundles rootfs-eabi next to\n"
+                                    "  the exe), or rebuild it with host/win/stage_rootfs_eabi.sh.\n", bin);
+                else                                    /* OABI: ld-linux.so.2 = Wiz or GP2X firmware */
+                    fprintf(stderr, "magiceyes: '%s' is a Wiz/GP2X title that needs the device's system\n"
+                                    "  libraries from official firmware. Install the matching firmware with\n"
+                                    "  Firmware -> Install firmware (Wiz firmware, or GP2X F100/F200), or\n"
+                                    "  the CLI: magiceyes --install-firmware <firmware.zip|.img>.\n"
+                                    "  If it is a Wiz title, set MAGICEYES_DEVICE=wiz to disambiguate.\n", bin);
                 return 3;
             }
             if (g_trace) fprintf(stderr, "magiceyes: '%s' dynamically linked (%s)\n", bin, interp);

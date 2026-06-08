@@ -142,9 +142,16 @@ done
 # font engine in Propis/Rhythmos). These live only in the firmware (yaffs2_rfs.img). If a
 # dereferenced copy has been staged into assets/caanoo-ref (see host/win/extract_caanoo_fw.sh),
 # overlay it into the rootfs so the absolute opens resolve.
+# EABI_REDIST=1 builds the SHIPPABLE rootfs: stage NO firmware font (it is proprietary). Caanoo
+# titles then run from this FOSS-only tree; their on-screen text stays blank until the user installs
+# the Caanoo firmware (Firmware -> Install firmware), which the engine overlays at /usr/gp2x at run
+# time (firmware.c / me_rootfs_resolve). We deliberately do NOT substitute a FOSS font here -- a
+# wrong-metrics substitution is brittle; the engine prompts for the real firmware instead.
 REF="$REPO/assets/caanoo-ref"
-if [ -d "$REF/usr" ]; then
-  echo "== overlay Caanoo firmware assets (assets/caanoo-ref/usr -> rootfs) =="
+if [ -n "${EABI_REDIST:-}" ]; then
+  echo "== EABI_REDIST: shippable rootfs, no firmware fonts staged (installed via firmware flow) =="
+elif [ -d "$REF/usr" ]; then
+  echo "== overlay Caanoo firmware assets (assets/caanoo-ref/usr -> rootfs; local dev, NOT redistributable) =="
   cp -a "$REF/usr/." "$DST/usr/" 2>/dev/null || { mkdir -p "$DST/usr"; cp -a "$REF/usr/." "$DST/usr/"; }
 fi
 

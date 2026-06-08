@@ -309,9 +309,17 @@ static void start_game(const char *path) {
         if (!read_elf_interp(r, interp, sizeof interp))
             snprintf(interp, sizeof interp, "/lib/ld-linux.so.2");
         if (!me_rootfs_select(interp)) {
-            MessageBoxA(NULL, "That title is dynamically linked and needs the device rootfs.\n"
-                              "Set ME_GP2X_ROOTFS to a dereferenced rootfs (host/win/stage_rootfs.sh),\n"
-                              "or place one at <exe>\\rootfs.", "magiceyes", MB_ICONWARNING);
+            if (strstr(interp, "ld-linux.so.3"))   /* EABI runtime ships with magiceyes */
+                MessageBoxA(NULL, "This title needs the EABI runtime that ships with magiceyes, but it\n"
+                                  "appears to be missing. Reinstall magiceyes (it bundles rootfs-eabi\n"
+                                  "next to the .exe).", "magiceyes", MB_ICONWARNING);
+            else                                    /* OABI: Wiz or GP2X firmware */
+                MessageBoxA(NULL, "This is a Wiz/GP2X title that needs the device's system libraries\n"
+                                  "from official firmware.\n\n"
+                                  "Install it from the Firmware menu > Install firmware (a Wiz, or\n"
+                                  "GP2X F100/F200, firmware .zip/.img), then open the title again.\n\n"
+                                  "If it is a Wiz title and the wrong firmware is picked, set\n"
+                                  "MAGICEYES_DEVICE=wiz.", "magiceyes", MB_ICONWARNING);
             return;
         }
     }

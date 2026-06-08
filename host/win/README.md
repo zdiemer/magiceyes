@@ -26,6 +26,20 @@ host/win/build_viewer_win.sh      # -> bin/viewer.exe (+ SDL2.dll)
 host/win/build_bundle_win.sh      # -> bin/magiceyes.exe (+ SDL2.dll)  SINGLE-PROCESS bundle
 ```
 
+## Package a distributable bundle
+The shipped zip carries the FOSS `rootfs-eabi` runtime (so EABI homebrew + Caanoo titles run with
+zero setup) and the tiny `overlay-oabi` shim (overlaid onto installed Wiz/F100/F200 firmware at
+install time). Build these FIRST, then package:
+```sh
+MAGICEYES_SDK=<GPH SDK> guest/build_guest.sh           # -> bin/guest/{libSDL,libinkadrm,libdrmcode}
+EABI_REDIST=1 bash host/win/stage_rootfs_eabi.sh       # -> assets/rootfs-eabi (NO proprietary fonts)
+host/win/package.sh [version]                          # -> dist/magiceyes-<version>-win64.zip
+```
+`package.sh` hard-fails if `assets/rootfs-eabi` or `bin/guest/*` are missing. Use `EABI_REDIST=1` for
+shippable builds: it stages no firmware fonts (those are proprietary; users install the Caanoo
+firmware for correct text). Without `EABI_REDIST`, the local-dev build overlays the real Caanoo fonts
+from `assets/caanoo-ref` (NOT redistributable).
+
 ## Run (on Windows — cmd/PowerShell)
 
 Single-process bundle (engine + viewer in one process, shared in-process `g_shm`):
@@ -37,9 +51,10 @@ launcher to the real ARM binary; errors on 0 or 2+ `.gpe`), a **`.zip`** (extrac
 `%TEMP%\magiceyes\` then treated as a folder), a **`.gpe`** directly, or an already-decompressed
 static binary. A GP2X `.gpe` is itself a static GPEComp self-extractor: the engine runs it and the
 `execve` of its decompressed payload triggers an in-process reload onto the real game (inline
-decompression, no separate decompressor). Dynamically-linked titles (Wiz, dynamic GP2X) are
-detected and reported — native dynamic-linker support is still pending. It runs from the game's
-directory automatically, so `Data\` resolves.
+decompression, no separate decompressor). Dynamically-linked titles run via the device-rootfs path:
+EABI homebrew + Caanoo titles use the bundled FOSS `rootfs-eabi` (zero setup); Wiz/commercial titles
+need official firmware installed via the Firmware menu (the engine names the firmware to install).
+It runs from the game's directory automatically, so `Data\` resolves.
 
 Options: `-s/--scale N`, `-f/--fullscreen` (toggle in-app with **F11**/Alt-Enter), `--mute`,
 `--volume N`, `--timescale MHz`, `-h/--help`, `--version`, plus diagnostic flags

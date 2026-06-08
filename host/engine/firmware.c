@@ -46,8 +46,9 @@ static const char *fw_dir_name(const char *device) {
 }
 
 /* Writable staging root (matches where fwstage.c installs + the viewer keeps recent.txt):
-   %APPDATA%\magiceyes on Windows, $HOME/.magiceyes on Linux. */
-static int writable_root(char *out, size_t cap) {
+   %APPDATA%\magiceyes on Windows, $HOME/.magiceyes on Linux. Shared with syscalls.c
+   (rootfs candidate search + the Caanoo font overlay), so it's exported via engine.h. */
+int me_writable_root(char *out, size_t cap) {
 #ifdef _WIN32
     const char *base = getenv("APPDATA");
 #else
@@ -78,6 +79,90 @@ static int try_rootfs(const char *cand, char *rootfs, char *menu, size_t cap) {
     return 1;
 }
 
+/* ---- OABI shim overlay: replace the firmware's libSDL + DRM libs with ours ----
+   The shipped bundle carries the GPH-SDK-built OABI shim (overlay-oabi/, ABI-identical to the
+   firmware glibc-2.3.6 -- see guest/build_guest.sh). After staging a Wiz/F100/F200 firmware we
+   copy it over the staged rootfs's /lib so dynamic titles render into the shm framebuffer and the
+   Inka DRM gate is satisfied. This mirrors host/win/stage_rootfs.sh:30-52 done in-process. */
+static int copy_file(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb"); if (!in) return -1;
+    FILE *out = fopen(dst, "wb"); if (!out) { fclose(in); return -1; }
+    char buf[1 << 16]; size_t n; int rc = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
+    fclose(in); if (fclose(out) != 0) rc = -1;
+    return rc;
+}
+/* Locate the OABI shim dir (exe-relative, then cwd), like me_firmware_paths' search. The shipped
+   bundle puts it in overlay-oabi/ next to the exe; a dev tree keeps it in bin/guest/ (where
+   guest/build_guest.sh writes it and stage_rootfs.sh reads it) -- accept both. */
+static int find_overlay_oabi(char *out, size_t cap) {
+    const char *bases[2]; int nb = 0;
+    if (g_exe_dir[0]) bases[nb++] = g_exe_dir;
+    bases[nb++] = ".";
+    const char *pfx[] = { "overlay-oabi", "assets/overlay-oabi", "../assets/overlay-oabi",
+                          "guest", "bin/guest", "../bin/guest" };
+    char cand[PATH_MAX], probe[PATH_MAX];
+    for (int i = 0; i < nb; i++)
+        for (int p = 0; p < (int)(sizeof pfx / sizeof pfx[0]); p++) {
+            snprintf(cand, sizeof cand, "%s/%s", bases[i], pfx[p]);
+            snprintf(probe, sizeof probe, "%s/libSDL-1.2.so.0", cand);
+            if (is_file(probe)) { snprintf(out, cap, "%s", cand); return 1; }
+        }
+    return 0;
+}
+static void fw_overlay_oabi(const char *dest) {
+    char ov[PATH_MAX];
+    if (!find_overlay_oabi(ov, sizeof ov)) {
+        fprintf(stderr, "magiceyes: note: no overlay-oabi/ found; firmware libSDL won't render "
+                        "(dynamic titles need the bundled shim).\n");
+        return;
+    }
+    char src[PATH_MAX], dst[PATH_MAX];
+    /* fake-SDL shim over both firmware sonames */
+    snprintf(src, sizeof src, "%s/libSDL-1.2.so.0", ov);
+    const char *sdl[] = { "libSDL-1.2.so.0", "libSDL-1.2.so.0.11.2" };
+    for (int i = 0; i < 2; i++) {
+        snprintf(dst, sizeof dst, "%s/lib/%s", dest, sdl[i]); copy_file(src, dst);
+    }
+    /* DRM gate stubs over every soname a title's DT_NEEDED may ask for (overwrite if present;
+       always ensure the canonical .so.0). */
+    const char *drm[] = { "libinkadrm", "libdrmcode" };
+    for (int b = 0; b < 2; b++) {
+        snprintf(src, sizeof src, "%s/%s.so.0", ov, drm[b]);
+        if (!is_file(src)) continue;
+        const char *sfx[] = { ".so", ".so.0", ".so.0.0.0" };
+        for (int s = 0; s < 3; s++) {
+            snprintf(dst, sizeof dst, "%s/lib/%s%s", dest, drm[b], sfx[s]);
+            if (s == 1 || is_file(dst)) copy_file(src, dst);   /* .so.0 always; others if present */
+        }
+    }
+    fprintf(stderr, "magiceyes: overlaid fake-SDL shim + DRM stubs (%s)\n", ov);
+}
+static long file_size(const char *p) { struct stat s; return stat(p, &s) == 0 ? (long)s.st_size : -1; }
+/* Re-apply the shim overlay to any already-installed OABI firmware whose libSDL isn't ours yet.
+   Makes upgrades seamless: firmware staged by an older magiceyes (before fw_overlay_oabi, or with
+   an older shim) is healed in place at startup, so the user never has to re-install to get rendering
+   + the DRM gate. Idempotent: a dir already carrying the current shim (same size) is skipped. */
+void me_firmware_sync_overlays(void) {
+    char wr[PATH_MAX], ov[PATH_MAX];
+    if (!me_writable_root(wr, sizeof wr)) return;
+    if (!find_overlay_oabi(ov, sizeof ov)) return;     /* nothing to overlay from (dev tree, no bundle) */
+    char want[PATH_MAX]; snprintf(want, sizeof want, "%s/libSDL-1.2.so.0", ov);
+    long wantsz = file_size(want);
+    const char *dev[] = { "wiz", "f100", "f200" };
+    for (int d = 0; d < 3; d++) {
+        char dest[PATH_MAX], sdl[PATH_MAX];
+        snprintf(dest, sizeof dest, "%s/fw/%s", wr, dev[d]);
+        snprintf(sdl, sizeof sdl, "%s/lib/libSDL-1.2.so.0", dest);
+        long have = file_size(sdl);
+        if (have < 0) continue;                        /* device not installed */
+        if (have == wantsz) continue;                  /* already our shim */
+        fprintf(stderr, "magiceyes: updating shim overlay on installed '%s' firmware\n", dev[d]);
+        fw_overlay_oabi(dest);
+    }
+}
+
 /* ---- install: stage a firmware file into the writable per-device dir ---- */
 static void cli_progress(void *ud, const char *msg, int pct) {
     (void)ud; if (msg) fprintf(stderr, "  [install %3d%%] %s\n", pct, msg);
@@ -91,11 +176,19 @@ int me_firmware_install(const char *file, const char *device) {
     const char *name = fw_dir_name(dev);
     if (!name) { fprintf(stderr, "magiceyes: unknown firmware device '%s'\n", dev ? dev : "?"); return -1; }
     char wr[PATH_MAX], dest[PATH_MAX];
-    if (!writable_root(wr, sizeof wr)) { fprintf(stderr, "magiceyes: no writable dir (set APPDATA/HOME)\n"); return -1; }
+    if (!me_writable_root(wr, sizeof wr)) { fprintf(stderr, "magiceyes: no writable dir (set APPDATA/HOME)\n"); return -1; }
     snprintf(dest, sizeof dest, "%s/fw/%s", wr, name);
     fprintf(stderr, "magiceyes: installing %s -> %s\n", info.detail, dest);
     int rc = fw_stage(file, dev, dest, cli_progress, NULL);
-    if (rc == 0) fprintf(stderr, "magiceyes: '%s' firmware installed. Boot it with: --firmware %s\n", name, name);
+    if (rc == 0) {
+        /* OABI devices (Wiz/F100/F200) run their dynamic titles + gp2xmenu through the firmware
+           glibc-2.3.6 rootfs we just staged, but the firmware's real libSDL pokes the MMSP2/Pollux
+           hardware directly (no shm framebuffer) and the real libinkadrm DRM gate bails to gp2xmenu.
+           Overlay our shim + DRM stubs on top so the staged rootfs renders + boots. Caanoo titles
+           link the FOSS rootfs-eabi instead, so they need no overlay (only the firmware fonts). */
+        if (strcmp(name, "caanoo")) fw_overlay_oabi(dest);
+        fprintf(stderr, "magiceyes: '%s' firmware installed. Boot it with: --firmware %s\n", name, name);
+    }
     else if (rc == -2) fprintf(stderr, "magiceyes: staging for this format isn't implemented yet.\n");
     else fprintf(stderr, "magiceyes: firmware install failed (%d).\n", rc);
     return rc;
@@ -121,7 +214,7 @@ int me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap) 
 
     char cand[PATH_MAX], wr[PATH_MAX];
     /* 1. staged firmware in the writable root (the normal install target) */
-    if (writable_root(wr, sizeof wr)) {
+    if (me_writable_root(wr, sizeof wr)) {
         snprintf(cand, sizeof cand, "%s/fw/%s", wr, name);
         if (try_rootfs(cand, rootfs, menu, cap)) return 1;
     }

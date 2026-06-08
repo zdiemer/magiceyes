@@ -67,7 +67,8 @@ void me_rootfs_set(const char *dir) {
    Odonata...), while CodeSourcery-built homebrew (Patissier/rg_ura) is EABI with
    ld-linux.so.3 + a newer glibc (assets/rootfs-eabi). We can't merge them (conflicting
    libc.so.6), so we keep them side by side and SELECT one per title by its PT_INTERP. */
-static char g_cands[16][PATH_MAX]; static int g_ncand = -1;
+static char g_cands[24][PATH_MAX]; static int g_ncand = -1;
+#define NCAND ((int)(sizeof g_cands / sizeof g_cands[0]))
 static int cand_has(int i, const char *suffix) {
     char p[PATH_MAX]; struct stat s;
     snprintf(p, sizeof p, "%s%s", g_cands[i], suffix);
@@ -78,17 +79,28 @@ static void rootfs_build_cands(void) {
     g_ncand = 0;
     const char *env  = getenv("ME_GP2X_ROOTFS");
     const char *env3 = getenv("ME_GP2X_ROOTFS_EABI");
-    if (env  && g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env);
-    if (env3 && g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env3);
+    if (env  && g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env);
+    if (env3 && g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env3);
     static const char *names[] = { "rootfs", "rootfs-win", "rootfs-eabi" };
     if (g_exe_dir[0]) for (size_t n = 0; n < 3; n++) {
-        if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/%s", g_exe_dir, names[n]);
-        if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/assets/%s", g_exe_dir, names[n]);
-        if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/../assets/%s", g_exe_dir, names[n]);
+        if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/%s", g_exe_dir, names[n]);
+        if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/assets/%s", g_exe_dir, names[n]);
+        if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/../assets/%s", g_exe_dir, names[n]);
     }
-    if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-win");
-    if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-eabi");
-    if (g_ncand < 16) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs/0/rootfs");
+    if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-win");
+    if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-eabi");
+    if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs/0/rootfs");
+    /* Firmware installed in-process (Firmware -> Install firmware) lands in the writable root as a
+       whole OABI glibc-2.3.6 rootfs with our shim overlaid -- add it so a dynamic Wiz/GP2X title
+       resolves it directly, not just gp2xmenu boot. Only the OABI (ld-linux.so.2) devices: the
+       Caanoo firmware is ld-linux.so.3 and must NOT win selection over the FOSS rootfs-eabi for
+       Caanoo titles (it only supplies fonts, via the data overlay in me_rootfs_resolve). */
+    char wr[PATH_MAX];
+    if (me_writable_root(wr, sizeof wr)) {
+        const char *dev[] = { "wiz", "f100", "f200" };
+        for (int d = 0; d < 3; d++)
+            if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/fw/%s", wr, dev[d]);
+    }
 }
 void me_rootfs_init(void) {
     if (g_rootfs_ok >= 0) return;
@@ -106,23 +118,63 @@ void me_rootfs_init(void) {
    so an EABI title gets the newer-glibc rootfs and a firmware title the 2.3.6 one.
    Returns 1 if a matching rootfs was found+selected. Called from load_elf (all entry
    points) before the interpreter/libs are opened. */
+/* When several .so.2 candidates match (e.g. fw/wiz AND fw/f100 both installed), the firmware
+   rootfs for the WRONG device must not win -- they share ld-linux.so.2 so the interp can't tell
+   them apart. Only a POSITIVELY-detected Wiz title (g_device==1, from Pollux/Wiz sonames or an
+   explicit MAGICEYES_DEVICE) rejects the GP2X firmware dirs. We must NOT do the reverse: g_device==0
+   is also the ambiguous .so.2 default, and the Wiz firmware rootfs (glibc-2.3.6 + our shim overlay)
+   runs dynamic GP2X titles too -- so an ambiguous title falls through to candidate order, which
+   prefers fw/wiz. Returns 1 if candidate i is a wrong-device fw dir for this title. */
+static int cand_device_mismatch(int i) {
+    if (g_device != 1) return 0;                /* only a confident Wiz title is picky */
+    const char *p = g_cands[i];
+    return strstr(p, "/fw/f100") || strstr(p, "/fw/f200");
+}
 int me_rootfs_select(const char *interp) {
     if (g_rootfs_pinned) return g_rootfs_ok == 1;   /* firmware boot pinned a specific rootfs */
     if (!interp || !interp[0]) return g_rootfs_ok == 1;
     rootfs_build_cands();
     const char *b = strrchr(interp, '/'); b = b ? b + 1 : interp;
     char suffix[PATH_MAX]; snprintf(suffix, sizeof suffix, "/lib/%s", b);
-    for (int i = 0; i < g_ncand; i++)
-        if (cand_has(i, suffix)) {
-            snprintf(g_rootfs, sizeof g_rootfs, "%s", g_cands[i]); g_rootfs_ok = 1;
-            if (g_trace) fprintf(stderr, "  [rootfs] selected %s for %s\n", g_rootfs, interp);
-            return 1;
+    /* pass 1: a device-appropriate match; pass 2: any match (no device-matching rootfs installed) */
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < g_ncand; i++) {
+            if (pass == 0 && cand_device_mismatch(i)) continue;
+            if (cand_has(i, suffix)) {
+                snprintf(g_rootfs, sizeof g_rootfs, "%s", g_cands[i]); g_rootfs_ok = 1;
+                if (g_trace) fprintf(stderr, "  [rootfs] selected %s for %s\n", g_rootfs, interp);
+                return 1;
+            }
         }
     return 0;
+}
+/* Caanoo system fonts (/usr/gp2x/*.ttf) are firmware-only -- the shipped FOSS rootfs-eabi has
+   none. A Caanoo title links its libs from rootfs-eabi but opens those fonts by absolute path, so
+   we overlay JUST that data dir from an installed Caanoo firmware (Firmware -> Install firmware).
+   Strictly prefix-scoped to /usr/gp2x: never /lib or /usr/lib, or a Caanoo title would pull the
+   firmware's glibc-2.3.6 under the Debian ld-linux.so.3 it's actually linked to -> ABI breakage. */
+static int caanoo_font_overlay(const char *guest, char *out, size_t cap) {
+    if (g_device != 2 || strncmp(guest, "/usr/gp2x/", 10)) return 0;
+    char wr[PATH_MAX], hp[PATH_MAX]; struct stat s;
+    if (!me_writable_root(wr, sizeof wr)) return 0;
+    snprintf(hp, sizeof hp, "%s/fw/caanoo%s", wr, guest);
+    if (stat(hp, &s) != 0) {
+        static int warned = 0;
+        if (!warned && strstr(guest, ".ttf")) {
+            warned = 1;
+            fprintf(stderr, "magiceyes: this Caanoo title is missing its system font (%s); text "
+                            "will be blank. Install Caanoo firmware (Firmware -> Install "
+                            "firmware) for correct text.\n", guest);
+        }
+        return 0;
+    }
+    snprintf(out, cap, "%s", hp);
+    return 1;
 }
 int me_rootfs_resolve(const char *guest, char *out, size_t cap) {
     me_rootfs_init();
     if (g_rootfs_ok != 1 || !guest || guest[0] != '/') return 0;
+    if (caanoo_font_overlay(guest, out, cap)) return 1;   /* firmware font data, before g_rootfs */
     /* Skip the loader cache/preload so ld.so falls back to the LD_LIBRARY_PATH (/lib:/usr/lib)
        search -- the cache could pin a host-unreadable symlink name; the default search finds
        our deref'd libs (and the shim shadowing libSDL). */
