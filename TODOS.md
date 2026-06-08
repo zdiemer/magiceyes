@@ -4,6 +4,16 @@ Status: Wiz support verified end-to-end (Deicide 3 commercial + Cave Story). Now
 generalizing to the whole Game Park Holdings family + hardening for spin-out into
 its own repo.
 
+## Planned features (roadmap)
+
+- **Controller support** — gamepad input through the viewer (in addition to the keyboard map).
+- **Rebinding support** — user-remappable bindings (config file / in-app remap UI).
+- **Per-system keybinding support** — distinct binding profiles per device (GP2X / Wiz / Caanoo).
+- **Ensure save support** — verify games can persist save data across runs on every backend/device.
+- **End-to-end firmware support** — boot the device firmware, then launch games from the SD card.
+- **Touchscreen support for GP2X and Wiz** — touch input beyond the current Caanoo mouse→touch path.
+- **Vulkan backend for Caanoo's GPU** — replace/augment the software GLES1.1 rasterizer with Vulkan.
+
 ## DONE: pivoted the GP2X backend from Unicorn to forked qemu-user
 
 The qemu-user backend (`host/qemu/`) runs **Payback playable end-to-end — menus AND
