@@ -32,14 +32,35 @@ static uint8_t   *g_mmsp940;          /* the 940's own view of the MMSP2 registe
 
 int me940_active(void) { return g_940_running; }
 
-/* The 940's MMSP2 access (DUALINT cross-core signalling lives here). For now a benign page:
-   reads return the stored halfword, writes are stored; full 920<->940 IPC is [940-4]. */
+/* ME_940_TRACE activity probe: PC coverage tells whether the 940 only polls its command queue
+   (~main 0x6b8..) or actually runs the rasterizer (other firmware functions = real work). */
+static int g_940_trace = -1;
+static long g_940_insns = 0; static uint32_t g_940_pcmin = 0xffffffff, g_940_pcmax = 0;
+static uint8_t g_940_seen[64];   /* which 1KB code buckets the PC visited (firmware is ~36KB) */
+static void me940_trace_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)uc; (void)size; (void)user;
+    uint32_t pc = (uint32_t)addr;
+    g_940_insns++;
+    if (pc < g_940_pcmin) g_940_pcmin = pc;
+    if (pc > g_940_pcmax) g_940_pcmax = pc;
+    if (pc < sizeof g_940_seen * 1024) g_940_seen[pc >> 10] = 1;
+}
+
+/* The 940's MMSP2 access (DUALINT etc.). gpu940 sets up the MLC via 0x2880/0x2916-0x291c, but its
+   declared scanout register doesn't point at the live framebuffer (that lives in a video buffer it
+   renders into); present follows the rendered buffer by content (me940_scan_fb). So here we just
+   store writes (so reads see them) and optionally trace the MLC programming. */
 static void me940_mmio(uc_engine *uc, uc_mem_type type, uint64_t addr, int size,
                        int64_t value, void *user) {
     (void)uc; (void)user;
+    if (type != UC_MEM_WRITE) return;
     uint32_t off = (uint32_t)addr - MMSP2_PHYS;
     if (off + (uint32_t)size > MMSP2_LEN) return;
-    if (type == UC_MEM_WRITE) memcpy(g_mmsp940 + off, &value, size);
+    memcpy(g_mmsp940 + off, &value, size);                 /* store (reads see it) */
+    if (g_940_trace > 0 && off >= 0x2800 && off <= 0x2960) {   /* trace the 940's MLC/display writes */
+        static int n = 0; if (n++ < 80)
+            fprintf(stderr, "[940 mlc] %04x = %08x\n", off, (uint32_t)value);
+    }
 }
 
 static void *me940_thread(void *arg) {
@@ -75,6 +96,8 @@ void me940_start(int bank) {
     uc_hook h;
     uc_hook_add(g_uc940, &h, UC_HOOK_MEM_WRITE, me940_mmio, NULL, MMSP2_PHYS, MMSP2_PHYS + MMSP2_LEN - 1);
     uint32_t z = 0; uc_reg_write(g_uc940, UC_ARM_REG_PC, &z);
+    if (g_940_trace < 0) g_940_trace = getenv("ME_940_TRACE") ? 1 : 0;
+    if (g_940_trace) { uc_hook th; uc_hook_add(g_uc940, &th, UC_HOOK_CODE, me940_trace_cb, NULL, 0, PRAM_SIZE - 1); }
     g_940_bank = bank; g_940_stop = 0; g_940_running = 1;
     if (pthread_create(&g_th940, NULL, me940_thread, NULL)) {
         fprintf(stderr, "[940] pthread_create failed\n"); g_940_running = 0; uc_close(g_uc940); g_uc940 = NULL; return;
@@ -89,6 +112,11 @@ void me940_stop(void) {
     pthread_join(g_th940, NULL);
     uc_close(g_uc940); g_uc940 = NULL;
     g_940_running = 0; g_940_bank = -1;
+    if (g_940_trace > 0) {
+        int buckets = 0; for (unsigned i = 0; i < sizeof g_940_seen; i++) buckets += g_940_seen[i];
+        fprintf(stderr, "[940 trace] %ld insns, pc %08x..%08x, %d/64 code-KB buckets touched\n",
+                g_940_insns, g_940_pcmin, g_940_pcmax, buckets);
+    }
     fprintf(stderr, "[940] stopped\n");
 }
 
@@ -124,6 +152,31 @@ static void me940_st_code(uc_engine *uc, uint64_t addr, uint32_t size, void *use
     if (pc > g_st_pcmax) g_st_pcmax = pc;
     g_st_insns++;
 }
+/* gpu940 renders into a video buffer in shared RAM and points the display at it through MLC
+   registers we don't fully decode (it writes 0x2880/0x2916-0x291c, not the 920's OADR/EADR). Rather
+   than chase the exact register, follow the OUTPUT: locate the 320x240x16 window in shared RAM with
+   the most image content (the rendered frame) and route present there. Robust + game-agnostic for
+   gpu940 clients; refined later if the console's display-buffer field is decoded. */
+uint32_t g_940_fb = 0;        /* guest addr of gpu940's current framebuffer (0 = none yet) */
+void me940_scan_fb(void) {
+    if (!g_pram) return;
+    const uint32_t FB = 320 * 240 * 2;
+    uint32_t best_off = 0; long best_nz = 0;
+    for (uint32_t off = 0; off + FB <= PRAM_SIZE; off += 0x10000) {   /* 64KB step */
+        const uint16_t *p = (const uint16_t *)(g_pram + off);
+        long nz = 0;
+        for (uint32_t i = 0; i < FB / 2; i += 7) if (p[i]) nz++;       /* sample every 7th px */
+        if (nz > best_nz) { best_nz = nz; best_off = off; }
+    }
+    uint32_t g;
+    if (best_nz > 256 && phys_to_guest(PRAM_BASE + best_off, &g)) {    /* real content -> present it */
+        g_940_fb = g; g_fb_guest = g; g_flip_active = 1; g_flip_guest = g;
+    }
+    if (g_940_trace > 0)
+        fprintf(stderr, "[940 scanfb] busiest 320x240 window: phys %08x (sampled nz=%ld)\n",
+                PRAM_BASE + best_off, best_nz);
+}
+
 /* Emulate load940: place the gpu940 firmware blob into shared RAM at phys 0x02000000 and start the
    940 (bank 2). This is what the GP2X launcher's `load940 gpu940` step does; we do it inline so the
    940 is running before the client game (egoboo) starts, without relying on the program-reload path.

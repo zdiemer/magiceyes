@@ -213,6 +213,9 @@ uint32_t buf_hash(uint32_t g) {
 /* present whichever fb the game just rendered to (its content changed since last
    frame); fall back to the non-blank one for a fully static screen. */
 void present_active(void) {
+    if (me940_active()) {   /* gpu940 client: present follows the 940's rendered framebuffer */
+        static int n = 0; if (++n % 12 == 0) me940_scan_fb();
+    }
     static double last = 0;            /* cap to ~60fps: the game's tiny nanosleeps call
                                           this ~2000/s, and hashing+copying every time
                                           (300MB/s) was choking the emulator. */

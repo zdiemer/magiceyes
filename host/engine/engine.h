@@ -103,6 +103,7 @@ void me940_stop(void);                             /* MUST run before mem_reset 
 int  me940_active(void);
 int  me940_load_and_start(const char *fw);         /* inline load940: firmware -> shared RAM, start */
 void me940_selftest(const char *fw);               /* ME_940_SELFTEST standalone core check */
+void me940_scan_fb(void);                           /* ME_940_SCANFB: locate gpu940's video buffer */
 extern char g_940_firmware[];                      /* set by the loader if a title runs load940 */
 uint32_t gread(uint32_t reg);
 void gwrite(uint32_t reg, uint32_t v);
@@ -144,6 +145,7 @@ extern int g_fbnum[64];   /* per-slot fb index for DEV_FB fds */
 extern struct memmap g_mem[64];
 extern int g_nmem;
 extern uint32_t g_mmsp2_guest, g_fb_guest, g_fb_guest2;
+extern int g_flip_active; extern uint32_t g_flip_guest;   /* present lock (set by 940 MLC scanout too) */
 extern uint32_t g_blit_guest;   /* guest base of the 0xe0020000 blitter window */
 extern int g_oadr_driven;   /* game drives present via OADR writes -> async present off */
 extern int g_frame_ready;   /* OADR write -> helper thread presents this frame (off-render-thread) */
