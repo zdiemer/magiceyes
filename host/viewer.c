@@ -344,6 +344,7 @@ static void start_game(const char *path) {
                             "magiceyes", MB_ICONERROR); return; }
     snprintf(g_last_game, sizeof g_last_game, "%s", path);
     recent_add(path); recent_rebuild_menu();
+    if (su_is_open(&g_su)) su_close_and_save(&g_su);   /* leaving the keybind editor to load a game */
     engine_request_reload(r);   /* engine stops the current game + hot-loads this one */
 }
 static void do_open_dialog(HWND hwnd) {
@@ -694,8 +695,11 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
                     }
                 continue;
             }
-            /* keybind settings overlay: while open it owns all input -- consume + skip the rest */
-            if (su_is_open(&g_su)) { su_handle_event(&g_su, &e); continue; }
+            /* keybind settings overlay: while open it owns keyboard/gamepad/mouse input (those
+               return consumed -> skip the rest). It does NOT consume Win32 menu commands
+               (SDL_SYSWMEVENT returns 0), so the menu bar still works -- e.g. File > Open, which
+               loads a game and closes the overlay (see start_game). */
+            if (su_is_open(&g_su) && su_handle_event(&g_su, &e)) continue;
             /* mouse -> touchscreen. With SDL_RenderSetLogicalSize the EVENT coords are already in
                guest (logical) pixels (unlike SDL_GetMouseState, which is window pixels). */
             if (e.type == SDL_MOUSEMOTION) { touch_x = e.motion.x; touch_y = e.motion.y; }
