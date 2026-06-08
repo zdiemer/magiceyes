@@ -98,6 +98,9 @@ struct memmap g_mem[64]; int g_nmem = 0;
 uint32_t g_mmsp2_guest = 0;   /* guest addr of the 0xC0000000 reg block */
 uint32_t g_fb_guest = 0;      /* guest addr of the /dev/fb0 framebuffer */
 uint32_t g_fb_guest2 = 0;     /* /dev/fb1 (double-buffering: present the active one) */
+uint32_t g_fb_stride = 640;   /* present row stride in bytes (320*2; gpu940 sets its pow2 width) */
+int      g_fb_bpp = 16;       /* present source depth: 16 = RGB565, 32 = XRGB8888 (gpu940 output) */
+uint32_t g_fb_xoff = 0;       /* x pixel offset into each row (gpu940 centers 320 in a pow2 buffer) */
 /* Caanoo (Pollux MLC): the firmware menu + some titles drive the display directly via the MLC
    registers in the 0xC0000000 block, choosing a pixel depth our default RGB565 present doesn't
    match (the menu uses 24bpp RGB888, pitch 960 -> presented as 16bpp it shears + mis-colours).
@@ -155,10 +158,23 @@ void present_guest(uint32_t g) {
             uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
             for (int x = 0; x < 320; x++) { dp[x] = lut[src[x]]; if (src[x]) { nz = 1; nzc++; } }
         }
-    } else {                                /* native RGB565 */
+    } else if (g_fb_bpp == 32) {            /* gpu940 output: XRGB8888, g_fb_stride bytes/row */
+        for (int y = 0; y < 240; y++) {
+            uint32_t *src = (uint32_t *)guest_to_host(g + (uint32_t)y * g_fb_stride);
+            if (!src) break;
+            uint16_t *dp = (uint16_t *)(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2);
+            src += g_fb_xoff;                 /* gpu940 centers the 320px screen in a wider buffer */
+            for (int x = 0; x < 320; x++) {
+                uint32_t p = src[x];
+                dp[x] = (uint16_t)(((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f));
+                if (p & 0xffffff) nz = 1;
+            }
+        }
+    } else {                                /* native RGB565 (g_fb_stride bytes/row; 640 normally,
+                                               but gpu940 video buffers are power-of-2 wide) */
         uint8_t row[320 * 2];
         for (int y = 0; y < 240; y++) {
-            { uint8_t *src = guest_to_host(g + (uint32_t)y * 640); if (!src) break;
+            { uint8_t *src = guest_to_host(g + (uint32_t)y * g_fb_stride); if (!src) break;
               memcpy(row, src, sizeof row); }
             memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, sizeof row);
             if (!nz) for (int i = 0; i < 640; i++) if (row[i]) { nz = 1; break; }

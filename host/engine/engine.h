@@ -146,6 +146,9 @@ extern struct memmap g_mem[64];
 extern int g_nmem;
 extern uint32_t g_mmsp2_guest, g_fb_guest, g_fb_guest2;
 extern int g_flip_active; extern uint32_t g_flip_guest;   /* present lock (set by 940 MLC scanout too) */
+extern uint32_t g_fb_stride;   /* present row stride in bytes (gpu940 video buffers are pow2-wide) */
+extern int g_fb_bpp;           /* present source depth: 16 RGB565 (default) or 32 XRGB (gpu940) */
+extern uint32_t g_fb_xoff;     /* x pixel offset into each present row (gpu940 centering) */
 extern uint32_t g_blit_guest;   /* guest base of the 0xe0020000 blitter window */
 extern int g_oadr_driven;   /* game drives present via OADR writes -> async present off */
 extern int g_frame_ready;   /* OADR write -> helper thread presents this frame (off-render-thread) */

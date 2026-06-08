@@ -152,29 +152,42 @@ static void me940_st_code(uc_engine *uc, uint64_t addr, uint32_t size, void *use
     if (pc > g_st_pcmax) g_st_pcmax = pc;
     g_st_insns++;
 }
-/* gpu940 renders into a video buffer in shared RAM and points the display at it through MLC
-   registers we don't fully decode (it writes 0x2880/0x2916-0x291c, not the 920's OADR/EADR). Rather
-   than chase the exact register, follow the OUTPUT: locate the 320x240x16 window in shared RAM with
-   the most image content (the rendered frame) and route present there. Robust + game-agnostic for
-   gpu940 clients; refined later if the console's display-buffer field is decoded. */
-uint32_t g_940_fb = 0;        /* guest addr of gpu940's current framebuffer (0 = none yet) */
+/* Route present to gpu940's current DISPLAY buffer by reading its shared command queue (the proper
+   gpu940 protocol, from include/gpu940.h). Shared struct base = phys 0x2100000:
+     uint32_t cmds[0x40000-5]; cmds_begin; cmds_end; ...;  uint32_t buffers[] @ word 0x40000
+   The displayed frame is the latest gpuSHOWBUF(=5) command: { opcode, buffer_loc{ address (words
+   from buffers), width_log (log2 width), height } }. So the buffer is at phys 0x2200000+address*4
+   with a (1<<width_log)*2-byte RGB565 stride -- that pow2 stride is why a 320px/640B present
+   striped. Walk the ring back from cmds_end for the most recent valid SHOWBUF. */
+#define GPU940_SHARED   0x2100000u
+#define GPU940_BUFFERS  0x2200000u           /* shared + 0x40000 words */
+#define GPU940_NCMDS    (0x40000u - 5u)
+#define GPU_SHOWBUF     5u
+uint32_t g_940_fb = 0;
 void me940_scan_fb(void) {
-    if (!g_pram) return;
-    const uint32_t FB = 320 * 240 * 2;
-    uint32_t best_off = 0; long best_nz = 0;
-    for (uint32_t off = 0; off + FB <= PRAM_SIZE; off += 0x10000) {   /* 64KB step */
-        const uint16_t *p = (const uint16_t *)(g_pram + off);
-        long nz = 0;
-        for (uint32_t i = 0; i < FB / 2; i += 7) if (p[i]) nz++;       /* sample every 7th px */
-        if (nz > best_nz) { best_nz = nz; best_off = off; }
-    }
-    uint32_t g;
-    if (best_nz > 256 && phys_to_guest(PRAM_BASE + best_off, &g)) {    /* real content -> present it */
+    uint8_t *base = pram_host(GPU940_SHARED);
+    if (!base) return;
+    const uint32_t *cmds = (const uint32_t *)base;
+    uint32_t cmds_end; memcpy(&cmds_end, base + (size_t)(0x40000 - 4) * 4, 4);
+    if (cmds_end >= GPU940_NCMDS) cmds_end = 0;
+    for (uint32_t s = 0; s < GPU940_NCMDS; s++) {                    /* walk back from the write head */
+        uint32_t i = (cmds_end + GPU940_NCMDS - 1 - s) % GPU940_NCMDS;
+        if (cmds[i] != GPU_SHOWBUF) continue;
+        uint32_t a = cmds[(i + 1) % GPU940_NCMDS];
+        uint32_t wl = cmds[(i + 2) % GPU940_NCMDS];
+        uint32_t h = cmds[(i + 3) % GPU940_NCMDS];
+        if (wl < 8 || wl > 12 || h < 16 || h > 1024) continue;       /* sanity: a real buffer_loc */
+        uint32_t phys = GPU940_BUFFERS + a * 4, g;
+        if (!phys_in_pram(phys, 320 * 240 * 2) || !phys_to_guest(phys, &g)) continue;
         g_940_fb = g; g_fb_guest = g; g_flip_active = 1; g_flip_guest = g;
+        g_fb_bpp = 32;                                               /* gpu940 output is 32bpp XRGB */
+        g_fb_stride = (1u << wl) * 4u;                               /* row = (1<<wl) 32-bit words */
+        g_fb_xoff = (1u << wl) > 320 ? ((1u << wl) - 320) / 2 : 0;   /* 320 centered in the pow2 buffer */
+        if (g_940_trace > 0)
+            fprintf(stderr, "[940 showbuf] phys=%08x width=%u stride=%uB(32bpp) h=%u\n",
+                    phys, 1u << wl, g_fb_stride, h);
+        return;
     }
-    if (g_940_trace > 0)
-        fprintf(stderr, "[940 scanfb] busiest 320x240 window: phys %08x (sampled nz=%ld)\n",
-                PRAM_BASE + best_off, best_nz);
 }
 
 /* Emulate load940: place the gpu940 firmware blob into shared RAM at phys 0x02000000 and start the
