@@ -73,7 +73,8 @@ magiceyes.exe [options] [game]
 ## Supported games
 
 magiceyes is under active development; coverage grows as device features and games are
-exercised. Highlights of what runs today:
+exercised. The full per-title compatibility map (GP2X / Wiz / Caanoo, with proposed fixes) is in
+[`COMPATIBILITY.md`](COMPATIBILITY.md). Highlights of what runs today:
 
 | Device | Game | Status |
 |--------|------|--------|
