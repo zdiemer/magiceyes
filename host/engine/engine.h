@@ -301,4 +301,13 @@ extern volatile uintptr_t g_fault_addr;
 extern char g_cur_game[PATH_MAX];      /* the binary the engine is actually running */
 extern char g_exe_dir[PATH_MAX];       /* dir of our own executable (rootfs default search) */
 
+/* Persistent per-game saving. g_game_root = the title's REAL asset dir (the .gpe's folder,
+   which may differ from where a GPEComp payload was decompressed); g_save_root =
+   <exe_dir>/saves/<gamekey>/, a portable writable overlay games' writes are redirected into.
+   Set by me_save_set_game() (loader); survive reloads (overwritten on each resolve_input). */
+extern char g_game_root[PATH_MAX];
+extern char g_save_root[PATH_MAX];
+void me_save_set_game(const char *elf_path);   /* derive g_game_root + g_save_root from the .gpe/ELF */
+void syscalls_flush_all(void);                 /* fsync every tracked host fd (flush-on-quit) */
+
 #endif /* MAGICEYES_ENGINE_H */

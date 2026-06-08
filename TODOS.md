@@ -10,6 +10,19 @@ its own repo.
 - **Rebinding support** — user-remappable bindings (config file / in-app remap UI).
 - **Per-system keybinding support** — distinct binding profiles per device (GP2X / Wiz / Caanoo).
 - **Ensure save support** — verify games can persist save data across runs on every backend/device.
+  *Native engine: DONE* — a per-game write overlay redirects game-data writes (and read-back) to
+  a portable `<exe_dir>/saves/<gamekey>/`, so saves survive even from a read-only ROM dir or the
+  `%TEMP%` GPEComp landing (`save_overlay_resolve`/`me_save_set_game` in `host/engine/syscalls.c`;
+  cwd now follows `g_game_root`, the real asset dir). Payback's `Data/Config/Slot1.ini` persists.
+  *Remaining:* directory-merge for overlay (getdents doesn't yet merge overlay + original entries,
+  so a game that enumerates a save dir won't see overlaid files — fine for name-by-name opens like
+  Payback); confirm the qemu backend and Wiz/Caanoo titles persist too.
+- **GPEComp decompression should not clutter ROM dirs** — `gpecomp_to_tmp()` (`host/engine/loader.c`)
+  currently writes the decompressed `<stem>_tmp` payload **beside the .gpe** (falling back to
+  `%TEMP%`). Decompress **in-memory** (load the ELF straight from the decompressed buffer, no temp
+  file) or to a dedicated scratch/cache dir (e.g. `<exe_dir>/cache/<gamekey>/`) instead, so we
+  never write into the user's game folders. (cwd already decoupled via `g_game_root`, so the temp
+  location no longer affects asset resolution — this is purely about not littering ROM dirs.)
 - **End-to-end firmware support** — boot the device firmware, then launch games from the SD card.
 - **Touchscreen support for GP2X and Wiz** — touch input beyond the current Caanoo mouse→touch path.
 - **Vulkan backend for Caanoo's GPU** — replace/augment the software GLES1.1 rasterizer with Vulkan.

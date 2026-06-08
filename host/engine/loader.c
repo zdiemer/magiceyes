@@ -250,6 +250,9 @@ static const char *finalize(const char *path, char *out, size_t cap) {
             return NULL;
         }
     }
+    /* Pin the title's REAL asset dir + per-game save overlay off the .gpe/ELF path, BEFORE
+       GPEComp decompression (which may write the runnable payload to %TEMP%, away from Data/). */
+    me_save_set_game(elf);
     if (gpecomp_to_tmp(elf, out, cap)) return out;   /* GPEComp stub -> decompressed static game */
     snprintf(out, cap, "%s", elf);
     return out;

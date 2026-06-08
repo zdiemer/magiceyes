@@ -33,6 +33,17 @@ static void chdir_to_dir_of(const char *path) {
     if (s && s != d) { *s = 0; if (ME_CHDIR(d) != 0 && g_trace) fprintf(stderr, "  [chdir %s failed]\n", d); }
 }
 
+/* Run from the title's REAL asset dir (g_game_root). A GPEComp payload may have decompressed to
+   %TEMP%, so the runnable binary's dir isn't where Data/ lives -- chdir to g_game_root instead,
+   while save writes get redirected to the per-game overlay. Fall back to the binary's dir. */
+static void chdir_to_game_root(const char *bin) {
+    if (g_game_root[0] && ME_CHDIR(g_game_root) == 0) {
+        if (g_trace) fprintf(stderr, "  [chdir game_root %s]\n", g_game_root);
+        return;
+    }
+    chdir_to_dir_of(bin);
+}
+
 uint32_t g_brk, g_brk_start;
 uint32_t g_mmap_next = MMAP_BASE;
 int g_exit = 0, g_exit_code = 0;
@@ -49,6 +60,8 @@ int g_trace = 0;
 int g_scret = 0;   /* ME_SCRET: log every syscall + return value per thread (divergence diff) */
 int g_eabi  = 0;   /* current syscall ABI: 1 = EABI (svc #0), 0 = legacy OABI (swi #0x9000xx) */
 char g_exe_dir[PATH_MAX] = {0};   /* dir of our own executable (default rootfs search) */
+char g_game_root[PATH_MAX] = {0}; /* the running title's real asset dir (see engine.h) */
+char g_save_root[PATH_MAX] = {0}; /* <exe_dir>/saves/<gamekey>: portable per-game write overlay */
 __thread int g_setpc = 0;   /* a syscall set PC (signal entry / sigreturn): skip R0 write */
 
 /* Firmware boot: we ran the device's gp2xmenu launcher (not a single game). On a game's exit
@@ -102,6 +115,7 @@ static void *viewer_thread(void *arg) {
     viewer_run(g_shm, g_view_scale, g_fullscreen, g_mute, g_volume);  /* returns on window close */
     g_shutdown = 1; g_exit = 1;        /* real quit: stop the engine + helper threads */
     if (g_shm) g_shm->quit = 1;
+    syscalls_flush_all();              /* harden any saved-but-unsynced game data before we exit */
     exit(g_exit_code);                 /* engine main is blocked in uc_emu_start; force exit */
 }
 #endif
@@ -350,7 +364,7 @@ static uint32_t engine_reset_and_load(const char *path) {
     mem_reset();                                        /* free guest RAM (every uc now closed) */
     engine_reset_globals();
     g_exit = 0; g_exit_code = 0;
-    if (g_reload_chdir) { chdir_to_dir_of(path); g_reload_chdir = 0; }  /* File->Open: into the new game's dir */
+    if (g_reload_chdir) { chdir_to_game_root(path); g_reload_chdir = 0; }  /* File->Open: into the new game's dir */
     /* File->Open of a gpu940 title: viewer.c's resolve_input set g_940_firmware, so bring the second
        core up here too (the cmdline path does it in main()). me940_stop() above already halted any
        prior core, and mem_reset freed the old shared RAM; this re-loads the firmware fresh. */
@@ -498,12 +512,13 @@ int main(int argc, char **argv) {
     { const char *rpt = getenv("ME_REPORT");
       if (rpt && *rpt)            me_report_init(rpt);
       else if (getenv("ME_DEBUG")) me_report_init("me_report.json"); }
+    atexit(syscalls_flush_all);   /* flush saved game data on every exit path (headless too) */
     threads_init();
     shm_setup();
 
     uint32_t entry = 0;
     if (bin) {
-        chdir_to_dir_of(bin);                 /* run from the game's dir so its Data/ resolves */
+        chdir_to_game_root(bin);              /* run from the game's dir so its Data/ resolves */
         /* Title uses the ARM940 (its launcher ran `load940 <fw>`): bring the second core up inline
            BEFORE the client game, mirroring the GP2X launcher's load940-then-game order. Avoids the
            program-reload path; the real gpu940 firmware then renders from egoboo's shared commands. */

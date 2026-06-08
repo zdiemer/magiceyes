@@ -3,6 +3,7 @@
 #include "engine.h"
 #ifdef _WIN32
 #include <direct.h>
+#include <io.h>        /* _commit (fsync) */
 #define ME_MKDIR(p) _mkdir(p)
 #else
 #define ME_MKDIR(p) mkdir(p, 0777)
@@ -240,6 +241,122 @@ static void resolve_path(const char *guest, char *out, size_t cap) {
     if (me_mount_resolve(guest, out, cap)) return;
     if (me_rootfs_resolve(guest, out, cap)) return;
     rewrite_guest_path(guest, out, cap);
+}
+
+/* ---- persistent per-game save overlay ("set up saving properly") -----------------
+   Games save into their own dir (Payback: Data/Config/Slot1.ini), but that dir is often
+   read-only -- a ROM folder, or the %TEMP% spot a GPEComp payload decompressed to -- so the
+   profile never persists and the game re-prompts every launch. We redirect game-data WRITES
+   into a portable per-game folder, <exe_dir>/saves/<gamekey>/ (g_save_root), and read them
+   back from there; reads of files NOT in the overlay fall through to the original assets.
+   Directories are never claimed for reads, so asset enumeration still sees the real folder. */
+
+/* Derive g_game_root (the .gpe/ELF's own dir, absolutised) + g_save_root from the title path. */
+void me_save_set_game(const char *elf_path) {
+    if (!elf_path || !elf_path[0]) { g_game_root[0] = 0; g_save_root[0] = 0; return; }
+    char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", elf_path);
+    char *s1 = strrchr(dir, '/'), *s2 = strrchr(dir, '\\'), *s = s1 > s2 ? s1 : s2;
+    const char *name = s ? s + 1 : elf_path;
+    char stem[PATH_MAX]; snprintf(stem, sizeof stem, "%s", name);
+    char *dot = strrchr(stem, '.'); if (dot) *dot = 0;
+    if (s) *s = 0; else snprintf(dir, sizeof dir, ".");
+    /* absolutise the asset dir: the engine chdir()s into it, and the overlay matches absolute
+       guest paths (built from getcwd) against it. */
+    char abs[PATH_MAX];
+#ifdef _WIN32
+    if (_fullpath(abs, dir, sizeof abs)) snprintf(g_game_root, sizeof g_game_root, "%s", abs);
+#else
+    if (realpath(dir, abs)) snprintf(g_game_root, sizeof g_game_root, "%s", abs);
+#endif
+    else snprintf(g_game_root, sizeof g_game_root, "%s", dir);
+    /* sanitise the stem into a filesystem-safe gamekey */
+    char key[PATH_MAX]; int k = 0;
+    for (const char *p = stem; *p && k < (int)sizeof key - 1; p++) {
+        char c = *p;
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        key[k++] = ok ? c : '_';
+    }
+    key[k] = 0; if (!key[0]) snprintf(key, sizeof key, "game");
+    const char *base = g_exe_dir[0] ? g_exe_dir : ".";
+    snprintf(g_save_root, sizeof g_save_root, "%s/saves/%s", base, key);
+    if (g_trace) fprintf(stderr, "  [saves] game_root=%s save_root=%s\n", g_game_root, g_save_root);
+}
+
+/* mkdir -p of host path `hp`'s parent dirs (not the leaf -- it's the file being created). */
+static void mkdirs_for(const char *hp) {
+    char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s", hp);
+    for (char *p = tmp + 1; *p; p++)
+        if (*p == '/' || *p == '\\') { char c = *p; *p = 0; ME_MKDIR(tmp); *p = c; }
+}
+
+/* Best-effort byte copy src -> dst (regular files only, so a copy-up of a directory path can't
+   create a bogus file; no-op if src is missing/not a regular file / dst unwritable). */
+static void copy_file(const char *src, const char *dst) {
+    struct stat ss; if (stat(src, &ss) != 0 || !S_ISREG(ss.st_mode)) return;
+    FILE *in = fopen(src, "rb"); if (!in) return;
+    FILE *o = fopen(dst, "wb"); if (!o) { fclose(in); return; }
+    char buf[8192]; size_t n;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) if (fwrite(buf, 1, n, o) != n) break;
+    fclose(o); fclose(in);
+}
+
+/* If `guest` is game-save data, fill `out` with its overlay host path and return 1:
+   - write_intent: always claim (creating parent dirs under g_save_root).
+   - read: claim only if a regular file already exists in the overlay (so saved data is read
+     back); else return 0 to fall through to the real (read-only) assets. */
+static int save_overlay_resolve(const char *guest, int write_intent, char *out, size_t cap) {
+    if (!g_save_root[0] || getenv("ME_NOSAVES")) return 0;
+    char norm[PATH_MAX];   /* DOS-style backslash separators -> '/' (matches resolve_path) */
+    { size_t i = 0; for (; guest[i] && i < sizeof norm - 1; i++)
+          norm[i] = guest[i] == '\\' ? '/' : guest[i];
+      norm[i] = 0; }
+    const char *rel = NULL;
+    int drive = (((norm[0] >= 'a' && norm[0] <= 'z') || (norm[0] >= 'A' && norm[0] <= 'Z')) && norm[1] == ':');
+    if (norm[0] != '/' && !drive) {
+        rel = norm;                                  /* relative -> resolves under cwd (g_game_root) */
+    } else if (g_game_root[0]) {                     /* absolute -> claim only if under the game dir */
+        char groot[PATH_MAX]; size_t i = 0;
+        for (; g_game_root[i] && i < sizeof groot - 1; i++)
+            groot[i] = g_game_root[i] == '\\' ? '/' : g_game_root[i];
+        groot[i] = 0;
+        size_t gl = strlen(groot); while (gl && groot[gl - 1] == '/') gl--;
+#ifdef _WIN32
+        if (gl && !strncasecmp(norm, groot, gl) && (norm[gl] == '/' || norm[gl] == 0))
+#else
+        if (gl && !strncmp(norm, groot, gl) && (norm[gl] == '/' || norm[gl] == 0))
+#endif
+            rel = (norm[gl] == '/') ? norm + gl + 1 : norm + gl;
+    }
+    if (!rel || !rel[0] || rel[0] == '/') return 0;  /* not game data, or an escaped absolute */
+    if (strstr(rel, "..")) return 0;                 /* don't let a path climb out of the overlay */
+    snprintf(out, cap, "%s/%s", g_save_root, rel);
+    if (write_intent) {
+        mkdirs_for(out);
+        /* copy-up: a game may open a SHIPPED file for writing and update it in place (Payback
+           rewrites its shipped Data/Config/Slot1.ini). If the overlay copy doesn't exist yet,
+           seed it from the original asset so a read-modify-write keeps the shipped content. */
+        struct stat os;
+        if (stat(out, &os) != 0) {
+            char orig[PATH_MAX]; resolve_path(guest, orig, sizeof orig);
+            copy_file(orig, out);
+        }
+        return 1;
+    }
+    struct stat s; return (stat(out, &s) == 0 && S_ISREG(s.st_mode)) ? 1 : 0;
+}
+
+/* Resolve a path-based file op to a host path, honouring the save overlay first. */
+static void resolve_io(const char *guest, int write_intent, char *out, size_t cap) {
+    if (save_overlay_resolve(guest, write_intent, out, cap)) return;
+    resolve_path(guest, out, cap);
+}
+
+/* Guest (Linux/ARM) open() flag bits are the same numeric values on every guest ABI. A write
+   intent = anything but a pure O_RDONLY open (so the target lands in the writable overlay). */
+static int open_is_write(int gf) {
+    enum { GO_WRONLY = 01, GO_RDWR = 02, GO_CREAT = 0100, GO_TRUNC = 01000, GO_APPEND = 02000 };
+    return (gf & 03) || (gf & GO_CREAT) || (gf & GO_TRUNC) || (gf & GO_APPEND);
 }
 
 void read_cstr(uint32_t gaddr, char *out, size_t cap) {
@@ -513,6 +630,17 @@ static uint32_t hostfd_ino(int fd) {
 static void hostfd_untrack(int fd) {
     for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) { g_hostfd[i] = -1; return; }
 }
+/* Flush every tracked host file to disk (called on quit, and by sync()). Cannot reach buffers
+   the guest's own glibc still holds in guest RAM -- only data already write()-en to the host. */
+void syscalls_flush_all(void) {
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] >= 0)
+#ifdef _WIN32
+        _commit(g_hostfd[i]);
+#else
+        fsync(g_hostfd[i]);
+#endif
+}
+
 /* Between games: close leaked host fds + free the in-memory /proc-/etc fake files. */
 void syscalls_reset(void) {
     for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] >= 0) close(g_hostfd[i]);
@@ -804,33 +932,49 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 81:  case 206:         /* setgroups / setgroups32 */
     case 16:  case 95:  case 182: case 198: case 207: case 212:  /* (l/f)chown + ...32: as root, ok */
     case 60:   return 0;        /* umask (report 0 as the prior mask -- harmless) */
-    case 39: { /* mkdir(path, mode): let games create their save/config dirs beside their assets */
+    case 39: { /* mkdir(path, mode): game save/config dirs land in the per-game overlay */
         char p[1024]; read_cstr(a0, p, sizeof p);
-        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_io(p, 1, hp, sizeof hp);
         int r = ME_MKDIR(hp); (void)a1;
         return (r == 0 || errno == EEXIST) ? 0 : LERR(errno);
     }
     case 40: { /* rmdir(path) */
         char p[1024]; read_cstr(a0, p, sizeof p);
-        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_io(p, 1, hp, sizeof hp);
         return rmdir(hp) == 0 ? 0 : LERR(errno);
     }
     case 10: { /* unlink(path): games delete stale temp/lock/save files before recreating them */
         char p[1024]; read_cstr(a0, p, sizeof p);
         if (!strncmp(p, "/dev/", 5)) return 0;
-        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_io(p, 1, hp, sizeof hp);
         return remove(hp) == 0 ? 0 : LERR(errno);
+    }
+    case 38: { /* rename(oldpath, newpath): atomic-save pattern (write tmp, rename over final) */
+        char op[1024], np[1024]; read_cstr(a0, op, sizeof op); read_cstr(a1, np, sizeof np);
+        char ohp[PATH_MAX], nhp[PATH_MAX];
+        resolve_io(op, 1, ohp, sizeof ohp);
+        resolve_io(np, 1, nhp, sizeof nhp);
+        return rename(ohp, nhp) == 0 ? 0 : LERR(errno);
     }
     case 41: { int r = dup((int)a0);            return r < 0 ? LERR(errno) : r; }  /* dup  */
     case 63: { int r = dup2((int)a0, (int)a1);  return r < 0 ? LERR(errno) : r; }  /* dup2 */
     /* benign no-ops: nothing the engine caches to a guest FS / nothing to schedule. Returning
        success keeps these off the UNIMPLEMENTED log (Vektar calls sync; others appear in titles
        that otherwise spam ENOSYS) without changing behaviour. */
-    case 36:   return 0;        /* sync */
-    case 118:  return 0;        /* fsync */
-    case 148:  return 0;        /* fdatasync */
+    /* Durability: flush real host fds for real (skip device/memfd/dirfd fds -- not host files).
+       A normal quit already persists written bytes via the OS page cache; this honours a game's
+       explicit fsync so the data is also safe against a hard host-kill. */
+    case 118:  /* fsync */
+    case 148:  /* fdatasync */
+    case 314:  /* sync_file_range(fd, ...): treat as an fsync of the fd */
+        if (dev_type((int)a0) || (int)a0 >= MEMFD_BASE || dirfd_get((int)a0)) return 0;
+#ifdef _WIN32
+        return _commit((int)a0) == 0 ? 0 : LERR(errno);
+#else
+        return (nr == 148 ? fdatasync((int)a0) : fsync((int)a0)) == 0 ? 0 : LERR(errno);
+#endif
+    case 36:   syscalls_flush_all(); return 0;   /* sync: flush every host file we track */
     case 34:   return 0;        /* nice */
-    case 314:  return 0;        /* sync_file_range */
     case 55:                    /* fcntl  (F_GETFL/F_SETFL/F_SETFD on device/normal fds) */
     case 221:  return 0;        /* fcntl64 — accept (we don't honour O_NONBLOCK; harmless here) */
     case 141:  return dir_getdents((int)a0, a1, a2, 0);  /* getdents   (linux_dirent)   */
@@ -888,7 +1032,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            replaces it. */
         { int mf = sysfile_open(p); if (mf) { if (g_trace) fprintf(stderr, "  [fake %s]\n", p);
                                               return mf; } }
-        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_io(p, open_is_write((int)a1), hp, sizeof hp);
         /* Directory -> a DIRFD (portable opendir; a host open() of a dir works on Linux but not
            on MinGW, and we serve getdents from it). */
         { struct stat ds; if (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode)) {
@@ -896,8 +1040,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
               if (g_trace) fprintf(stderr, "  open dir '%s' -> %d\n", p, dfd);
               if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
-        if (getenv("ME_OPENLOG")) { char b[1100]; snprintf(b, sizeof b,
-            "OPEN '%s' flags=%x -> %ld%s\n", p, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
+        if (getenv("ME_OPENLOG")) { char b[1300]; snprintf(b, sizeof b,
+            "OPEN '%s' [%s] flags=%x -> %ld%s\n", p, hp, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
         if (r >= 0) { g_self->enoent_streak = 0; hostfd_track((int)r, path_ino(hp)); return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
@@ -913,7 +1057,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a1, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         int mf = sysfile_open(p); if (mf) return mf;
-        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_io(p, open_is_write((int)a2), hp, sizeof hp);
         { struct stat ds; if (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode)) {
               int dfd = dirfd_make(hp); if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a2), a3);
@@ -945,7 +1089,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 33: {  /* access(path, mode): exists? (ld.so/glibc probe libs + locale dirs) */
         char p[1024]; read_cstr(a0, p, sizeof p);
         if (!strncmp(p, "/dev/", 5)) return 0;          /* devices always "exist" */
-        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_io(p, 0, hp, sizeof hp);
         struct stat s; return stat(hp, &s) == 0 ? 0 : LERR(ENOENT);
     }
     case 85: {  /* readlink(path, buf, bufsiz): we don't expose host symlinks; report "not a
@@ -1149,7 +1293,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a0, p, sizeof p);
         struct stat s;
         if (sd_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
-        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        char hp[PATH_MAX]; resolve_io(p, 0, hp, sizeof hp);
         if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
@@ -1175,7 +1319,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                if (mf) { struct memfile *m = memfd_get(mf); struct stat ms; memset(&ms, 0, sizeof ms);
                          ms.st_mode = S_IFREG | 0644; ms.st_size = m->len; free(m->data); m->used = 0;
                          fill_stat64(a1, &ms); return 0; }
-               char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+               char hp[PATH_MAX]; resolve_io(p, 0, hp, sizeof hp);
                ok = (nr == 196) ? lstat(hp, &s) : stat(hp, &s);
                if (!ok && s.st_ino == 0) s.st_ino = path_ino(hp);       /* Win: synth unique inode */
         }
