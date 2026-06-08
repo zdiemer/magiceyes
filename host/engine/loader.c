@@ -9,6 +9,7 @@
 #include "engine.h"
 #include "gpecomp.h"
 #include <dirent.h>
+#include <ctype.h>
 #ifdef _WIN32
 #include <direct.h>
 #define LMKDIR(p) _mkdir(p)
@@ -45,29 +46,104 @@ static int file_is_elf(const char *path) {
     return n == 4 && m[0] == 0x7f && m[1] == 'E' && m[2] == 'L' && m[3] == 'F';
 }
 
+/* 1 if `path` is a *runnable* ARM ELF: ET_EXEC or ET_DYN (a static/dynamic game or a GPEComp
+   stub). Rejects ET_REL `.o` object files (e.g. a game's bundled cramfs.o/zlib_inflate.o kernel
+   modules) so launcher-script following doesn't latch onto the wrong ELF. */
+static int file_is_runnable_elf(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) return 0;
+    Elf32_Ehdr eh; int ok = 0;
+    if (fread(&eh, 1, sizeof eh, f) == sizeof eh &&
+        !memcmp(eh.e_ident, ELFMAG, SELFMAG) && eh.e_ident[EI_CLASS] == ELFCLASS32 &&
+        eh.e_machine == EM_ARM && (eh.e_type == ET_EXEC || eh.e_type == ET_DYN))
+        ok = 1;
+    fclose(f);
+    return ok;
+}
+
+/* basename of a path (after the last '/' or '\\'). */
+static const char *path_base(const char *p) {
+    const char *s1 = strrchr(p, '/'), *s2 = strrchr(p, '\\');
+    const char *s = s1 > s2 ? s1 : s2;
+    return s ? s + 1 : p;
+}
+
+/* Collect runnable ARM ELF executables under `dir` (depth-limited), skipping shared libraries
+   (*.so*) so we don't latch onto a bundled libSDL. Used as the launcher-follow fallback: a .gpe
+   launcher script often just `exec`s the one real binary that sits beside it. */
+static void scan_runnable_elf(const char *dir, int depth, struct gpelist *gl) {
+    if (depth < 0 || gl->n >= 16) return;
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) && gl->n < 16) {
+        if (de->d_name[0] == '.') continue;
+        char full[PATH_MAX];
+        snprintf(full, sizeof full, "%s/%s", dir, de->d_name);
+        struct stat st;
+        if (stat(full, &st)) continue;
+        if (S_ISDIR(st.st_mode)) { scan_runnable_elf(full, depth - 1, gl); continue; }
+        if (strstr(de->d_name, ".so")) continue;          /* a shared library, not the game */
+        if (file_is_runnable_elf(full))
+            snprintf(gl->paths[gl->n++], PATH_MAX, "%s", full);
+    }
+    closedir(d);
+}
+
 /* A GP2X .gpe is often a tiny shell-script launcher ("#!/bin/sh\n./Game\ncd /usr/gp2x\n...")
-   rather than the binary itself. Scan it for a referenced filename that exists beside it and is
-   an ELF, and use that. Returns out, or NULL if none found. */
+   rather than the binary itself. Follow it to the real ARM executable:
+     1. scan the script for a referenced filename that resolves to a runnable ARM ELF beside it
+        (same dir or an immediate subdir, e.g. "cd runtime; ./fxi");
+     2. if the script names nothing usable (e.g. it `exec`s a name that isn't an ELF, or just
+        re-invokes itself), fall back to the runnable executable(s) sitting beside it -- picking
+        the one whose name matches the folder, else the largest.
+   Returns out, or NULL if no runnable binary was found. */
 static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", gpe);
     char *s1 = strrchr(dir, '/'), *s2 = strrchr(dir, '\\'), *s = s1 > s2 ? s1 : s2;
     if (s) *s = 0; else snprintf(dir, sizeof dir, ".");
-    FILE *f = fopen(gpe, "r"); if (!f) return NULL;
-    char line[512];
-    while (fgets(line, sizeof line, f)) {
-        for (char *tok = strtok(line, " \t\r\n;|&"); tok; tok = strtok(NULL, " \t\r\n;|&")) {
-            const char *name = tok;
-            while (*name == '.' || *name == '/' || *name == '\\') name++;   /* strip ./ */
-            if (!*name) continue;
-            char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", dir, name);
-            struct stat st;
-            if (!stat(cand, &st) && S_ISREG(st.st_mode) && file_is_elf(cand)) {
-                fclose(f); snprintf(out, cap, "%s", cand); return out;
+
+    /* the runnable executables that live beside the launcher (immediate subdirs included) */
+    struct gpelist elf; elf.n = 0;
+    scan_runnable_elf(dir, 1, &elf);
+
+    /* (1) follow a referenced token to a runnable ELF (prefer an exact path beside the script,
+           else match by basename anywhere in the collected set). */
+    FILE *f = fopen(gpe, "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            for (char *tok = strtok(line, " \t\r\n;|&\"'"); tok; tok = strtok(NULL, " \t\r\n;|&\"'")) {
+                const char *name = tok;
+                while (*name == '.' || *name == '/' || *name == '\\') name++;   /* strip ./ ../ */
+                if (!*name) continue;
+                char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", dir, name);
+                if (file_is_runnable_elf(cand)) { fclose(f); snprintf(out, cap, "%s", cand); return out; }
+                const char *tb = path_base(name);
+                for (int i = 0; i < elf.n; i++)
+                    if (!strcasecmp(path_base(elf.paths[i]), tb)) {
+                        fclose(f); snprintf(out, cap, "%s", elf.paths[i]); return out;
+                    }
             }
         }
+        fclose(f);
     }
-    fclose(f);
-    return NULL;
+
+    /* (2) fallback: pick the best runnable executable beside the launcher. */
+    if (elf.n == 0) return NULL;
+    char base[PATH_MAX]; snprintf(base, sizeof base, "%s", path_base(dir));
+    char *dot = strrchr(base, '.'); if (dot) *dot = 0;
+    int best = 0; long best_sz = -1;
+    for (int i = 0; i < elf.n; i++) {
+        char stem[PATH_MAX]; snprintf(stem, sizeof stem, "%s", path_base(elf.paths[i]));
+        char *d = strrchr(stem, '.'); if (d) *d = 0;
+        if (!strcasecmp(stem, base)) { best = i; break; }   /* name matches folder -> the game */
+        struct stat st; long sz = stat(elf.paths[i], &st) ? 0 : (long)st.st_size;
+        if (sz > best_sz) { best_sz = sz; best = i; }
+    }
+    if (g_trace && elf.n > 1)
+        fprintf(stderr, "  [loader] launcher '%s' -> %s (%d candidates)\n", gpe, elf.paths[best], elf.n);
+    snprintf(out, cap, "%s", elf.paths[best]);
+    return out;
 }
 
 /* If `elf` is a GPEComp self-extractor, decompress its UCL payload to the host scratch dir
@@ -134,19 +210,54 @@ static const char *finalize(const char *path, char *out, size_t cap) {
     return out;
 }
 
-/* Reduce a directory tree to its single .gpe (following a launcher script to the real binary);
-   error (with a listing) on 0 or 2+. */
+/* Score a .gpe candidate so resolve_dir can implicitly pick the game when a folder ships several
+   (the game alongside helper stubs like cpu_speed/reset, a start.gpe launcher, and a "_Pollux"
+   Caanoo build). Higher = more likely the real GP2X game. `base` is the folder's basename. */
+static long score_gpe(const char *path, const char *base) {
+    char stem[PATH_MAX]; snprintf(stem, sizeof stem, "%s", path_base(path));
+    char *dot = strrchr(stem, '.'); if (dot) *dot = 0;
+    /* normalise (lowercase, drop non-alnum) for a forgiving folder-name match */
+    char ns[PATH_MAX]; int k = 0;
+    for (const char *p = stem; *p && k < (int)sizeof ns - 1; p++)
+        if (isalnum((unsigned char)*p)) ns[k++] = (char)tolower((unsigned char)*p);
+    ns[k] = 0;
+    char nb[PATH_MAX]; k = 0;
+    for (const char *p = base; *p && k < (int)sizeof nb - 1; p++)
+        if (isalnum((unsigned char)*p)) nb[k++] = (char)tolower((unsigned char)*p);
+    nb[k] = 0;
+
+    long s = 0;
+    if (ns[0] && !strcmp(ns, nb)) s += 1000;            /* stem == folder name -> the game */
+    static const char *deny[] = {"cpu_speed","cpuspeed","reset","select","selector","menu",
+                                 "gp2xmenu","install","uninstall","setup","update",0};
+    for (int i = 0; deny[i]; i++) if (!strcasecmp(stem, deny[i])) { s -= 1000; break; }
+    if (strstr(ns, "pollux")) s -= 200;                  /* Caanoo build; prefer GP2X for default */
+    struct stat st; if (!stat(path, &st)) s += (long)(st.st_size / 4096);   /* tie-break: bigger */
+    return s;
+}
+
+/* Reduce a directory tree to the .gpe to run (following a launcher script to the real binary).
+   When a folder holds several .gpe, rank them (score_gpe) and implicitly pick the best rather
+   than bailing -- the corpus is full of folders bundling a game with helper/launcher stubs. */
 static const char *resolve_dir(const char *dir, char *out, size_t cap) {
     struct gpelist gl; gl.n = 0;
     scan_gpe(dir, 4, &gl);
     if (gl.n == 0) { fprintf(stderr, "magiceyes: no .gpe found under '%s'\n", dir); return NULL; }
+    int pick = 0;
     if (gl.n > 1) {
-        fprintf(stderr, "magiceyes: %d .gpe files under '%s' (ambiguous -- pass one directly):\n",
-                gl.n, dir);
-        for (int i = 0; i < gl.n; i++) fprintf(stderr, "    %s\n", gl.paths[i]);
-        return NULL;
+        const char *b = path_base(dir);
+        long best = score_gpe(gl.paths[0], b);
+        for (int i = 1; i < gl.n; i++) {
+            long sc = score_gpe(gl.paths[i], b);
+            if (sc > best) { best = sc; pick = i; }
+        }
+        if (g_trace) {
+            fprintf(stderr, "magiceyes: %d .gpe under '%s', picking %s:\n", gl.n, dir, gl.paths[pick]);
+            for (int i = 0; i < gl.n; i++)
+                fprintf(stderr, "    [%c] %s\n", i == pick ? '*' : ' ', gl.paths[i]);
+        }
     }
-    return finalize(gl.paths[0], out, cap);
+    return finalize(gl.paths[pick], out, cap);
 }
 
 /* Extract a .zip into the host scratch dir (cached: skip if it already holds a .gpe). Uses the

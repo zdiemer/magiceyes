@@ -736,6 +736,33 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 199: case 200: case 201: case 202:   /* ...32 variants */
         return 0;
     case 75:   return 0;        /* setrlimit */
+    /* Credential setters: GP2X firmware runs everything as root, so a game that drops/restores
+       privileges succeeds trivially. Without this, angband/kq/rogue abort at start with
+       "setegid(): cannot drop permissions correctly!". Whole set*id family -> 0. */
+    case 23:  case 46:  case 70:  case 71:  case 138: case 139: case 164: case 170:  /* set*id    */
+    case 203: case 204: case 208: case 210: case 213: case 214: case 215: case 216:  /* ...32     */
+    case 81:  case 206:         /* setgroups / setgroups32 */
+    case 16:  case 95:  case 182: case 198: case 207: case 212:  /* (l/f)chown + ...32: as root, ok */
+    case 60:   return 0;        /* umask (report 0 as the prior mask -- harmless) */
+    case 39: { /* mkdir(path, mode): let games create their save/config dirs beside their assets */
+        char p[1024]; read_cstr(a0, p, sizeof p);
+        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        int r = ME_MKDIR(hp); (void)a1;
+        return (r == 0 || errno == EEXIST) ? 0 : LERR(errno);
+    }
+    case 40: { /* rmdir(path) */
+        char p[1024]; read_cstr(a0, p, sizeof p);
+        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        return rmdir(hp) == 0 ? 0 : LERR(errno);
+    }
+    case 10: { /* unlink(path): games delete stale temp/lock/save files before recreating them */
+        char p[1024]; read_cstr(a0, p, sizeof p);
+        if (!strncmp(p, "/dev/", 5)) return 0;
+        char hp[PATH_MAX]; resolve_path(p, hp, sizeof hp);
+        return remove(hp) == 0 ? 0 : LERR(errno);
+    }
+    case 41: { int r = dup((int)a0);            return r < 0 ? LERR(errno) : r; }  /* dup  */
+    case 63: { int r = dup2((int)a0, (int)a1);  return r < 0 ? LERR(errno) : r; }  /* dup2 */
     /* benign no-ops: nothing the engine caches to a guest FS / nothing to schedule. Returning
        success keeps these off the UNIMPLEMENTED log (Vektar calls sync; others appear in titles
        that otherwise spam ENOSYS) without changing behaviour. */

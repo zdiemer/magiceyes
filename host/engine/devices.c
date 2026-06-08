@@ -21,6 +21,11 @@ int dev_open(const char *path) {
        ioctl->0, read->0, write discarded) lets the game proceed past the open. */
     else if (!strcmp(path, "/dev/isa1200") ||
              !strcmp(path, "/dev/pollux_clock")) t = DEV_OTHER;
+    /* /dev/mmuhack: the GP2X "mmuhack" kernel module that enables write-back caching. Games
+       open it purely to install the hack and treat a failed open as fatal (GP2X_Nat2007 prints
+       "MMU hack failed" and exits). We have nothing to accelerate, but a benign stub (open ok,
+       ioctl->0, writes discarded) lets the game proceed. */
+    else if (!strcmp(path, "/dev/mmuhack"))   t = DEV_OTHER;
     else if (!strcmp(path, "/dev/shm/gp2x_fb")) t = DEV_SHMFB; /* fake-SDL shim's framebuffer shm */
     else {
         /* A /dev node we don't model: record it (so the harness/agent learns which device a new

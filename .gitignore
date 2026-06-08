@@ -14,3 +14,6 @@ __pycache__/
 # The committed regression baselines (perceptual hashes, no imagery) live in tools/test/baselines/.
 /tools/test/results/
 
+# Claude Code session runtime state (scheduled-wakeup lock, etc.) -- not project config.
+/.claude/scheduled_tasks.lock
+
