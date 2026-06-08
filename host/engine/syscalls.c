@@ -547,8 +547,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             me_report_scan_write((int)a0, (const char *)tmp, a2);  /* catch ld.so symbol/lib
                                                                       errors + glibc aborts */
             FILE *s = g_log ? g_log : ((int)a0 == 1 ? stdout : stderr);
-            size_t w = a2 ? fwrite(tmp, 1, a2, s) : 0; fflush(s); free(tmp);
-            return (long)w;
+            if (a2) { fwrite(tmp, 1, a2, s); fflush(s); }
+            free(tmp);
+            return (long)a2;   /* always claim the whole write landed: if the sink is a dead handle
+                                  (no console on a double-click, no ME_LOGFILE) a short/0 return made
+                                  the guest's glibc stdio spin retrying -> menu hung -> black screen */
         }
         long r = write((int)a0, tmp, a2); free(tmp);
         return r < 0 ? -errno : r;
