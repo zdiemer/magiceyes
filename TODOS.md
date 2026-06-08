@@ -14,9 +14,11 @@ its own repo.
   a portable `<exe_dir>/saves/<gamekey>/`, so saves survive even from a read-only ROM dir or the
   `%TEMP%` GPEComp landing (`save_overlay_resolve`/`me_save_set_game` in `host/engine/syscalls.c`;
   cwd now follows `g_game_root`, the real asset dir). Payback's `Data/Config/Slot1.ini` persists.
-  *Remaining:* directory-merge for overlay (getdents doesn't yet merge overlay + original entries,
-  so a game that enumerates a save dir won't see overlaid files — fine for name-by-name opens like
-  Payback); confirm the qemu backend and Wiz/Caanoo titles persist too.
+  Directory enumeration is overlay-merged (`getdents` lists overlay ∪ original, overlay shadowing
+  same-named entries), and relative writes after a `chdir` into a subdir are anchored at the live
+  cwd. *Remaining:* confirm the qemu backend and Wiz/Caanoo titles persist too; absolute writes
+  OUTSIDE the game dir (e.g. a hard-coded `$HOME`/`/mnt/sd` path in non-firmware mode) and
+  `truncate`/`link`/`symlink`/`utime`-by-path aren't redirected (no known title needs it).
 - **GPEComp decompression should not clutter ROM dirs** — `gpecomp_to_tmp()` (`host/engine/loader.c`)
   currently writes the decompressed `<stem>_tmp` payload **beside the .gpe** (falling back to
   `%TEMP%`). Decompress **in-memory** (load the ELF straight from the decompressed buffer, no temp

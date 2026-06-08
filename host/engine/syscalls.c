@@ -301,41 +301,63 @@ static void copy_file(const char *src, const char *dst) {
     fclose(o); fclose(in);
 }
 
+/* Copy `in` into `out` with DOS-style '\\' separators normalised to '/'. */
+static void norm_slashes(const char *in, char *out, size_t cap) {
+    size_t i = 0; for (; in[i] && i < cap - 1; i++) out[i] = in[i] == '\\' ? '/' : in[i];
+    out[i] = 0;
+}
+/* If normalised `path` is `root` or under it, return the tail relative to root ("" if equal);
+   else NULL. Case-insensitive on Windows. */
+static const char *path_under(const char *path, const char *root) {
+    size_t rl = strlen(root); while (rl && root[rl - 1] == '/') rl--;
+    if (!rl) return NULL;
+#ifdef _WIN32
+    if (strncasecmp(path, root, rl)) return NULL;
+#else
+    if (strncmp(path, root, rl)) return NULL;
+#endif
+    if (path[rl] == '/') return path + rl + 1;
+    if (path[rl] == 0)   return path + rl;
+    return NULL;
+}
+
+/* Map a guest path into the per-game save-overlay namespace WITHOUT any existence/type check.
+   Returns 1 + fills `out` (g_save_root/<rel>) iff `guest` names data under the game's own dir.
+   RELATIVE paths are ALWAYS captured (they resolve against cwd, which is the game dir) -- so a
+   save can never leak back into a read-only ROM dir; when the game chdir()'d into a subdir of
+   its own dir we anchor at the live cwd to keep the overlay path asset-relative, else we use
+   the literal relative path. ABSOLUTE paths are captured only when under g_game_root. */
+static int save_overlay_path(const char *guest, char *out, size_t cap) {
+    if (!g_save_root[0] || !g_game_root[0] || getenv("ME_NOSAVES")) return 0;
+    char norm[PATH_MAX]; norm_slashes(guest, norm, sizeof norm);
+    char gr[PATH_MAX]; norm_slashes(g_game_root, gr, sizeof gr);
+    int drive = (((norm[0] >= 'a' && norm[0] <= 'z') || (norm[0] >= 'A' && norm[0] <= 'Z')) && norm[1] == ':');
+    char relbuf[PATH_MAX]; const char *rel = NULL;
+    if (norm[0] != '/' && !drive) {                  /* relative -> always game data */
+        rel = norm;
+        char cwd[PATH_MAX], cn[PATH_MAX];
+        if (getcwd(cwd, sizeof cwd)) {               /* refine: prefix cwd's offset within game dir */
+            norm_slashes(cwd, cn, sizeof cn);
+            const char *sub = path_under(cn, gr);
+            if (sub && sub[0]) { snprintf(relbuf, sizeof relbuf, "%s/%s", sub, norm); rel = relbuf; }
+        }
+    } else {                                         /* absolute -> only if under the game dir */
+        rel = path_under(norm, gr);
+    }
+    if (!rel || !rel[0] || rel[0] == '/' || strstr(rel, "..")) return 0;
+    snprintf(out, cap, "%s/%s", g_save_root, rel);
+    return 1;
+}
+
 /* If `guest` is game-save data, fill `out` with its overlay host path and return 1:
-   - write_intent: always claim (creating parent dirs under g_save_root).
+   - write_intent: always claim (creating parent dirs, seeding the overlay from the shipped
+     file so a read-modify-write keeps the shipped content -- Payback rewrites Slot1.ini).
    - read: claim only if a regular file already exists in the overlay (so saved data is read
      back); else return 0 to fall through to the real (read-only) assets. */
 static int save_overlay_resolve(const char *guest, int write_intent, char *out, size_t cap) {
-    if (!g_save_root[0] || getenv("ME_NOSAVES")) return 0;
-    char norm[PATH_MAX];   /* DOS-style backslash separators -> '/' (matches resolve_path) */
-    { size_t i = 0; for (; guest[i] && i < sizeof norm - 1; i++)
-          norm[i] = guest[i] == '\\' ? '/' : guest[i];
-      norm[i] = 0; }
-    const char *rel = NULL;
-    int drive = (((norm[0] >= 'a' && norm[0] <= 'z') || (norm[0] >= 'A' && norm[0] <= 'Z')) && norm[1] == ':');
-    if (norm[0] != '/' && !drive) {
-        rel = norm;                                  /* relative -> resolves under cwd (g_game_root) */
-    } else if (g_game_root[0]) {                     /* absolute -> claim only if under the game dir */
-        char groot[PATH_MAX]; size_t i = 0;
-        for (; g_game_root[i] && i < sizeof groot - 1; i++)
-            groot[i] = g_game_root[i] == '\\' ? '/' : g_game_root[i];
-        groot[i] = 0;
-        size_t gl = strlen(groot); while (gl && groot[gl - 1] == '/') gl--;
-#ifdef _WIN32
-        if (gl && !strncasecmp(norm, groot, gl) && (norm[gl] == '/' || norm[gl] == 0))
-#else
-        if (gl && !strncmp(norm, groot, gl) && (norm[gl] == '/' || norm[gl] == 0))
-#endif
-            rel = (norm[gl] == '/') ? norm + gl + 1 : norm + gl;
-    }
-    if (!rel || !rel[0] || rel[0] == '/') return 0;  /* not game data, or an escaped absolute */
-    if (strstr(rel, "..")) return 0;                 /* don't let a path climb out of the overlay */
-    snprintf(out, cap, "%s/%s", g_save_root, rel);
+    if (!save_overlay_path(guest, out, cap)) return 0;
     if (write_intent) {
         mkdirs_for(out);
-        /* copy-up: a game may open a SHIPPED file for writing and update it in place (Payback
-           rewrites its shipped Data/Config/Slot1.ini). If the overlay copy doesn't exist yet,
-           seed it from the original asset so a read-modify-write keeps the shipped content. */
         struct stat os;
         if (stat(out, &os) != 0) {
             char orig[PATH_MAX]; resolve_path(guest, orig, sizeof orig);
@@ -539,17 +561,18 @@ static struct dirhandle *dirfd_get(int fd) {
     int i = fd - DIRFD_BASE;
     return (i >= 0 && i < DIRFD_MAX && g_dirf[i].used) ? &g_dirf[i] : NULL;
 }
-static int dirfd_make(const char *hp) {
-    int slot = -1;
-    for (int i = 0; i < DIRFD_MAX; i++) if (!g_dirf[i].used) { slot = i; break; }
-    if (slot < 0) return -1;
-    DIR *d = opendir(hp); if (!d) return -1;
-    struct dirhandle *h = &g_dirf[slot]; memset(h, 0, sizeof *h);
-    int cap = 0; struct dirent *de;
+/* Read `dir`'s entries into the handle, skipping names already present (so an earlier-scanned
+   source shadows a later one). Returns 1 if the dir was opened, 0 otherwise. */
+static int dir_scan_into(struct dirhandle *h, int *cap, const char *dir) {
+    DIR *d = opendir(dir); if (!d) return 0;
+    struct dirent *de;
     while ((de = readdir(d)) != NULL) {
-        if (h->n >= cap) { cap = cap ? cap * 2 : 32;
-            h->name = realloc(h->name, cap * sizeof *h->name);
-            h->type = realloc(h->type, cap * sizeof *h->type); }
+        int dup = 0;
+        for (int i = 0; i < h->n; i++) if (!strcmp(h->name[i], de->d_name)) { dup = 1; break; }
+        if (dup) continue;
+        if (h->n >= *cap) { *cap = *cap ? *cap * 2 : 32;
+            h->name = realloc(h->name, *cap * sizeof *h->name);
+            h->type = realloc(h->type, *cap * sizeof *h->type); }
         h->name[h->n] = strdup(de->d_name);
         unsigned char t = 0;            /* DT_UNKNOWN */
 #ifdef DT_DIR
@@ -557,12 +580,27 @@ static int dirfd_make(const char *hp) {
 #endif
         if (t == 0) {                   /* d_type unavailable: stat the entry */
             char ep[PATH_MAX]; struct stat es;
-            snprintf(ep, sizeof ep, "%s/%s", hp, de->d_name);
+            snprintf(ep, sizeof ep, "%s/%s", dir, de->d_name);
             if (stat(ep, &es) == 0) t = S_ISDIR(es.st_mode) ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
         }
         h->type[h->n] = t; h->n++;
     }
     closedir(d);
+    return 1;
+}
+/* A directory fd that merges the per-game save overlay over the original assets: `overlay`
+   entries are listed first and shadow same-named `orig` entries, so a game enumerating a save
+   dir (rather than opening files by name) sees the files it saved. Either arg may be NULL. */
+static int dirfd_make(const char *orig, const char *overlay) {
+    int slot = -1;
+    for (int i = 0; i < DIRFD_MAX; i++) if (!g_dirf[i].used) { slot = i; break; }
+    if (slot < 0) return -1;
+    struct dirhandle *h = &g_dirf[slot]; memset(h, 0, sizeof *h);
+    int cap = 0, ok = 0;
+    if (overlay) ok |= dir_scan_into(h, &cap, overlay);   /* overlay first -> it wins on dup names */
+    if (orig)    ok |= dir_scan_into(h, &cap, orig);
+    if (!ok) { for (int i = 0; i < h->n; i++) free(h->name[i]);
+               free(h->name); free(h->type); memset(h, 0, sizeof *h); return -1; }
     h->used = 1; h->pos = 0;
     return DIRFD_BASE + slot;
 }
@@ -1034,10 +1072,14 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                                               return mf; } }
         char hp[PATH_MAX]; resolve_io(p, open_is_write((int)a1), hp, sizeof hp);
         /* Directory -> a DIRFD (portable opendir; a host open() of a dir works on Linux but not
-           on MinGW, and we serve getdents from it). */
-        { struct stat ds; if (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode)) {
-              int dfd = dirfd_make(hp);
-              if (g_trace) fprintf(stderr, "  open dir '%s' -> %d\n", p, dfd);
+           on MinGW, and we serve getdents from it), merging the save overlay over the assets. */
+        { char ov[PATH_MAX]; struct stat ds, os;
+          int has_ov  = save_overlay_path(p, ov, sizeof ov);
+          int orig_d  = (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode));
+          int ov_d    = has_ov && (stat(ov, &os) == 0 && S_ISDIR(os.st_mode));
+          if (orig_d || ov_d) {
+              int dfd = dirfd_make(orig_d ? hp : NULL, ov_d ? ov : NULL);
+              if (g_trace) fprintf(stderr, "  open dir '%s' -> %d (overlay=%d)\n", p, dfd, ov_d);
               if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
         if (getenv("ME_OPENLOG")) { char b[1300]; snprintf(b, sizeof b,
@@ -1058,8 +1100,13 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         int d = dev_open(p); if (d >= 0) return d;
         int mf = sysfile_open(p); if (mf) return mf;
         char hp[PATH_MAX]; resolve_io(p, open_is_write((int)a2), hp, sizeof hp);
-        { struct stat ds; if (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode)) {
-              int dfd = dirfd_make(hp); if (dfd >= 0) return dfd; } }
+        { char ov[PATH_MAX]; struct stat ds, os;
+          int has_ov = save_overlay_path(p, ov, sizeof ov);
+          int orig_d = (stat(hp, &ds) == 0 && S_ISDIR(ds.st_mode));
+          int ov_d   = has_ov && (stat(ov, &os) == 0 && S_ISDIR(os.st_mode));
+          if (orig_d || ov_d) {
+              int dfd = dirfd_make(orig_d ? hp : NULL, ov_d ? ov : NULL);
+              if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a2), a3);
         if (r >= 0) { hostfd_track((int)r, path_ino(hp)); return r; }
         return LERR(errno);
