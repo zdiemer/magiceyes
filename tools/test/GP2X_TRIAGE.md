@@ -91,11 +91,12 @@ WindandWater/Revolt render black at ~9 fps; retrovirus also logs `SDL_LoadObject
 `SDL_LoadObject`/`SDL_LoadFunction` to return NULL gracefully; then chase the lib NULL deref. (Needs
 the GPH-SDK toolchain rebuild of the shim — heavier; see `wiz-titles-revival`.)
 
-### E. `egoboo2x` / `egoboo-cramfs` — needs the **ARM940 second core**
-Not a data problem: it finds its `modules/*.mod`, loads `setup.txt`/`controls.txt`/`basicdat`, and
-sets 320×240×16 — but ships `gpu940`/`gpu940_225`/`load940` and offloads **3D rendering to the GP2X's
-second CPU (ARM940)**, which the engine doesn't run (ARM920 main core only). The 940 never renders →
-black. **Fix:** emulate the ARM940 + the 920↔940 IPC (DualCPU regs / shared memory). Major feature.
+### E. `egoboo2x` — **DONE** (ARM940 second core)
+egoboo offloads 3D to the GP2X's second CPU (ARM940) via `gpu940`. The engine now emulates the
+ARM940T (`host/engine/me940.c`, see `ARM940.md`): it runs the real `gpu940` firmware over shared RAM
+and presents its output. **egoboo2x: incompatible → playable** (clean full-frame 3D, `black 0.02`).
+`egoboo-cramfs` still black — its launcher loop-mounts a `data.cramfs` for assets (needs a cramfs
+reader, like `gp2xDoukutsu`); same engine, just missing the data mount.
 
 ### F. Terminal/PTY console games — *niche* — `nethack` (×2), `rogue`
 `nethack` (ascii port) needs `/dev/ptmx` + `openpty`/`forkpty`; `rogue` reaches
