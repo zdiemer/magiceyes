@@ -332,6 +332,10 @@ static uint32_t engine_reset_and_load(const char *path) {
     engine_reset_globals();
     g_exit = 0; g_exit_code = 0;
     if (g_reload_chdir) { chdir_to_dir_of(path); g_reload_chdir = 0; }  /* File->Open: into the new game's dir */
+    /* File->Open of a gpu940 title: viewer.c's resolve_input set g_940_firmware, so bring the second
+       core up here too (the cmdline path does it in main()). me940_stop() above already halted any
+       prior core, and mem_reset freed the old shared RAM; this re-loads the firmware fresh. */
+    if (g_940_firmware[0]) me940_load_and_start(g_940_firmware);
     uint32_t entry = engine_load_game(path);
     g_reloading = 0;
     if (g_trace) fprintf(stderr, "  [reload] -> %s entry=%08x\n", path, entry);

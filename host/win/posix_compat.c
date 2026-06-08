@@ -35,23 +35,27 @@ typedef struct _PROCESS_POWER_THROTTLING_STATE {
 } PROCESS_POWER_THROTTLING_STATE;
 #endif
 void me_platform_init(void) {
-    /* The bundle is built -mwindows (GUI subsystem) so double-clicking spawns NO console window.
-       But when launched from a terminal we still want --help/--version/diagnostics to show: attach
-       to the parent's console (if any) and rebind stdio to it. No-op (no parent console) on a
-       double-click, so no window appears either way. Must run before the first printf/fprintf. */
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        freopen("CONOUT$", "w", stdout);
-        freopen("CONOUT$", "w", stderr);
-        freopen("CONIN$",  "r", stdin);
-    } else {
-        /* No parent console (double-clicked from Explorer): stdout/stderr are INVALID handles in a
-           GUI-subsystem process. The engine routes the guest's stdout/stderr (gp2xmenu prints a lot)
-           through these C streams, so every guest write then hits a dead handle -- which on a
-           double-click left firmware boot showing a black window while it worked fine from a
-           terminal. Bind them to NUL so the writes are discarded cleanly. ME_LOGFILE still overrides
-           DIAG; this only fixes the raw stdio handles. */
-        freopen("NUL", "w", stdout);
-        freopen("NUL", "w", stderr);
+    /* Fix up stdio ONLY when it's genuinely invalid. If stderr already has a valid handle -- a
+       console-subsystem build (me_unicorn.exe, magiceyes-dev.exe) always does, and so does any
+       launch with a redirect/pipe (`> log`, WSL interop) -- leave it alone, or we'd clobber the very
+       output we want. Previously this unconditionally AttachConsole()'d and, on failure (a console
+       build is ALREADY attached -> AttachConsole returns false), freopen'd NUL, silently discarding
+       the dev build's logs and any redirect. */
+    HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
+    int have_stdio = (herr != NULL && herr != INVALID_HANDLE_VALUE);
+    if (!have_stdio) {
+        /* GUI (-mwindows) bundle: no inherited handles. Attach to the launching terminal's console
+           if there is one (so --help/diagnostics show), else bind to NUL -- the engine routes the
+           guest's stdout/stderr through these C streams, and a dead handle on a double-click left
+           firmware boot showing a black window. */
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            freopen("CONOUT$", "w", stdout);
+            freopen("CONOUT$", "w", stderr);
+            freopen("CONIN$",  "r", stdin);
+        } else {
+            freopen("NUL", "w", stdout);
+            freopen("NUL", "w", stderr);
+        }
     }
     timeBeginPeriod(1);
     /* Opt out of BOTH EcoQoS execution-speed throttling AND background timer-resolution coarsening.

@@ -183,9 +183,12 @@ void me940_scan_fb(void) {
         g_fb_bpp = 32;                                               /* gpu940 output is 32bpp XRGB */
         g_fb_stride = (1u << wl) * 4u;                               /* row = (1<<wl) 32-bit words */
         g_fb_xoff = (1u << wl) > 320 ? ((1u << wl) - 320) / 2 : 0;   /* 320 centered in the pow2 buffer */
-        if (g_940_trace > 0)
+        static int logged = 0;
+        if (g_940_trace > 0 || !logged) {                            /* first hit always logged */
+            logged = 1;
             fprintf(stderr, "[940 showbuf] phys=%08x width=%u stride=%uB(32bpp) h=%u\n",
                     phys, 1u << wl, g_fb_stride, h);
+        }
         return;
     }
 }
