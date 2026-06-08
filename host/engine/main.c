@@ -208,6 +208,17 @@ static void *test_reload_thread(void *arg) {
     return NULL;
 }
 
+/* TEMP diagnostic (ME_TEST_FWBOOT=<device>): after a few seconds, drive me_firmware_boot_request
+   to reproduce the GUI "Firmware -> Boot" reload path on the console engine (with stderr trace). */
+static void *test_fwboot_thread(void *arg) {
+    (void)arg;
+    const char *dev = getenv("ME_TEST_FWBOOT");
+    for (int i = 0; i < 30 && !g_shutdown; i++) usleep(100000);
+    fprintf(stderr, "[test-fwboot] -> %s\n", dev);
+    if (!me_firmware_boot_request(dev)) fprintf(stderr, "[test-fwboot] device not staged\n");
+    return NULL;
+}
+
 #ifndef ME_VERSION
 #define ME_VERSION "0.2.0-dev"   /* release builds inject the tag via -DME_VERSION (build_bundle_win.sh) */
 #endif
@@ -456,6 +467,7 @@ int main(int argc, char **argv) {
        can run under ASan/valgrind. Reuses the exact reload path the viewer's File->Open uses. */
     pthread_t treload; int test_reload = getenv("ME_TEST_RELOAD") != NULL;
     if (test_reload) pthread_create(&treload, NULL, test_reload_thread, NULL);
+    pthread_t tfw; if (getenv("ME_TEST_FWBOOT")) pthread_create(&tfw, NULL, test_fwboot_thread, NULL);
 #ifdef ME_BUNDLED
     pthread_t vth; pthread_create(&vth, NULL, viewer_thread, NULL);
 #endif

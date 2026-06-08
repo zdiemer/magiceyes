@@ -16,6 +16,11 @@
 #endif
 
 static int is_file(const char *p) { struct stat s; return stat(p, &s) == 0 && (s.st_mode & S_IFREG); }
+/* A usable shared lib: a real, NON-EMPTY file. A firmware rootfs extracted on Linux has
+   symlinked libs (ld-linux.so.2 -> ld-2.x.so); on Windows those read as 0-byte broken links, so
+   a rootfs with a present gp2xmenu but a 0-byte linker is unbootable (black screen). stat() on
+   Linux follows the symlink (non-zero); on Windows the broken link is size 0 -> rejected. */
+static int is_loadable(const char *p) { struct stat s; return stat(p, &s) == 0 && (s.st_mode & S_IFREG) && s.st_size > 0; }
 
 /* Canonicalise to an absolute path. The caller chdir()s into the game's dir before loading,
    and gp2xmenu's ld.so opens /lib/... via the rootfs prefix, so a relative rootfs/menu path
@@ -62,6 +67,12 @@ static int try_rootfs(const char *cand, char *rootfs, char *menu, size_t cap) {
     char m[PATH_MAX];
     snprintf(m, sizeof m, "%s/usr/gp2x/gp2xmenu", cand);
     if (!is_file(m)) return 0;
+    /* require a usable dynamic linker -- rejects a Linux-symlinked fallback rootfs on Windows
+       (0-byte links) so the GUI grays Boot until a proper in-process install (deref'd) exists. */
+    char ld[PATH_MAX];
+    snprintf(ld, sizeof ld, "%s/lib/ld-linux.so.2", cand); int ok = is_loadable(ld);
+    if (!ok) { snprintf(ld, sizeof ld, "%s/lib/ld-linux.so.3", cand); ok = is_loadable(ld); }
+    if (!ok) return 0;
     abspath(cand, rootfs, cap);                          /* absolute: survives the loader's chdir */
     snprintf(menu, cap, "%s/usr/gp2x/gp2xmenu", rootfs);
     return 1;
@@ -99,6 +110,7 @@ int me_firmware_boot_request(const char *device) {
     me_rootfs_set(rootfs);
     g_firmware_mode = 1;
     snprintf(g_firmware_menu, sizeof g_firmware_menu, "%s", menu);
+    fprintf(DIAG, "magiceyes: firmware boot (GUI) %s -> %s (rootfs %s)\n", device, menu, rootfs);
     engine_request_reload(menu);
     return 1;
 }
