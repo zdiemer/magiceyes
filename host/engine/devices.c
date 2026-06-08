@@ -664,6 +664,11 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (g_device == 2 && off >= 0x4000 && off <= 0x44b8) {   /* Pollux MLC (Caanoo) */
         caanoo_mlc_write(off, (uint32_t)value); return;
     }
+    /* ARM940 second-core control (clock 0x904, DualCPU ctrl/int 0x3b40-0x3b48). The value is also
+       stored in the mapped MMSP2 RAM (so the game can read it back); here we just act on it. */
+    if (off == 0x904 || off == 0x3b40 || off == 0x3b42 || off == 0x3b48) {
+        me940_reg_write(off, (uint32_t)value); return;
+    }
     if (off == MMSP2_PALLT_A || off == MMSP2_PALLT_D) { gp2x_mmio_palette(off, (uint32_t)value); return; }
     if (off == MMSP2_EADRL || off == MMSP2_EADRH) {   /* MLC primary scanout base (single-buffer) */
         uint16_t lo = 0, hi = 0;

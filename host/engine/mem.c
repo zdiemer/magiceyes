@@ -140,6 +140,9 @@ static void ensure_pram(void) {
 int phys_in_pram(uint32_t phys, uint32_t len) {
     return phys >= PRAM_BASE && (uint64_t)phys + (len ? len : 1) <= (uint64_t)PRAM_BASE + PRAM_SIZE;
 }
+/* Allocate the shared physical-RAM backing without mapping it into any uc (the 940 self-test
+   loads firmware into it before the 940 uc exists). */
+void *pram_ensure(void) { ensure_pram(); return g_pram; }
 /* Host pointer for a GP2X physical address in the shared upper RAM (used by the 940 loader). */
 void *pram_host(uint32_t phys) {
     if (!g_pram || phys < PRAM_BASE || phys >= PRAM_BASE + PRAM_SIZE) return NULL;

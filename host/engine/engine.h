@@ -94,6 +94,14 @@ extern uint8_t *g_pram;
 int   phys_in_pram(uint32_t phys, uint32_t len);
 long  pram_map(uint32_t phys, uint32_t len, uint32_t hint);   /* map a window; returns guest addr */
 void *pram_host(uint32_t phys);                               /* host ptr for a phys addr, or NULL */
+void *pram_ensure(void);                                      /* allocate the pool (no uc mapping) */
+
+/* ---- me940.c: ARM940T second core (gpu940 etc.) ---- */
+void me940_reg_write(uint32_t off, uint32_t val);  /* trap of the 940 control regs (0x904/0x3b4x) */
+void me940_start(int bank);
+void me940_stop(void);                             /* MUST run before mem_reset frees g_pram */
+int  me940_active(void);
+void me940_selftest(const char *fw);               /* ME_940_SELFTEST standalone core check */
 uint32_t gread(uint32_t reg);
 void gwrite(uint32_t reg, uint32_t v);
 

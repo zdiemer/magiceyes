@@ -325,6 +325,7 @@ static void engine_reset_globals(void) {
    load failed. Used by both the GPEComp re-exec (case 11) and File->Open hot reload. */
 static uint32_t engine_reset_and_load(const char *path) {
     g_reloading = 1;
+    me940_stop();                                       /* halt the 2nd core before its RAM is freed */
     engine_stop_all_threads();                          /* join workers, close their ucs */
     if (g_th[0].uc) { uc_close(g_th[0].uc); g_th[0].uc = NULL; }
     mem_reset();                                        /* free guest RAM (every uc now closed) */
@@ -394,6 +395,10 @@ int main(int argc, char **argv) {
     }
     if (g_view_scale < 1) g_view_scale = 1;
     if (g_volume < 0) g_volume = 0; else if (g_volume > 100) g_volume = 100;
+
+    /* ME_940_SELFTEST=<gpu940 firmware>: exercise the ARM940 core standalone ([940-2]), then exit. */
+    { const char *st = getenv("ME_940_SELFTEST");
+      if (st && *st) { me940_selftest(st); me940_stop(); return 0; } }
 
     /* --install-firmware <file>: stage a .zip/.img into the per-device dir, then exit. */
     if (fw_install) return me_firmware_install(fw_install, fw_device);
