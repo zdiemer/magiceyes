@@ -43,6 +43,15 @@ void me_platform_init(void) {
         freopen("CONOUT$", "w", stdout);
         freopen("CONOUT$", "w", stderr);
         freopen("CONIN$",  "r", stdin);
+    } else {
+        /* No parent console (double-clicked from Explorer): stdout/stderr are INVALID handles in a
+           GUI-subsystem process. The engine routes the guest's stdout/stderr (gp2xmenu prints a lot)
+           through these C streams, so every guest write then hits a dead handle -- which on a
+           double-click left firmware boot showing a black window while it worked fine from a
+           terminal. Bind them to NUL so the writes are discarded cleanly. ME_LOGFILE still overrides
+           DIAG; this only fixes the raw stdio handles. */
+        freopen("NUL", "w", stdout);
+        freopen("NUL", "w", stderr);
     }
     timeBeginPeriod(1);
     /* Opt out of BOTH EcoQoS execution-speed throttling AND background timer-resolution coarsening.
