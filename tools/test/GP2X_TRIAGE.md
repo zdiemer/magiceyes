@@ -64,10 +64,17 @@ polling; audio disabled when `/dev/sequencer` (MIDI) open fails.
 never learns the framebuffer address. The fb lives in upper RAM: para3 maps `/dev/mem` @ `0x02000000`
 (32 MB) and uses **two buffers** — front `0x03100000` and back `0x03125900` (exactly one 320×240×16
 fb apart → double-buffered); a MESG blit solid-fills the back buffer each frame.
-*Tried:* watching the STL2 address pair and setting `g_fb_guest` — phys resolves (`0x03100000 → ok`)
-but it presents the **front** buffer while the game draws into the **back**, so still `black=1.00`.
-**Fix (next):** track both STL2 buffers and present the most-recently-written one (reuse the fb0/fb1
-`buf_score` "present whichever changed" logic), or follow STL2's per-frame flip. One fix → 5 titles.
+*Tried (reverted):* watch the STL2 address pair and *lock* present to it. The scanout `0x03100000`
+resolves and 4/5 flipped to playable/renders — but the captured frame is only a thin red line + a
+small white blit on black (`black≈0.99`): that STL2 buffer is just a **HUD/loading overlay**, not
+the game image. The MLC control reg `0x28da=0x4ab` shows **STL1 (region 1) active, 16bpp**, yet the
+title never writes region-1 OADR/EADR (`0x290e-0x2914`) — it programs an address via the
+`0x2924/0x2926/0x2928-0x2932` block (likely the MMSP2 **video/YUV overlay** or multi-region
+compositing the engine doesn't model). Presenting only the RGB STL2 scanout reports a misleading
+"playable" for a black screen, so the change was reverted.
+**Real fix:** emulate the MMSP2 video/overlay layer + multi-region MLC compositing (decode the
+`0x2916-0x2932` block against the MMSP2 datasheet, not just paeryn's STL1 subset). Substantial; the
+payoff is ~5 titles. This is **not** a simple double-buffer present.
 
 ### C. `kq` — blits to unmapped upper RAM, then a NULL deref
 Trace: `BLIT dst-unmapped: dst=03101000` — kq writes its framebuffer to phys `0x03101000` (upper
