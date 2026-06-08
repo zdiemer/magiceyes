@@ -55,13 +55,19 @@ the code **scans memory downward until it hits an unmapped page** rather than re
 **Fix:** disassemble around those PCs to see what the loop is walking (likely a memory probe that
 should terminate on a sentinel we're not providing). Medium-deep.
 
-### B. "Black but running" reversed-preacher family — *medium*, 4 titles, one engine
-`para3`, `game bIld 2`, `_-the reversed preacher II-_`, `_-The Reversed Preacher 3-_` — same Korean
-maker engine; render 1100–1300 frames at ~58 fps but all-black, high `mmsp2_rd` polling; audio is
-disabled when `/dev/sequencer` (MIDI) fails to open. Frames advance (present *is* happening) but the
-presented buffer is empty → they draw to a surface/format the present loop misses. **Fix:** trace
-with `ME_GP2X_MLCLOG` + `ME_FBWATCH` for the draw target (scanout base / pixel format / palette);
-one fix covers all four. `ttxbeta170706b` looks like the same class.
+### B. "Black but running" reversed-preacher family — *medium*, 4 titles + ttxbeta, one engine
+`para3`, `game bIld 2`, `_-the reversed preacher II-_`, `_-The Reversed Preacher 3-_` (+`ttxbeta170706b`)
+— same Korean "GameBuild" engine; render ~440 frames in 8 s at ~54 fps but all-black, high `mmsp2_rd`
+polling; audio disabled when `/dev/sequencer` (MIDI) open fails.
+*Decoded:* they drive the display through **MLC sub-region 2 (STL2)** scanout registers
+`0x292c–0x2932` (NOT region 1's OADR/EADR `0x290e-0x2914` that the engine watches), so the engine
+never learns the framebuffer address. The fb lives in upper RAM: para3 maps `/dev/mem` @ `0x02000000`
+(32 MB) and uses **two buffers** — front `0x03100000` and back `0x03125900` (exactly one 320×240×16
+fb apart → double-buffered); a MESG blit solid-fills the back buffer each frame.
+*Tried:* watching the STL2 address pair and setting `g_fb_guest` — phys resolves (`0x03100000 → ok`)
+but it presents the **front** buffer while the game draws into the **back**, so still `black=1.00`.
+**Fix (next):** track both STL2 buffers and present the most-recently-written one (reuse the fb0/fb1
+`buf_score` "present whichever changed" logic), or follow STL2's per-frame flip. One fix → 5 titles.
 
 ### C. `kq` — blits to unmapped upper RAM, then a NULL deref
 Trace: `BLIT dst-unmapped: dst=03101000` — kq writes its framebuffer to phys `0x03101000` (upper
