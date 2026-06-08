@@ -124,17 +124,31 @@ static void me940_st_code(uc_engine *uc, uint64_t addr, uint32_t size, void *use
     if (pc > g_st_pcmax) g_st_pcmax = pc;
     g_st_insns++;
 }
+/* Emulate load940: place the gpu940 firmware blob into shared RAM at phys 0x02000000 and start the
+   940 (bank 2). This is what the GP2X launcher's `load940 gpu940` step does; we do it inline so the
+   940 is running before the client game (egoboo) starts, without relying on the program-reload path.
+   Returns 1 if the 940 is running. */
+int me940_load_and_start(const char *fw) {
+    pram_ensure();
+    uint8_t *dst = pram_host(PRAM_BASE);
+    if (!dst) { fprintf(stderr, "[940] no shared RAM\n"); return 0; }
+    FILE *f = fopen(fw, "rb");
+    if (!f) { fprintf(stderr, "[940] cannot open firmware '%s'\n", fw); return 0; }
+    size_t n = fread(dst, 1, PRAM_SIZE, f); fclose(f);
+    uint32_t w0; memcpy(&w0, dst, 4);
+    fprintf(stderr, "[940] firmware '%s' (%zu bytes) -> phys %08x; first word=%08x\n",
+            fw, n, PRAM_BASE, w0);
+    if ((w0 >> 24) != 0xeau) {   /* not a raw ARM reset vector (b ...) -- refuse to run garbage */
+        fprintf(stderr, "[940] '%s' is not a raw ARM940 firmware (first word %08x); not starting\n", fw, w0);
+        return 0;
+    }
+    me940_start(2);
+    return g_940_running;
+}
+
 void me940_selftest(const char *fw) {
     fprintf(stderr, "[940 selftest] loading firmware '%s'\n", fw);
-    pram_ensure();                                 /* allocate the shared upper RAM (no 920 uc needed) */
-    uint8_t *dst = pram_host(PRAM_BASE);
-    FILE *f = fopen(fw, "rb");
-    if (!f || !dst) { fprintf(stderr, "[940 selftest] cannot open firmware / no pram\n"); return; }
-    size_t n = fread(dst, 1, PRAM_SIZE, f); fclose(f);
-    fprintf(stderr, "[940 selftest] %zu bytes at phys %08x; first word=%08x\n",
-            n, PRAM_BASE, *(uint32_t *)dst);
-    me940_start(2);
-    if (!g_940_running) { fprintf(stderr, "[940 selftest] FAILED to start\n"); return; }
+    if (!me940_load_and_start(fw)) { fprintf(stderr, "[940 selftest] FAILED to start\n"); return; }
     uc_hook h; uc_hook_add(g_uc940, &h, UC_HOOK_CODE, me940_st_code, NULL, 0, PRAM_SIZE - 1);
     struct timespec ts = { 0, 200 * 1000 * 1000 }; nanosleep(&ts, NULL);   /* let it run ~200ms */
     me940_stop();

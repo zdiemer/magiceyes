@@ -101,7 +101,9 @@ void me940_reg_write(uint32_t off, uint32_t val);  /* trap of the 940 control re
 void me940_start(int bank);
 void me940_stop(void);                             /* MUST run before mem_reset frees g_pram */
 int  me940_active(void);
+int  me940_load_and_start(const char *fw);         /* inline load940: firmware -> shared RAM, start */
 void me940_selftest(const char *fw);               /* ME_940_SELFTEST standalone core check */
+extern char g_940_firmware[];                      /* set by the loader if a title runs load940 */
 uint32_t gread(uint32_t reg);
 void gwrite(uint32_t reg, uint32_t v);
 

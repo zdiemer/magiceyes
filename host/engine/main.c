@@ -472,6 +472,10 @@ int main(int argc, char **argv) {
     uint32_t entry = 0;
     if (bin) {
         chdir_to_dir_of(bin);                 /* run from the game's dir so its Data/ resolves */
+        /* Title uses the ARM940 (its launcher ran `load940 <fw>`): bring the second core up inline
+           BEFORE the client game, mirroring the GP2X launcher's load940-then-game order. Avoids the
+           program-reload path; the real gpu940 firmware then renders from egoboo's shared commands. */
+        if (g_940_firmware[0]) me940_load_and_start(g_940_firmware);
         entry = engine_load_game(bin);
         if (g_trace) fprintf(stderr, "entry=%08x brk=%08x\n", entry, g_brk);
         if (!entry) {
@@ -543,6 +547,7 @@ int main(int argc, char **argv) {
         if (!entry) me_usleep(16000);          /* idle: wait for File->Open or the window to close */
     }
     g_shutdown = 1; g_exit = 1;
+    me940_stop();                                          /* halt the second core, if running */
     if (me_report_active()) me_report_flush_json(NULL);   /* final structured run report */
 #ifdef ME_BUNDLED
     if (g_shm) g_shm->quit = 1;            /* engine done -> end the viewer loop, then it exit()s */

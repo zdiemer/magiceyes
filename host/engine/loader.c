@@ -26,6 +26,36 @@ char g_launch_args[8][256];
 int  g_launch_nargs = 0;
 #define ME_SCRIPT_SEP " \t\r\n;|&\"'"
 
+/* If a launcher runs `load940 <firmware>` (the GP2X ARM940 loader), record the firmware path so the
+   engine can bring up the second core inline (see me940_load_and_start) before the client game runs.
+   Empty when the title doesn't use the 940. */
+char g_940_firmware[PATH_MAX] = {0};
+static const char *path_base(const char *p);   /* defined below */
+static int file_is_elf(const char *path);      /* defined below */
+static void scan_940_firmware(const char *gpe, const char *dir) {
+    FILE *f = fopen(gpe, "r"); if (!f) return;
+    char line[512], *save;
+    while (fgets(line, sizeof line, f)) {
+        /* Only the COMMAND (first token of the line) counts -- not load940 appearing as an arg to
+           `chmod a+x egoboo load940 stop940`. */
+        char *t = strtok_r(line, ME_SCRIPT_SEP, &save);
+        if (!t) continue;
+        const char *b = t; while (*b == '.' || *b == '/' || *b == '\\') b++;
+        if (strcasecmp(path_base(b), "load940")) continue;
+        char *fw = strtok_r(NULL, ME_SCRIPT_SEP, &save);   /* the firmware arg */
+        if (!fw) continue;
+        const char *fb = fw; while (*fb == '.' || *fb == '/' || *fb == '\\') fb++;
+        char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", dir, fb);
+        /* the firmware is a RAW 940 blob (not an ELF, not the stop940/egoboo binaries) */
+        struct stat st;
+        if (!stat(cand, &st) && !file_is_elf(cand)) {
+            snprintf(g_940_firmware, sizeof g_940_firmware, "%s", cand);
+            fclose(f); return;
+        }
+    }
+    fclose(f);
+}
+
 /* recursive .gpe scan (depth-limited): a folder/zip usually wraps the game in subdirs. */
 struct gpelist { char paths[16][PATH_MAX]; int n; };
 static void scan_gpe(const char *dir, int depth, struct gpelist *gl) {
@@ -108,6 +138,8 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", gpe);
     char *s1 = strrchr(dir, '/'), *s2 = strrchr(dir, '\\'), *s = s1 > s2 ? s1 : s2;
     if (s) *s = 0; else snprintf(dir, sizeof dir, ".");
+
+    scan_940_firmware(gpe, dir);   /* note an ARM940 (load940 gpu940) launch for the engine */
 
     /* the runnable executables that live beside the launcher (immediate subdirs included) */
     struct gpelist elf; elf.n = 0;
@@ -302,6 +334,7 @@ static int extract_zip(const char *zip, char *destbuf, size_t cap) {
 
 const char *resolve_input(const char *in, char *out, size_t cap) {
     g_launch_nargs = 0;   /* fresh per load; populated if we follow a launcher script with args */
+    g_940_firmware[0] = 0;   /* fresh per load; set if the launcher runs load940 */
     struct stat st;
     if (stat(in, &st)) { fprintf(stderr, "magiceyes: '%s': %s\n", in, strerror(errno)); return NULL; }
     if (S_ISDIR(st.st_mode)) return resolve_dir(in, out, cap);
