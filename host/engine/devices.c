@@ -229,6 +229,8 @@ uint32_t buf_hash(uint32_t g) {
 /* present whichever fb the game just rendered to (its content changed since last
    frame); fall back to the non-blank one for a fully static screen. */
 void present_active(void) {
+    if (gl_owns_screen()) return;   /* a GLES title (offload) owns shm; don't let the hybrid title's
+                                       real-libSDL 2D framebuffer present alternate with it -> flicker */
     if (me940_active()) {   /* gpu940 client: present follows the 940's rendered framebuffer */
         static int n = 0; if (++n % 12 == 0) me940_scan_fb();
     }

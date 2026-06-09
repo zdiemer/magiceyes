@@ -44,12 +44,15 @@
    ME_GL_NOOFFLOAD falls back to the in-shim software rasterizer below. */
 static long me_sc1(long nr, long a0) {
     register long r7 __asm__("r7") = nr; register long r0 __asm__("r0") = a0;
-    __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7) : "memory"); return r0;
+    /* "swi 0" not "svc 0": same encoding (0xEF000000), but the legacy mnemonic is accepted by BOTH
+       the GPH SDK gcc-4.0.2 assembler (OABI build) and modern gas (EABI build); "svc" is rejected
+       by the old assembler. The engine dispatches r7 as the syscall nr for either ABI. */
+    __asm__ volatile("swi 0" : "+r"(r0) : "r"(r7) : "memory"); return r0;
 }
 static long me_sc2(long nr, long a0, long a1) {
     register long r7 __asm__("r7") = nr; register long r0 __asm__("r0") = a0;
     register long r1 __asm__("r1") = a1;
-    __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7), "r"(r1) : "memory"); return r0;
+    __asm__ volatile("swi 0" : "+r"(r0) : "r"(r7), "r"(r1) : "memory"); return r0;
 }
 /* Record an unsupported GLES feature into the engine's structured run report by writing a sentinel
    line to stderr (the engine ingests it -- see glcmd.h). Gated on ME_DEBUG so a normal run does no

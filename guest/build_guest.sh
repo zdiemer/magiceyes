@@ -50,12 +50,18 @@ echo "building libSDL-1.2.so.0 ..."
 $GCC $CFLAGS -I "$BLD/inc/SDL" -I "$BLD/inc" -I "$BLD" \
   -Wl,-soname,libSDL-1.2.so.0 -o "$BLD/libSDL-1.2.so.0" "$BLD/fakesdl.c" -lrt -ldl -lpthread
 
+# fake-GLES offload shim (OABI Caanoo titles -- e.g. the Deicide-pack Propis -- link the firmware's
+# real Pollux GLES driver, which we don't emulate; stage_rootfs.sh overlays this over those sonames).
+# Self-contained (own Khronos types); forwards each draw to the engine GL backend (glcmd.h syscalls).
+echo "building libGLESv1_CM.so (fake-GLES offload) ..."
+$GCC $CFLAGS -std=gnu99 -I "$BLD" -Wl,-soname,libGLESv1_CM.so -o "$BLD/libGLESv1_CM.so" "$BLD/fakegles.c" -lm -lrt
+
 for soname in libinkadrm.so.0 libdrmcode.so.0; do
   echo "building $soname ..."
   $GCC $CFLAGS -Wl,-soname,"$soname" -o "$BLD/$soname" "$BLD/drmstub.c"
 done
 
-cp -f "$BLD/libSDL-1.2.so.0" "$BLD/libinkadrm.so.0" "$BLD/libdrmcode.so.0" "$OUT/"
+cp -f "$BLD/libSDL-1.2.so.0" "$BLD/libGLESv1_CM.so" "$BLD/libinkadrm.so.0" "$BLD/libdrmcode.so.0" "$OUT/"
 echo "built -> $OUT/"
 ls -la "$OUT"
 

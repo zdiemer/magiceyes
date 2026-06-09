@@ -48,6 +48,23 @@ for base in libinkadrm libdrmcode; do
 done
 echo "staged DRM gate stubs (libinkadrm/libdrmcode)"
 
+# fake-GLES offload over the firmware's REAL Pollux GLES driver. OABI Caanoo titles (e.g. the
+# Deicide-pack Propis) link libopengles_lite / libglport, which drive the unemulated Pollux 3D GPU
+# -> black. Our shim forwards each draw to the engine's GL backend (host OpenGL or software). Cover
+# every GLES/EGL soname a Caanoo title's DT_NEEDED can ask for; the firmware ones (libopengles_lite,
+# libglport) exist already, the Khronos-named ones we create so the loader resolves them.
+GLES="$REPO/bin/guest/libGLESv1_CM.so"
+if [ -f "$GLES" ]; then
+  for name in libopengles_lite.so libopengles_lite.so.0 libopengles_lite.so.0.0.0 \
+              libglport.so libglport.so.0 libglport.so.0.0.0 \
+              libGLESv1_CM.so libOpenEGL.so libEGL.so libGLESv2.so; do
+    cp -f "$GLES" "$DST/lib/$name"
+  done
+  echo "staged fake-GLES offload over Pollux GLES sonames"
+else
+  echo "WARNING: no fake-GLES at $GLES (build with guest/build_guest.sh); Caanoo GLES titles stay black"
+fi
+
 echo "done. files:"
 ls "$DST/lib" | wc -l
 echo "ME_GP2X_ROOTFS=$DST"

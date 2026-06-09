@@ -48,5 +48,10 @@ if [ -d "$RWIN" ]; then
   for base in libinkadrm libdrmcode; do
     s="$REPO/bin/guest/$base.so.0"; [ -f "$s" ] && for n in "$base.so.0" "$base.so.0.0.0"; do cp -f "$s" "$RWIN/$n"; done
   done
-  echo "refreshed DRM gate stubs -> $RWIN (real libSDL kept; shim not overlaid)"
+  # fake-GLES offload over the Pollux GLES sonames (OABI Caanoo titles -> engine GL backend)
+  GL="$REPO/bin/guest/libGLESv1_CM.so"
+  if [ -f "$GL" ]; then for n in libopengles_lite.so libopengles_lite.so.0 libopengles_lite.so.0.0.0 \
+       libglport.so libglport.so.0 libglport.so.0.0.0 libGLESv1_CM.so libOpenEGL.so libEGL.so libGLESv2.so; do
+       cp -f "$GL" "$RWIN/$n"; done; fi
+  echo "refreshed DRM gate stubs + fake-GLES -> $RWIN (real libSDL kept; shim not overlaid)"
 fi

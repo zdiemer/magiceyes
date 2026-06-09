@@ -100,6 +100,8 @@ static int gpu_init(void) {
     g_ok = 0;
     if (!SDL_WasInit(SDL_INIT_VIDEO)) return 0;          /* viewer hasn't SDL_Init'd yet */
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);   /* keep dest alpha = GLES coverage, for compositing
+                                                    the GL layer over the title's 2D SDL background */
     g_win = SDL_CreateWindow("magiceyes-gl", 0, 0, g_w, g_h, SDL_WINDOW_HIDDEN | SDL_WINDOW_OPENGL);
     if (!g_win) { fprintf(DIAG, "glgpu: SDL_CreateWindow failed: %s\n", SDL_GetError()); return 0; }
     g_ctx = SDL_GL_CreateContext(g_win);
@@ -213,17 +215,31 @@ void glgpu_draw(uint32_t desc_ptr) {
     p_glDrawArrays(d.mode, 0, n);
 }
 
+/* The title's 2D SDL background (real libSDL -> /dev/fb0), RGB565, for compositing under the GL
+   layer. devices.c owns these; a hybrid Caanoo title (menu) draws its background here and the menu
+   items via GLES on a transparent clear. */
+extern uint32_t g_fb_guest;
+extern uint32_t g_fb_stride;
+
 void glgpu_present(void) {
     if (g_ok != 1 || !g_shm || !g_rb) return;
     SDL_GL_MakeCurrent(g_win, g_ctx);
     p_glReadPixels(0, 0, g_w, g_h, GL_RGBA, GL_UNSIGNED_BYTE, g_rb);
+    const uint16_t *bg = g_fb_guest ? (const uint16_t *)guest_to_host(g_fb_guest) : NULL;
+    int bgpx = (int)(g_fb_stride ? g_fb_stride / 2 : 320);   /* SDL fb px per row */
     uint16_t *dst = (uint16_t *)g_shm->pixels;
     for (int y = 0; y < g_h; y++) {
         const uint8_t *src = g_rb + (size_t)(g_h - 1 - y) * g_w * 4;   /* GL origin is bottom-left: flip */
         uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
+        const uint16_t *bgrow = (bg && y < 240) ? bg + (size_t)y * bgpx : NULL;
         for (int x = 0; x < g_w; x++) {
-            uint8_t r = src[x*4+0], g = src[x*4+1], b = src[x*4+2];
-            dp[x] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+            uint8_t a = src[x*4+3];
+            if (a >= 24 || !bgrow || x >= bgpx) {            /* GL covered this pixel -> show GL */
+                uint8_t r = src[x*4+0], g = src[x*4+1], b = src[x*4+2];
+                dp[x] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+            } else {                                          /* transparent GL -> SDL 2D background */
+                dp[x] = bgrow[x];
+            }
         }
     }
     g_shm->width = g_w; g_shm->height = g_h; g_shm->frame_seq++;
@@ -245,4 +261,13 @@ static int use_gpu(void) {
 void glr_resize(int w, int h)   { glgpu_resize(w, h); glsw_resize(w, h); }   /* keep both sized */
 void glr_clear(uint32_t packed) { if (use_gpu()) glgpu_clear(packed);   else glsw_clear(packed); }
 void glr_draw(uint32_t desc)    { if (use_gpu()) glgpu_draw(desc);      else glsw_draw(desc); }
-void glr_present(void)          { if (use_gpu()) glgpu_present();       else glsw_present(); }
+
+/* When a GLES title (fakegles offload) is presenting, it owns the shm framebuffer. A hybrid Caanoo
+   title ALSO drives the real libSDL, whose 2D framebuffer present (present_active) would otherwise
+   alternate with the GL output -> flicker. Gate present_active on this while GL is recently active. */
+static double g_gl_last_present = 0;
+int gl_owns_screen(void) { return g_gl_last_present != 0 && (host_now() - g_gl_last_present) < 0.3; }
+void glr_present(void) {
+    if (use_gpu()) glgpu_present(); else glsw_present();
+    g_gl_last_present = host_now();
+}
