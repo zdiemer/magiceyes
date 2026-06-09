@@ -58,7 +58,7 @@ static void alloc_bufs(void) {
     g_buf[1] = gl_singlebuf() ? g_buf[0] : calloc(n, 4);
     g_back = 0; g_glcbuf = g_buf[0];
 }
-void glr_resize(int w, int h) {
+void glsw_resize(int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (w > GP2XSHM_MAXW) w = GP2XSHM_MAXW;
     if (h > GP2XSHM_MAXH) h = GP2XSHM_MAXH;
@@ -69,13 +69,13 @@ void glr_resize(int w, int h) {
 }
 static void ensure_cbuf(void) { if (!g_glcbuf) alloc_bufs(); }
 
-void glr_clear(uint32_t packed) {
+void glsw_clear(uint32_t packed) {
     ensure_cbuf(); if (!g_glcbuf) return;
     int n = g_glw * g_glh;
     for (int i = 0; i < n; i++) g_glcbuf[i] = packed;
 }
 
-void glr_present(void) {
+void glsw_present(void) {
     ensure_cbuf();
     if (!g_shm || !g_glcbuf) return;
     uint16_t *dst = (uint16_t *)g_shm->pixels;
@@ -269,7 +269,7 @@ static int fast_quad(const struct gl_draw *d, const uint32_t *tx, const Vtx *v, 
    regions; copy it flat so the rasterizer can index it). Serialized by the syscall biglock. */
 static uint32_t *g_texbuf = NULL; static size_t g_texbuf_cap = 0;
 
-void glr_draw(uint32_t desc_ptr) {
+void glsw_draw(uint32_t desc_ptr) {
     ensure_cbuf(); if (!g_glcbuf) return;
     struct gl_draw dd;
     if (read_guest(&dd, desc_ptr, sizeof dd) != 0) return;   /* descriptor unmapped */
