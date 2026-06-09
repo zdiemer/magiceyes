@@ -3,9 +3,9 @@
  * (glraster.c). gl_draw is fixed-function GLES1.1 state, which maps ~1:1 onto desktop GL's
  * fixed-function pipeline (glLoadMatrixf / gl*Pointer / glEnable / glDrawArrays).
  *
- * Bundle-only (needs SDL2 + a GL context); the standalone/headless engine keeps software. Enabled
- * with ME_GL_BACKEND=gpu (software stays the default until proven). The public glr_* below dispatch
- * to the GPU path when it inits OK, else to the software glsw_*. The GL context is created lazily on
+ * Bundle-only (needs SDL2 + a GL context); the standalone/headless engine keeps software. This is
+ * the DEFAULT backend for the bundled viewer (opt out with ME_GL_BACKEND=sw). The public glr_* below
+ * dispatch to the GPU path when it inits OK, else to the software glsw_*. The GL context is created lazily on
  * the first call's thread and kept current there (GLES titles render from one thread). */
 #include "engine.h"
 #include "glcmd.h"
@@ -18,9 +18,17 @@ void glsw_clear(uint32_t packed);
 void glsw_draw(uint32_t desc_ptr);
 void glsw_present(void);
 
+/* The host-GPU backend is the DEFAULT for GL-offload (GLES) titles (validated on Propis OABI+EABI
+   and Rhythmos). It still falls back to software automatically when a GL context can't be created
+   (see use_gpu()), so headless/no-GL hosts are unaffected. Opt out explicitly with ME_GL_BACKEND=sw
+   (software|cpu|soft|0|off also accepted); ME_GL_BACKEND=gpu forces it on. */
 static int gpu_wanted(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("ME_GL_BACKEND"); v = (e && !strcmp(e, "gpu")) ? 1 : 0; }
+    if (v < 0) {
+        const char *e = getenv("ME_GL_BACKEND");
+        v = (e && (!strcmp(e, "sw") || !strcmp(e, "software") || !strcmp(e, "cpu") ||
+                   !strcmp(e, "soft") || !strcmp(e, "0") || !strcmp(e, "off"))) ? 0 : 1;
+    }
     return v;
 }
 
