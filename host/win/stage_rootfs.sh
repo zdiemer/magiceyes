@@ -7,8 +7,10 @@
 # cannot be accessed by the system"), so the engine's MinGW runtime can't load them.
 #
 # This produces a dereferenced copy (real files, no symlinks) under assets/rootfs-win/ that the
-# native engine points ME_GP2X_ROOTFS at, and stages our fake-SDL shim in place of the device
-# libSDL so dynamic SDL games render into the engine's shm framebuffer (the W&W/Odonata path).
+# native engine points ME_GP2X_ROOTFS at. Dynamic SDL games run on the firmware's OWN real libSDL
+# (it renders through the engine's emulated /dev/fb0 + MMSP2/Pollux registers, exactly like the
+# firmware menu) -- we no longer overlay the brittle fake-SDL shim here. Only the Inka DRM gate is
+# stubbed. The shim stays for the qemu backend (which can't emulate the hardware).
 #
 # Run from WSL/Linux (symlinks resolve there): bash host/win/stage_rootfs.sh
 set -eu
@@ -27,15 +29,10 @@ for d in lib usr/lib etc; do
   cp -RL "$SRC/$d/." "$DST/$d/" 2>/dev/null || true
 done
 
-# Stage the fake-SDL shim in place of the device libSDL so the guest ld.so loads OURS:
-# it renders into the gp2x_fb shm the viewer reads (instead of the device's Pollux/MMSP2 SDL).
-SHIM="$REPO/bin/guest/libSDL-1.2.so.0"
-if [ -f "$SHIM" ]; then
-  for name in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do cp -f "$SHIM" "$DST/lib/$name"; done
-  echo "staged fake-SDL shim -> $DST/lib/libSDL-1.2.so.0"
-else
-  echo "WARNING: no shim at $SHIM (build it with guest/build_guest.sh); dynamic SDL games won't render"
-fi
+# NOTE: we deliberately keep the firmware's REAL libSDL (cp -RL above already dereferenced it). The
+# real Wiz/GP2X libSDL renders through the engine's emulated framebuffer + MMSP2/Pollux registers
+# (the same path the firmware menu uses) and matches the exact ABI the firmware's SDL_image/_ttf/
+# _mixer were built against -- so no white-rectangle/blit corruption. (Do NOT overlay the shim.)
 
 # Stage the DRM gate stubs over the firmware's real libinkadrm/libdrmcode. The real
 # libinkadrm getserial() reads the handset serial from /dev/i2c-0 and, with no device,

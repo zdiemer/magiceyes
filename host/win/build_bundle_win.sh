@@ -38,19 +38,15 @@ $CC -O2 -Wall "${SUBSYS[@]}" "${DEFS[@]}" -o "$OUT" \
 cp -f "$SDL/bin/SDL2.dll" "$REPO/bin/"
 echo "built $OUT (+ SDL2.dll)"
 
-# Keep the fake-SDL shim shadowed into rootfs-win in sync with the just-built bin/guest shim. The
-# bundle loads its shim from assets/rootfs-win/lib (via stage_rootfs.sh), NOT from bin/guest -- so
-# if that staged copy goes stale relative to the shim source, the bundle silently runs an old shim
-# (this was the Deicide 3 black-screen regression: a pre-libpng-IMG_Load shim in rootfs-win).
-SHIM="$REPO/bin/guest/libSDL-1.2.so.0"; RWIN="$REPO/assets/rootfs-win/lib"
-if [ -f "$SHIM" ] && [ -d "$RWIN" ]; then
-  [ "$REPO/guest/src/fakesdl.c" -nt "$SHIM" ] && \
-    echo "WARNING: guest/src/fakesdl.c is newer than $SHIM -- rebuild the shim (guest/build_guest.sh) before shipping"
-  for n in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do cp -f "$SHIM" "$RWIN/$n"; done
+# Keep the DRM gate stubs in rootfs-win in sync with the just-built bin/guest stubs. We no longer
+# overlay the fake-SDL shim here -- dynamic titles run on the firmware's REAL libSDL that
+# stage_rootfs.sh leaves in place (rendered via the engine's emulated framebuffer + MMSP2/Pollux),
+# which fixes the shim's blit/surface ABI corruption. Only libinkadrm/libdrmcode are stubbed (the
+# Inka DRM gate). (The shim is still built into bin/guest for the qemu backend.)
+RWIN="$REPO/assets/rootfs-win/lib"
+if [ -d "$RWIN" ]; then
   for base in libinkadrm libdrmcode; do
     s="$REPO/bin/guest/$base.so.0"; [ -f "$s" ] && for n in "$base.so.0" "$base.so.0.0.0"; do cp -f "$s" "$RWIN/$n"; done
   done
-  echo "re-staged fake-SDL shim + DRM stubs -> $RWIN"
-elif [ -d "$RWIN" ]; then
-  echo "WARNING: no $SHIM -- rootfs-win shim NOT refreshed (build it: MAGICEYES_SDK=... guest/build_guest.sh)"
+  echo "refreshed DRM gate stubs -> $RWIN (real libSDL kept; shim not overlaid)"
 fi
