@@ -7,12 +7,22 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 VERSION="${1:-${MAGICEYES_VERSION:-0.2.0-dev}}"
 [ -f "$REPO/bin/magiceyes.exe" ] || { echo "no bin/magiceyes.exe (run build_bundle_win.sh first)"; exit 1; }
 [ -f "$REPO/bin/SDL2.dll" ]      || { echo "no bin/SDL2.dll"; exit 1; }
-# The FOSS EABI rootfs (Patissier + all Caanoo titles) ships in the bundle so those titles run with
-# zero setup. It is built by stage_rootfs_eabi.sh (WSL, EABI_REDIST=1 so no proprietary fonts).
+# The EABI rootfs (Patissier + all Caanoo titles) ships in the bundle so those titles run with zero
+# setup. Built by stage_rootfs_eabi.sh (WSL). We add the Caanoo system fonts below.
 [ -f "$REPO/assets/rootfs-eabi/lib/ld-linux.so.3" ] || {
-  echo "no assets/rootfs-eabi (run: EABI_REDIST=1 bash host/win/stage_rootfs_eabi.sh)"; exit 1; }
-# The tiny OABI shim (GPH-SDK-built) is overlaid onto an installed Wiz/F100/F200 firmware so its
-# titles render into our shm framebuffer; the firmware install flow (firmware.c) copies it.
+  echo "no assets/rootfs-eabi (run: bash host/win/stage_rootfs_eabi.sh)"; exit 1; }
+# The OABI runtime (firmware glibc-2.3.6 + the device's REAL libSDL + helpers, deref'd for native
+# Windows) ships too, so Wiz/GP2X dynamic titles run firmware-free on the real libSDL. Built by
+# stage_rootfs.sh from a firmware image. (The firmware is freely redistributable; see
+# third_party/LICENSES/firmware-redistribution.txt.)
+[ -f "$REPO/assets/rootfs-win/lib/ld-linux.so.2" ] || {
+  echo "no assets/rootfs-win (run: bash host/win/stage_rootfs.sh)"; exit 1; }
+# Caanoo system fonts (QType4/DGE TrueType): freely redistributable, ship them so Caanoo title text
+# works without a firmware install.
+CAANOO_FONTS="$REPO/assets/caanoo-ref/usr/gp2x"
+[ -d "$CAANOO_FONTS" ] || { echo "no Caanoo fonts at $CAANOO_FONTS (run host/win/extract_caanoo_fw.sh)"; exit 1; }
+# The tiny OABI shim (GPH-SDK-built) is still overlaid onto an installed firmware for the qemu
+# backend / firmware-menu DRM gate; the firmware install flow (firmware.c) copies it.
 for f in libSDL-1.2.so.0 libinkadrm.so.0 libdrmcode.so.0; do
   [ -f "$REPO/bin/guest/$f" ] || { echo "no bin/guest/$f (run guest/build_guest.sh)"; exit 1; }
 done
@@ -22,8 +32,16 @@ DIST="$REPO/dist"; STAGE="$DIST/$NAME"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp "$REPO/bin/magiceyes.exe" "$REPO/bin/SDL2.dll" "$STAGE/"
 [ -f "$REPO/LICENSE" ] && cp "$REPO/LICENSE" "$STAGE/"
-echo "bundling FOSS rootfs-eabi ($(du -sh "$REPO/assets/rootfs-eabi" | cut -f1))"
+echo "bundling rootfs-eabi ($(du -sh "$REPO/assets/rootfs-eabi" | cut -f1))"
 cp -R "$REPO/assets/rootfs-eabi" "$STAGE/rootfs-eabi"
+# Stage the Caanoo system fonts into a device-scoped caanoo-fonts\ dir so /usr/gp2x/*.ttf resolves
+# firmware-free (caanoo_font_overlay, syscalls.c) -- a Caanoo title can be OABI or EABI, so the font
+# lives outside either rootfs.
+mkdir -p "$STAGE/caanoo-fonts/usr/gp2x"
+cp -f "$CAANOO_FONTS"/*.ttf "$STAGE/caanoo-fonts/usr/gp2x/"
+echo "bundling Caanoo fonts ($(du -sh "$CAANOO_FONTS" | cut -f1), $(ls "$CAANOO_FONTS"/*.ttf | wc -l) ttf)"
+echo "bundling rootfs-win OABI runtime ($(du -sh "$REPO/assets/rootfs-win" | cut -f1), real libSDL)"
+cp -R "$REPO/assets/rootfs-win" "$STAGE/rootfs-win"
 mkdir -p "$STAGE/overlay-oabi"
 cp "$REPO/bin/guest/libSDL-1.2.so.0" "$REPO/bin/guest/libinkadrm.so.0" \
    "$REPO/bin/guest/libdrmcode.so.0" "$STAGE/overlay-oabi/"
@@ -42,29 +60,32 @@ Controls  D-pad = arrows;  A/B/X/Y = Z/X/A/S;  Start = Enter;  Select = Backspac
           L/R = Q/W;  Fullscreen = F11;  Screenshot = F12;  Quit = Esc.
 
 Notes
-  - Keep SDL2.dll and the rootfs-eabi\\ and overlay-oabi\\ folders next to magiceyes.exe.
+  - Keep SDL2.dll and the rootfs-eabi\\, rootfs-win\\, caanoo-fonts\\ and overlay-oabi\\
+    folders next to magiceyes.exe.
   - F12 saves a screenshot to screenshots\\ next to magiceyes.exe.
 
-What runs out of the box (no setup)
+Games run with no setup -- no firmware install needed
   - GP2X static games and GPEComp self-extractors.
-  - EABI homebrew (e.g. Patissier) and Caanoo titles -- these use the bundled FOSS
-    rootfs-eabi\\ runtime.
+  - Wiz / GP2X commercial + dynamic titles run on the bundled rootfs-win\\ runtime (the real
+    device libSDL).
+  - EABI homebrew and Caanoo titles (incl. their on-screen text) run on the bundled
+    rootfs-eabi\\ runtime + Caanoo fonts.
 
-What needs official device firmware (you supply it, legally obtained)
-  - Wiz / commercial titles need the device's system libraries; install the firmware via
-    Firmware > Install firmware (a Wiz, or GP2X F100/F200, firmware .zip/.img), or run
-    magiceyes.exe --install-firmware <firmware.zip|.img>. magiceyes tells you which firmware
-    a title needs when you open it.
-  - Caanoo titles run without firmware, but on-screen TEXT needs the Caanoo system fonts;
-    install the Caanoo firmware the same way for correct text.
+What still needs official device firmware (you supply it, legally obtained)
+  - Booting the device's own firmware MENU (Firmware > Boot firmware): install a Wiz / GP2X
+    F100/F200 / Caanoo firmware via Firmware > Install firmware (or
+    magiceyes.exe --install-firmware <firmware.zip|.img>). Running games does not need this.
 
 magiceyes is free software under the GNU GPL v2 (see LICENSE); the complete source is at
 https://github.com/zdiemer/magiceyes . It statically links a fork of the Unicorn CPU
 emulator (qemu TCG). SDL2 is under the zlib license. The bundled rootfs-eabi\\ contains
-unmodified Free Software libraries from Debian (glibc, libstdc++, SDL 1.2, libpng,
-freetype, etc.) under the GNU LGPL/GPL and compatible licenses; their corresponding source
-is available from Debian (archive.debian.org, "wheezy" armel) and on written request to the
-project. magiceyes ships no device firmware or game data -- supply your own, legally obtained.
+unmodified Free Software libraries from Debian (glibc, libstdc++, SDL 1.2, libpng, freetype,
+etc.) under the GNU LGPL/GPL; their source is available from Debian (archive.debian.org,
+"wheezy" armel). The bundled rootfs-win\\ runtime and Caanoo fonts come from the GP2X / Wiz /
+Caanoo device firmware, which Game Park Holdings distributed freely; the libraries are LGPL
+(SDL, glibc) and the GPH SDK material is under a permissive zlib-style license (see
+third_party/LICENSES/). magiceyes ships no proprietary firmware UI (gp2xmenu/themes) or game
+data -- supply your own, legally obtained, to boot the firmware menu.
 EOF
 
 ( cd "$DIST" && rm -f "$NAME.zip" && python3 -m zipfile -c "$NAME.zip" "$NAME" )

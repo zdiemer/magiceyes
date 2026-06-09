@@ -149,28 +149,40 @@ int me_rootfs_select(const char *interp) {
         }
     return 0;
 }
-/* Caanoo system fonts (/usr/gp2x/*.ttf) are firmware-only -- the shipped FOSS rootfs-eabi has
-   none. A Caanoo title links its libs from rootfs-eabi but opens those fonts by absolute path, so
-   we overlay JUST that data dir from an installed Caanoo firmware (Firmware -> Install firmware).
-   Strictly prefix-scoped to /usr/gp2x: never /lib or /usr/lib, or a Caanoo title would pull the
-   firmware's glibc-2.3.6 under the Debian ld-linux.so.3 it's actually linked to -> ABI breakage. */
+/* Caanoo system fonts (/usr/gp2x/*.ttf): a Caanoo title links its libs from rootfs-eabi but opens
+   the QType4/DGE TrueType fonts by absolute path. The shipped bundle now stages these (freely
+   redistributable) fonts into rootfs-eabi/usr/gp2x, so they resolve via g_rootfs with no firmware.
+   This overlay additionally prefers an INSTALLED Caanoo firmware's copy when present (e.g. the user
+   booted the firmware menu). Strictly prefix-scoped to /usr/gp2x: never /lib or /usr/lib, or a
+   Caanoo title would pull the firmware's glibc-2.3.6 under the Debian ld-linux.so.3 it's linked to
+   -> ABI breakage. */
 static int caanoo_font_overlay(const char *guest, char *out, size_t cap) {
     if (g_device != 2 || strncmp(guest, "/usr/gp2x/", 10)) return 0;
-    char wr[PATH_MAX], hp[PATH_MAX]; struct stat s;
-    if (!me_writable_root(wr, sizeof wr)) return 0;
-    snprintf(hp, sizeof hp, "%s/fw/caanoo%s", wr, guest);
-    if (stat(hp, &s) != 0) {
-        static int warned = 0;
-        if (!warned && strstr(guest, ".ttf")) {
-            warned = 1;
-            fprintf(stderr, "magiceyes: this Caanoo title is missing its system font (%s); text "
-                            "will be blank. Install Caanoo firmware (Firmware -> Install "
-                            "firmware) for correct text.\n", guest);
-        }
-        return 0;
+    char hp[PATH_MAX], wr[PATH_MAX]; struct stat s;
+    /* 1. an installed Caanoo firmware (e.g. the user booted the firmware menu) wins. */
+    if (me_writable_root(wr, sizeof wr)) {
+        snprintf(hp, sizeof hp, "%s/fw/caanoo%s", wr, guest);
+        if (stat(hp, &s) == 0) { snprintf(out, cap, "%s", hp); return 1; }
     }
-    snprintf(out, cap, "%s", hp);
-    return 1;
+    /* 2. the bundled (freely-redistributable) Caanoo fonts shipped next to the exe. Device-scoped,
+       NOT ABI-scoped: a Caanoo title can be OABI (ld-linux.so.2 -> rootfs-win) or EABI (.so.3 ->
+       rootfs-eabi), so we resolve the font here independently of g_rootfs. */
+    const char *bases[2]; int nb = 0;
+    if (g_exe_dir[0]) bases[nb++] = g_exe_dir;
+    bases[nb++] = ".";
+    const char *pfx[] = { "caanoo-fonts", "assets/caanoo-ref", "../assets/caanoo-ref" };
+    for (int i = 0; i < nb; i++)
+        for (int p = 0; p < (int)(sizeof pfx / sizeof pfx[0]); p++) {
+            snprintf(hp, sizeof hp, "%s/%s%s", bases[i], pfx[p], guest);
+            if (stat(hp, &s) == 0) { snprintf(out, cap, "%s", hp); return 1; }
+        }
+    static int warned = 0;
+    if (!warned && strstr(guest, ".ttf")) {
+        warned = 1;
+        fprintf(stderr, "magiceyes: this Caanoo title is missing its system font (%s); text "
+                        "will be blank.\n", guest);
+    }
+    return 0;
 }
 int me_rootfs_resolve(const char *guest, char *out, size_t cap) {
     me_rootfs_init();
