@@ -282,22 +282,30 @@ void gp2x_cacheflush(uint32_t guest) {
 #define FB_LEN_  (320 * 240 * 2)
 static void fill_vscreeninfo(uint32_t gbuf) {
     uint8_t b[160]; memset(b, 0, sizeof b);
+    int c = (g_device == 2);                                    /* Caanoo menu: 24bpp BGR888 */
     *(uint32_t *)(b + 0)  = 320; *(uint32_t *)(b + 4)  = 240;   /* xres / yres */
     *(uint32_t *)(b + 8)  = 320; *(uint32_t *)(b + 12) = 480;   /* xres_v / yres_v (2 pages) */
-    *(uint32_t *)(b + 24) = 16;                                 /* bits_per_pixel */
-    *(uint32_t *)(b + 32) = 11; *(uint32_t *)(b + 36) = 5;      /* red   offset/len */
-    *(uint32_t *)(b + 44) = 5;  *(uint32_t *)(b + 48) = 6;      /* green offset/len */
-    *(uint32_t *)(b + 56) = 0;  *(uint32_t *)(b + 60) = 5;      /* blue  offset/len */
+    *(uint32_t *)(b + 24) = c ? 24 : 16;                        /* bits_per_pixel */
+    if (c) {  /* BGR888: blue in the low byte, red in the high byte (matches present_guest B,G,R) */
+        *(uint32_t *)(b + 32) = 16; *(uint32_t *)(b + 36) = 8;  /* red   offset/len */
+        *(uint32_t *)(b + 44) = 8;  *(uint32_t *)(b + 48) = 8;  /* green offset/len */
+        *(uint32_t *)(b + 56) = 0;  *(uint32_t *)(b + 60) = 8;  /* blue  offset/len */
+    } else {  /* RGB565 */
+        *(uint32_t *)(b + 32) = 11; *(uint32_t *)(b + 36) = 5;
+        *(uint32_t *)(b + 44) = 5;  *(uint32_t *)(b + 48) = 6;
+        *(uint32_t *)(b + 56) = 0;  *(uint32_t *)(b + 60) = 5;
+    }
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 static void fill_fscreeninfo(uint32_t gbuf, uint32_t smem_start) {
     uint8_t b[80]; memset(b, 0, sizeof b);
+    uint32_t bypp = (g_device == 2) ? 3 : 2;       /* Caanoo menu draws 24bpp; GP2X 16bpp */
     memcpy(b + 0, "MagicEyes-MLC", 13);            /* id[16] */
     *(uint32_t *)(b + 16) = smem_start;            /* smem_start (phys base) */
-    *(uint32_t *)(b + 20) = FB_LEN_ * 2;           /* smem_len (2 pages) */
+    *(uint32_t *)(b + 20) = (uint32_t)320 * 240 * bypp * 2; /* smem_len (2 pages) */
     *(uint32_t *)(b + 24) = 0;                      /* FB_TYPE_PACKED_PIXELS */
     *(uint32_t *)(b + 32) = 2;                      /* FB_VISUAL_TRUECOLOR */
-    *(uint32_t *)(b + 44) = 640;                    /* line_length */
+    *(uint32_t *)(b + 44) = 320 * bypp;             /* line_length (640 for 16bpp, 960 for 24bpp) */
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 /* FBIOPAN_DISPLAY: select the visible page by yoffset. Reuse the OADR flip-lock path
