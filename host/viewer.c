@@ -827,6 +827,13 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
             int e2 = SDL_RenderClear(ren);
             int e3 = SDL_RenderCopy(ren, tex, NULL, NULL);
             SDL_RenderPresent(ren);
+            /* ME_AUTOSHOT=N: save the actual shm framebuffer to screenshots/ after N seconds, once.
+               Captures the engine's real output regardless of window occlusion (a screen-grab of a
+               backgrounded window catches whatever is on top instead). */
+            { const char *as = getenv("ME_AUTOSHOT");
+              if (as) { static Uint32 t0 = 0; static int done = 0; Uint32 nw = SDL_GetTicks();
+                  if (!t0) t0 = nw;
+                  if (!done && nw - t0 >= (Uint32)(atoi(as) * 1000)) { save_screenshot(cur_w, cur_h); done = 1; } } }
 #ifdef ME_BUNDLED
             if (g_fwlog) { static Uint32 lp = 0; Uint32 nw = SDL_GetTicks();
                 if (nw - lp >= 1000) { lp = nw;   /* sample the centre row of the shm: is there content? */

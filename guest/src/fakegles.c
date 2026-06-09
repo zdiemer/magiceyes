@@ -471,21 +471,55 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
 }
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei w, GLsizei h,
                             GLint border, GLsizei imageSize, const GLvoid *data) {
-    (void)target; (void)border; (void)data;
-    /* The Pollux/MES compressed-texture format is undocumented; capture the enum so a
-       decoder can be added once identified. Placeholder = opaque mid-grey so geometry
-       still shows where a compressed texture would be. */
+    (void)target; (void)border;
     if (level != 0 || !g_bound_tex || g_bound_tex >= MAXTEX || w <= 0 || h <= 0) return;
-    fprintf(stderr, "fakegles: glCompressedTexImage2D UNHANDLED format=0x%x %dx%d size=%d "
-                    "(placeholder; needs a decoder)\n", internalformat, w, h, imageSize);
-    gl_report((long)internalformat, "glCompressedTexImage2D");
     Tex *tx = &g_tex[g_bound_tex];
-    free(tx->rgba);
-    tx->w = w; tx->h = h;
+    free(tx->rgba); tx->w = w; tx->h = h;
     tx->rgba = (uint32_t *)malloc((size_t)w * h * 4);
     if (!tx->rgba) { tx->w = tx->h = 0; return; }
-    int i, n = w * h;
-    for (i = 0; i < n; i++) tx->rgba[i] = 0xFF808080u;
+    int n = w * h;
+    /* OES_compressed_paletted_texture (0x8B90-0x8B97): a 16- (PALETTE4) or 256-entry (PALETTE8)
+       palette, then 4-/8-bit indices. The MagicEyes/Pollux driver ships menu/background art this way
+       (Propis). DERIVE the palette entry size from imageSize -- the reported enum colour-depth can
+       disagree (0x8B95 "RGBA8" arrives with a 3-byte RGB palette: 320x240 + 256*3 = 77568). */
+    int idx4 = (internalformat >= 0x8B90 && internalformat <= 0x8B93);
+    int idx8 = (internalformat >= 0x8B94 && internalformat <= 0x8B97);
+    if ((idx4 || idx8) && data) {
+        int ents = idx4 ? 16 : 256;
+        int idxbytes = idx4 ? (n + 1) / 2 : n;
+        int palbytes = imageSize - idxbytes;
+        int entry = (palbytes > 0) ? palbytes / ents : 0;
+        if (entry == 2 || entry == 3 || entry == 4) {
+            const uint8_t *pal = (const uint8_t *)data;
+            const uint8_t *ind = pal + (size_t)ents * entry;
+            int is565 = (internalformat == 0x8B92 || internalformat == 0x8B96);
+            uint32_t lut[256]; int e;
+            for (e = 0; e < ents; e++) {
+                const uint8_t *p = pal + (size_t)e * entry;
+                uint8_t r, g, b, a = 255;
+                if (entry == 3)      { r = p[0]; g = p[1]; b = p[2]; }
+                else if (entry == 4) { r = p[0]; g = p[1]; b = p[2]; a = p[3]; }
+                else { unsigned v = p[0] | (p[1] << 8);    /* 2 bytes: RGB565 or RGBA4444 */
+                    if (is565) { r=(uint8_t)(((v>>11)&0x1f)*255/31); g=(uint8_t)(((v>>5)&0x3f)*255/63); b=(uint8_t)((v&0x1f)*255/31); }
+                    else { r=(uint8_t)(((v>>12)&0xf)*17); g=(uint8_t)(((v>>8)&0xf)*17); b=(uint8_t)(((v>>4)&0xf)*17); a=(uint8_t)((v&0xf)*17); } }
+                lut[e] = ((uint32_t)a<<24)|((uint32_t)b<<16)|((uint32_t)g<<8)|r;
+            }
+            int i;
+            for (i = 0; i < n; i++) {
+                int id = idx4 ? ((i & 1) ? (ind[i/2] & 0xf) : (ind[i/2] >> 4)) : ind[i];
+                tx->rgba[i] = lut[id & (ents - 1)];
+            }
+            g_n_tex++;
+            if (gl_log()) GLOG("glCompressedTexImage2D PALETTE id=%u %dx%d fmt=%x entry=%d idx%d\n",
+                               g_bound_tex, w, h, internalformat, entry, idx4 ? 4 : 8);
+            return;
+        }
+    }
+    /* genuinely unknown format -> opaque mid-grey placeholder + report the enum */
+    fprintf(stderr, "fakegles: glCompressedTexImage2D UNHANDLED format=0x%x %dx%d size=%d\n",
+            internalformat, w, h, imageSize);
+    gl_report((long)internalformat, "glCompressedTexImage2D");
+    { int i; for (i = 0; i < n; i++) tx->rgba[i] = 0xFF808080u; }
 }
 
 /* ----------------------------------------------------------- GL: clear */

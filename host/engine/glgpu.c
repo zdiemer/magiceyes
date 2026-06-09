@@ -160,6 +160,31 @@ void glgpu_draw(uint32_t desc_ptr) {
     int n = (int)d.count;
     if (n <= 0 || !d.av.en) return;
     int vs = d.av.size >= 2 ? d.av.size : 2; if (vs > 4) vs = 4;
+    if (getenv("ME_GL_DBG")) { static unsigned fs = 0; static int dc = 0;
+        if (fs != g_shm->frame_seq) { if (dc) fprintf(DIAG, "glgpu FRAME draws=%d\n", dc); fs = g_shm->frame_seq; dc = 0; }
+        if (++dc <= 8) {
+            /* (1) geometry: transform each vertex mv*proj/w*viewport -> screen-space bbox */
+            float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+            for (int i = 0; i < n && i < 256; i++) {
+                uint8_t b[64]; float px = 0, py = 0, pz = 0, pw = 1;
+                if (rd_elem(&d.av, (int)d.first + i, b, sizeof b))
+                    for (int c = 0; c < vs; c++) { float v = rd_comp(b, d.av.type, c);
+                        if (c==0) px=v; else if (c==1) py=v; else if (c==2) pz=v; else pw=v; }
+                float e[4], cl[4];
+                for (int r = 0; r < 4; r++) e[r]  = d.mv[r]*px + d.mv[4+r]*py + d.mv[8+r]*pz + d.mv[12+r]*pw;
+                for (int r = 0; r < 4; r++) cl[r] = d.proj[r]*e[0] + d.proj[4+r]*e[1] + d.proj[8+r]*e[2] + d.proj[12+r]*e[3];
+                float w = cl[3] ? cl[3] : 1e-6f;
+                float sx = d.vp[0] + (cl[0]/w*0.5f+0.5f)*d.vp[2], sy = d.vp[1] + (cl[1]/w*0.5f+0.5f)*d.vp[3];
+                if (sx<minx) minx=sx; if (sx>maxx) maxx=sx; if (sy<miny) miny=sy; if (sy>maxy) maxy=sy;
+            }
+            /* (2) texture: center sample of the decoded RGBA */
+            uint32_t txc = 0;
+            if (d.tex_rgba && d.tex_w > 0 && d.tex_h > 0)
+                read_guest(&txc, d.tex_rgba + (uint32_t)((d.tex_h/2*d.tex_w + d.tex_w/2)*4), 4);
+            fprintf(DIAG, "  draw[%d] tex=%dx%d screen=[%.0f,%.0f..%.0f,%.0f] texC=%08x atest=%x/%.2f blend=%d/%d entex=%d\n",
+                dc, d.tex_w, d.tex_h, minx, miny, maxx, maxy, txc,
+                d.atest_func, d.atest_ref, d.blend_s, d.blend_d, d.en_tex);
+        } }
 
     static float *pos = NULL, *col = NULL, *tc = NULL; static int cap = 0;
     if (n > cap) { cap = n; pos = realloc(pos, (size_t)cap * 4 * sizeof(float));
@@ -227,6 +252,11 @@ void glgpu_present(void) {
     p_glReadPixels(0, 0, g_w, g_h, GL_RGBA, GL_UNSIGNED_BYTE, g_rb);
     const uint16_t *bg = g_fb_guest ? (const uint16_t *)guest_to_host(g_fb_guest) : NULL;
     int bgpx = (int)(g_fb_stride ? g_fb_stride / 2 : 320);   /* SDL fb px per row */
+    if (getenv("ME_GL_DBG")) { static int n = 0; if (n++ % 60 == 0) {
+        int cx = g_w / 2, cy = g_h / 2; const uint8_t *c = g_rb + ((size_t)(g_h-1-cy)*g_w + cx)*4;
+        uint16_t sb = (bg && cy < 240) ? bg[(size_t)cy*bgpx + cx] : 0xDEAD;
+        fprintf(DIAG, "glgpu center: GL rgba=%d,%d,%d,%d  SDLbg565=%04x  fb_guest=%08x stride=%u\n",
+                c[0], c[1], c[2], c[3], sb, g_fb_guest, g_fb_stride); } }
     uint16_t *dst = (uint16_t *)g_shm->pixels;
     for (int y = 0; y < g_h; y++) {
         const uint8_t *src = g_rb + (size_t)(g_h - 1 - y) * g_w * 4;   /* GL origin is bottom-left: flip */
