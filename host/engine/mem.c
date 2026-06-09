@@ -265,6 +265,11 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
            so an MLC OADR flip — or a blitter dst — that targets that phys resolves back here. */
         if (!g_fb_guest)       { g_fb_guest  = at; record_memmap(0x04000000u, at, len); }
         else if (!g_fb_guest2 && at != g_fb_guest) { g_fb_guest2 = at; record_memmap(0x04040000u, at, len); }
+        /* Caanoo (Pollux) firmware menu: its libSDL draws 24bpp BGR pixels into the fbdev at the
+           640-byte row pitch we advertise (320x240x16) -- i.e. ~213 px of 24bpp data per row -- and
+           the real Pollux MLC upscales ~1.5x to the 320px panel. Present via the Caanoo 24bpp path
+           (reads B,G,R at this pitch and nearest-neighbour-scales the ~213px source -> 320). */
+        if (g_device == 2) { g_caanoo_bpp = 3; g_caanoo_pitch = 640; }
         if (getenv("ME_FBWATCH")) {   /* TEMP: count guest writes into this fb (execution vs aliasing) */
             extern void fbwatch_cb(uc_engine*, uc_mem_type, uint64_t, int, int64_t, void*);
             static uc_hook fbh; uc_hook_add(g_uc, &fbh, UC_HOOK_MEM_WRITE, fbwatch_cb, NULL,

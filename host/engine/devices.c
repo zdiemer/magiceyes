@@ -129,17 +129,21 @@ extern int g_pal_have;
 void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
     int nz = 0; long nzc = 0;   /* nzc: # of non-zero indices this frame (accumulation diag) */
-    if (g_device == 2 && g_caanoo_bpp >= 3) {  /* Caanoo MLC 24/32bpp (firmware menu) -> RGB565.
-            Pixels are stored B,G,R[,X] (SDL Rmask=0xff0000); convert + downsample to the shm's
-            RGB565 at the MLC's pitch (VSTRIDE), independent of our 320x240x16 default. */
+    if (g_device == 2 && g_caanoo_bpp >= 3) {  /* Caanoo 24/32bpp (firmware menu) -> RGB565.
+            Pixels are B,G,R[,X] (SDL Rmask=0xff0000). The firmware menu draws 24bpp pixels into the
+            640-byte-pitch fbdev (only ~213 px/row) and the real Pollux MLC upscales ~1.5x to the
+            320px panel -- so derive the source width from pitch and nearest-neighbour-scale it to 320
+            (srcw==320 for titles that use a full-width 24/32bpp surface => identity). */
         int bpp = g_caanoo_bpp;
         uint32_t pitch = g_caanoo_pitch ? g_caanoo_pitch : (uint32_t)320 * bpp;
+        int srcw = (int)(pitch / (uint32_t)bpp); if (srcw < 1) srcw = 320;
         uint16_t *dst = (uint16_t *)g_shm->pixels;
         for (int y = 0; y < 240; y++) {
             uint8_t *src = guest_to_host(g + (uint32_t)y * pitch); if (!src) break;
             uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
-            for (int x = 0; x < 320; x++) {   /* memory order is B,G,R (SDL Rmask=0xff0000) */
-                uint8_t b = src[x*bpp+0], gg = src[x*bpp+1], r = src[x*bpp+2];
+            for (int x = 0; x < 320; x++) {
+                int sx = (x * srcw) / 320;
+                uint8_t b = src[sx*bpp+0], gg = src[sx*bpp+1], r = src[sx*bpp+2];
                 dp[x] = (uint16_t)(((r >> 3) << 11) | ((gg >> 2) << 5) | (b >> 3));
                 if (b | gg | r) { nz = 1; nzc++; }
             }
@@ -665,11 +669,33 @@ static int mlc_config_write(uint32_t off, uint32_t val) {
    layer0: HSTRIDE0=0x4028 VSTRIDE0=0x402c ADDRESS0=0x4038; layer1: HSTRIDE1=0x405c VSTRIDE1=0x4060
    ADDRESS1=0x406c (the firmware menu uses layer 1, 24bpp RGB888). */
 static void caanoo_mlc_write(uint32_t off, uint32_t val) {
+    if (getenv("ME_MLCLOG")) {   /* trace MLC layer-register programming to read off the real format */
+        const char *nm = off==0x4004?"SCREENSIZE": off==0x4024?"CONTROL0": off==0x4028?"HSTRIDE0":
+            off==0x402c?"VSTRIDE0": off==0x4038?"ADDRESS0": off==0x400c?"LEFTRIGHT0": off==0x4010?"TOPBOTTOM0":
+            off==0x4058?"CONTROL1": off==0x405c?"HSTRIDE1": off==0x4060?"VSTRIDE1": off==0x406c?"ADDRESS1":
+            off==0x4040?"LEFTRIGHT1": off==0x4044?"TOPBOTTOM1": off==0x4000?"CONTROLT": "";
+        if (*nm || off==0x4028||off==0x402c||off==0x4038||off==0x405c||off==0x4060||off==0x406c)
+            fprintf(stderr, "[mlc] %04x %-11s = %08x (%u)\n", off, nm, val, val);
+    }
     switch (off) {
-    case 0x4028: case 0x405c: g_caanoo_bpp = (int)val; break;     /* MLCHSTRIDE = bytes/pixel */
-    case 0x402c: case 0x4060: g_caanoo_pitch = val; break;        /* MLCVSTRIDE = pitch (bytes/row) */
-    case 0x4038: case 0x406c: { uint32_t gg;                       /* MLCADDRESS = scanout base (flip) */
-        if (val && phys_to_guest(val, &gg)) { g_fb_guest = gg; g_flip_active = 1; g_flip_guest = gg; }
+    /* MLCHSTRIDE/VSTRIDE: capture only LAYER 0 (the primary RGB surface). Layer 1 (0x405c/0x4060) is
+       an OVERLAY -- the firmware menu programs it as a 24bpp video plane while its UI lives on the
+       16bpp /dev/fb0 buffer; letting layer-1's format drive present_guest read the 16bpp UI as
+       24bpp/960 -> tripled/washed garbage. (ME_MLCL1 re-enables layer-1 capture for diagnosis.) */
+    case 0x4028: g_caanoo_bpp = (int)val; break;                  /* MLCHSTRIDE0 = bytes/pixel */
+    case 0x402c: g_caanoo_pitch = val; break;                     /* MLCVSTRIDE0 = pitch (bytes/row) */
+    case 0x405c: if (getenv("ME_MLCL1")) g_caanoo_bpp = (int)val; break;
+    case 0x4060: if (getenv("ME_MLCL1")) g_caanoo_pitch = val; break;
+    /* MLC layer scanout base (flip). 0x4038/0x406c are MLCADDRESS0/1; the Caanoo firmware menu writes
+       the base to its layer's 0x4058 register instead. The value may be a PHYSICAL address (titles
+       that poke /dev/mem) OR a GUEST address (the menu's mmap'd 24bpp surface, e.g. 0x4653d020) -- try
+       both. Guard on >=0x40000000 so a genuine CONTROL-register flag write to 0x4058 isn't mistaken
+       for an address. */
+    case 0x4038: case 0x406c: case 0x4058: {
+        uint32_t g = 0, gg;
+        if (val >= 0x40000000u && val < 0x80000000u && guest_to_host(val)) g = val;   /* already guest */
+        else if (val && phys_to_guest(val, &gg)) g = gg;                               /* physical */
+        if (g) { g_fb_guest = g; g_flip_active = 1; g_flip_guest = g; }
         break; }
     }
 }
