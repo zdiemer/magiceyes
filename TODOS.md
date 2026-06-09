@@ -6,22 +6,27 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Open per-title bugs (native Windows engine unless noted)
 
+> **Real-libSDL migration (commits 9fcad4f / 3513d18):** the native engine now runs firmware menus
+> AND dynamic OABI games on the firmware's REAL libSDL instead of the brittle fake-SDL shim. This
+> fixed the shim's `SDL_Surface`/blit ABI corruption — **Deicide 3 and Her Knights render correctly
+> now**, and the white-rectangle/wrong-blit class (RetroVirus, Wiz menu) is the same root cause.
+> The shim is retained only for the qemu backend. EABI titles (Patissier/rg_ura) still use the shim
+> (no prebuilt real EABI libSDL — see `third_party/README.md`).
+
 - **Her Knights — BGM is radio static.** Gameplay otherwise perfect. PCM is already noise
   in the ring (zcr≈0.5) *before* our SDL conversion — HK's 8-bit (U8 22050) custom sound
   bank through firmware `libSDL_mixer`. Next: run under reference `qemu-arm` to the menu
   music — static there ⇒ shim/SDL_mixer bug; clean ⇒ engine DSP/CPU bug. Trace HK's BGM
   loader (no symbols). `ME_FAKESDL_AUDIO_DUMP`, zcr analysis. See `wiz-titles-revival`.
-- **Deicide 3 — incorrect rendering + audio.** Boots, DRM gate passes (plaintext assets),
-  but visuals + audio wrong; runs *correctly* on the qemu backend, so a native-engine
-  divergence. Next: `ME_FAKESDL_BLIT_LOG=1` + surface dump (suspect SDL_Surface/PixelFormat
-  ABI vs rootfs SDL_image); dump audio ring + compare to the game's `SDL_OpenAudio` request;
-  confirm `.dat` assets extracted. Diff native vs qemu run.
-- **Patissier — incorrect rendering.** Boots via the EABI rootfs but renders wrong.
-  EABI-specific — suspect an EABI ABI mismatch in the SDL surface/blit path or a missing
-  GPH/Wiz SDL extension. `ME_FAKESDL_BLIT_LOG=1` + surface dump; compare to a `qemu-arm` run.
-- **RetroVirus — white rectangles.** Content reaches the viewer but every blit has an EMPTY
-  src surface (SDL_image/ttf produce 0x0@0bpp) — likely a libpng dlopen failure or an
-  SDL_Surface/PixelFormat ABI mismatch. `ME_FAKESDL_BLIT_LOG=1`.
+- **Deicide 3 — rendering FIXED (real libSDL); audio TBD.** Renders correctly on the real-libSDL
+  bundle (intro cutscenes verified) — the shim's surface/blit ABI mismatch was the cause. Remaining:
+  confirm audio (dump the ring vs the game's `SDL_OpenAudio`), confirm `.dat` assets extracted.
+- **Patissier — incorrect rendering (EABI, still on the shim).** Renders wrong / green screen via
+  the EABI rootfs shim. The real-libSDL switch is OABI-only so far; EABI has no prebuilt real libSDL
+  (see `third_party/README.md` "EABI: deferred"). Same for rg_ura.
+- **RetroVirus — white rectangles (likely resolved by real libSDL — RE-VERIFY).** The empty-src-blit
+  cause was the shim's SDL_Surface/PixelFormat ABI mismatch, now off the shim. Re-run on the
+  real-libSDL bundle to confirm.
 - **Odonata — gameplay object-pool crash (PARKED).** Title+menu render, but a few seconds
   into gameplay hits the game's own assert (object.cpp:297) — dead sprites never freed.
   Decisive next test: compare under the qemu backend (correct nwfpe FPA + cooperative threads).
