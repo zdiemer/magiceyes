@@ -55,6 +55,31 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 - **Touchscreen — guest-side backing.** Viewer mouse→`shm.touch_*` is done and feeds titles that
   read the SDL mouse. *Remaining:* back tslib `ts_read` / raw `/dev/input/event` reads with the
   same shm.touch fields (`guest/src/fakesdl.c` / `devices.c`) for titles that don't use the mouse.
+- **Caanoo firmware-menu touchscreen — BLOCKED inside the firmware libSDL.** The FW menu (gp2xmenu)
+  takes touch (e.g. tapping the settings gear) via SDL mouse events, and the firmware libSDL's
+  `FB_OpenMouse` reads the touchscreen through **tslib on `/dev/input/event0`** and presents it as
+  the SDL mouse (string "Using tslib touchscreen"; `ts_open`/`ts_config`/`ts_fd`). NOT via the
+  menu's own tslib (the home loop never `ts_read`s on its own handle). Investigation
+  (radare2 + engine tracing) established:
+    - Modelled `/dev/input/event0` as a **touchscreen** (ABS_X/Y + BTN_TOUCH + ABS_PRESSURE, screen
+      range 0..319/0..239) distinct from the joystick on `event1`. This needs a **two-node** input
+      model in `input.c` (touch vs joystick per-fd) since tslib and SDL want ABS_X/Y to mean
+      different things; SDL rejects the touchscreen as a joystick and picks `event1` for nav.
+    - **Emulated-device fds must be < `FD_SETSIZE` (1024).** They were `0x10000000+`, so they fell
+      out of any `select()`/`fd_set` — the joystick works only because SDL `read()`s it directly,
+      but the touch path goes through `select()`. (Lowering `DEVFD_BASE` is the fix but risks
+      host-fd aliasing; needs care + a game regression pass.) `_newselect` (syscall 142) must also
+      report input fds ready via `input_pending` (it used to just clear readfds).
+    - With those, the engine is **provably correct**: during a tap it returns the touch fd ready in
+      SDL's `select` with the exact right bit set, and `select` returns >0.
+    - **Blocker:** SDL's `FB_PumpEvents` (`fcn.00038d00`) is a jump-table state machine switching on
+      the mouse *type* (struct field `0x490`); the `ts_read` that actually reads touch (`0x39648`)
+      is only reached in the tslib-mouse state, and the pump never gets there despite the fd being
+      ready — i.e. `FB_OpenMouse`'s `ts_config` apparently didn't register the tslib mouse type.
+    - **Next:** capture guest stdout to confirm whether "Using tslib touchscreen" prints (did SDL's
+      `ts_config` succeed?). If it failed, fixing that is likely the whole fix; if it succeeded, the
+      bug is in how the pump's type/state is read. Note the menu boot is also flaky (a thread/timing
+      race intermittently yields a black home screen) which complicates testing.
 - **Vulkan backend for Caanoo's GPU.** Replace/augment the software GLES1.1 rasterizer with Vulkan.
 - **Wiz raw arcade ports** (Out Zone / Demons World / Snow Bros 2 / Twin Cobra / Zero Wing, in the
   Deicide 3 pack). Bypass SDL and poke MMSP2/Pollux directly → the dynamic-libSDL shim doesn't
