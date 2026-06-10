@@ -29,12 +29,12 @@ if [ -n "${ME_DEV_BUILD:-}" ]; then OUT="$REPO/bin/magiceyes-dev.exe"; SUBSYS=()
 else OUT="$REPO/bin/magiceyes.exe"; SUBSYS=(-mwindows); fi
 $CC -O2 -Wall "${SUBSYS[@]}" "${DEFS[@]}" -o "$OUT" \
   "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c "$REPO/host/viewer.c" "$REPO/host/png_write.c" \
-  "$REPO/host/input_config.c" "$REPO/host/settings_ui.c" "$REPO/host/win/posix_compat.c" \
+  "$REPO/host/input_config.c" "$REPO/host/settings_ui.c" "$REPO/host/keybind_win.c" "$REPO/host/win/posix_compat.c" \
   -I "$REPO/host/win/compat" -I "$REPO/host/engine" -I "$FORK/include" \
   -I "$REPO/guest/src" -I "$SDL/include" \
   -L "$SDL/lib" "$FORK/build-win/libunicorn.a" \
   -static-libgcc -Wl,-Bstatic -lpthread -Wl,-Bdynamic \
-  -lSDL2 -lm -lws2_32 -lbcrypt -lwinmm -lcomdlg32 -luser32 -lgdi32 -lshell32 -lole32
+  -lSDL2 -lm -lws2_32 -lbcrypt -lwinmm -lcomdlg32 -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32
 cp -f "$SDL/bin/SDL2.dll" "$REPO/bin/"
 echo "built $OUT (+ SDL2.dll)"
 

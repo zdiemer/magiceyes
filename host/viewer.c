@@ -39,6 +39,15 @@ int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap)
 extern int g_fwlog;                        /* ME_FWLOG: debug logging to the engine log */
 void me_log(const char *fmt, ...);
 #define ME_WINMENU 1
+#include "keybind_win.h"   /* native Win32 keybinding editor (replaces the SDL overlay here) */
+#endif
+
+/* "an input editor is open" -- pause game input + suppress the SDL overlay's input while either
+   the native Win32 keybind window (bundle) or the in-SDL settings overlay (elsewhere) is up. */
+#ifdef ME_WINMENU
+#define EDIT_OPEN() (kbwin_is_open() || su_is_open(&g_su))
+#else
+#define EDIT_OPEN() (su_is_open(&g_su))
 #endif
 
 #ifdef ME_BUNDLED
@@ -60,7 +69,7 @@ static void me_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprin
 static gp2x_shm_t *shm;
 /* gamepad + remappable input bindings + the keybind settings overlay */
 #define ME_MAXPADS 4
-static SDL_GameController *g_pads[ME_MAXPADS]; static int g_npads = 0;
+SDL_GameController *g_pads[ME_MAXPADS]; int g_npads = 0;   /* (non-static: keybind_win.c polls these) */
 static ic_config g_ic;
 static su_state  g_su;
 static unsigned long long g_consumed = 0;   /* real audio bytes played (B/s stat) */
@@ -344,7 +353,8 @@ static void start_game(const char *path) {
                             "magiceyes", MB_ICONERROR); return; }
     snprintf(g_last_game, sizeof g_last_game, "%s", path);
     recent_add(path); recent_rebuild_menu();
-    if (su_is_open(&g_su)) su_close_and_save(&g_su);   /* leaving the keybind editor to load a game */
+    if (kbwin_is_open()) kbwin_close();                /* leaving the keybind editor to load a game */
+    if (su_is_open(&g_su)) su_close_and_save(&g_su);
     engine_request_reload(r);   /* engine stops the current game + hot-loads this one */
 }
 static void do_open_dialog(HWND hwnd) {
@@ -405,7 +415,7 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_VOL50:  g_view_volume = 50;  g_view_mute = 0; break;
     case IDM_VOL75:  g_view_volume = 75;  g_view_mute = 0; break;
     case IDM_VOL100: g_view_volume = 100; g_view_mute = 0; break;
-    case IDM_SETTINGS:   su_open(&g_su, (int)shm->device); break;
+    case IDM_SETTINGS:   kbwin_open(hwnd, &g_ic, (int)shm->device); break;
     case IDM_FW_INSTALL: do_install_firmware(hwnd); break;
     case IDM_FW_WIZ:     boot_firmware(hwnd, "wiz"); break;
     case IDM_FW_CAANOO:  boot_firmware(hwnd, "caanoo"); break;
@@ -708,7 +718,11 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
             else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) touch_down = 0;
             if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode kc = e.key.keysym.sym; Uint16 mod = e.key.keysym.mod;
-                if (kc == SDLK_F1) su_open(&g_su, (int)shm->device);   /* open keybind settings */
+#ifdef ME_WINMENU
+                if (kc == SDLK_F1) kbwin_open(hwnd, &g_ic, (int)shm->device);   /* native keybind editor */
+#else
+                if (kc == SDLK_F1) su_open(&g_su, (int)shm->device);   /* in-SDL keybind overlay */
+#endif
                 else if (kc == SDLK_ESCAPE) running = 0;
                 else if (kc == SDLK_F11 || (kc == SDLK_RETURN && (mod & KMOD_ALT)))
                     toggle_fullscreen(win);
@@ -749,14 +763,14 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
            (keyboard + gamepad; ic_compute_buttons derives the 8-way diagonals). The guest shim
            handles any device-native button reorder/axes, so we always write the GP2X layout. */
         const Uint8 *k = SDL_GetKeyboardState(NULL);
-        uint32_t b = su_is_open(&g_su) ? 0u
+        uint32_t b = EDIT_OPEN() ? 0u
                    : ic_compute_buttons(&g_ic, k, g_pads, g_npads, (int)shm->device);
         /* clamp the live touch (Caanoo; mouse -> guest pixels), then record/replay buttons+touch
            together (frame_seq-keyed; see the module above) and apply. */
         int tx = touch_x, ty = touch_y, td = touch_down;
         if (tx < 0) tx = 0; if (cur_w > 0 && tx >= cur_w) tx = cur_w - 1;
         if (ty < 0) ty = 0; if (cur_h > 0 && ty >= cur_h) ty = cur_h - 1;
-        if (su_is_open(&g_su)) {
+        if (EDIT_OPEN()) {
             shm->buttons = 0;            /* pause game input while editing keybinds */
         } else {
             b = input_step(shm, b, &tx, &ty, &td);
