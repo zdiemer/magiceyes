@@ -11,16 +11,11 @@
 #include <dirent.h>   /* portable directory enumeration (Linux + MinGW-w64) for getdents */
 #include "glcmd.h"     /* GL render-offload syscall numbers + descriptor */
 
-/* Host scratch dir for decompressed GPEComp temps + extracted zips (created on first use). */
+/* Host scratch dir for decompressed GPEComp temps + extracted zips: the configured Cache dir
+   (portable default <exe_dir>/cache; user-relocatable via the settings window). me_paths_dir
+   mkdir-p's it. */
 void me_host_tmpdir(char *out, size_t cap) {
-#ifdef _WIN32
-    const char *t = getenv("TEMP"); if (!t) t = getenv("TMP"); if (!t) t = ".";
-    snprintf(out, cap, "%s\\magiceyes", t);
-#else
-    const char *t = getenv("TMPDIR"); if (!t) t = "/tmp";
-    snprintf(out, cap, "%s/magiceyes", t);
-#endif
-    ME_MKDIR(out);
+    me_paths_dir(ME_PATH_CACHE, out, cap);
 }
 
 /* Redirect guest writes/reads under /mnt/tmp and /tmp into the host scratch dir (the GPEComp

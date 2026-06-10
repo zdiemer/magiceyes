@@ -99,6 +99,17 @@ MAGICEYES_ROOTFS=<wiz-rootfs> ./magiceyes.sh game.gpe
 Controls (viewer): arrows=D-pad, Z/X/A/S=A/B/X/Y, Enter=Start, RShift/Backspace=Select,
 Q/W=L/R, Esc=quit. Mouse → touchscreen (Caanoo).
 
+**Portable storage paths** (`host/engine/paths.{c,h}`): all writable state lives in dirs
+**beside the exe** by default — `config/` (keybindings, recent, games pointer), `firmware/`
+(staged device installs), `cache/` (GPEComp decompress + extracted-zip scratch), `saves/`
+(per-game overlay). `me_writable_root()` (firmware) and `me_host_tmpdir()` (cache) resolve
+through `me_paths_dir()`; users relocate any of the three via **File ▸ Settings…**
+(`host/paths_win.c`, a native Win32 window mirroring the keybind editor), persisted to
+`<exe_dir>/paths.conf`. Clean break from the old `%APPDATA%`/`%TEMP%` locations (no migration).
+GPEComp payloads decompress to `cache/gpecomp/<content-hash>/<stem>_tmp` — keyed by an FNV-1a
+hash of the `.gpe` bytes (rename/move-proof + reused on relaunch), never beside the ROM. The
+save overlay keeps a human-readable `saves/<stem>` key. See `portable-storage-paths`.
+
 The engine auto-selects rootfs per-title by PT_INTERP (`me_rootfs_select`): `/lib/
 ld-linux.so.2` → `assets/rootfs` (Wiz, glibc-2.3.6); `/lib/ld-linux.so.3` → `assets/
 rootfs-eabi` (Debian Wheezy armel, for Caanoo + EABI Wiz homebrew like Patissier).

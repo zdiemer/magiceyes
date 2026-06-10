@@ -44,6 +44,11 @@ int  ic_load(ic_config *c);                     /* defaults, then overlay bindin
 int  ic_save(const ic_config *c);               /* write bindings.conf (0 on success) */
 void ic_reset_device(ic_config *c, int device); /* restore one profile to its defaults */
 
+/* Override the directory bindings.conf lives in (absolute). The bundle points this at the
+   portable Settings dir (me_paths) so config stays beside the exe; passing NULL/"" restores the
+   built-in default (%APPDATA%/$HOME). Engine-independent: the standalone viewer never calls it. */
+void ic_set_config_dir(const char *dir);
+
 /* OR each canonical bit whose binding has an active source, then derive the 8-way diagonals
    from the 4 cardinals (same rule the old hardcoded viewer block used). */
 uint32_t ic_compute_buttons(const ic_config *c, const Uint8 *kbd,

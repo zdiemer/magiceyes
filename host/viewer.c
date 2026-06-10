@@ -40,12 +40,14 @@ extern int g_fwlog;                        /* ME_FWLOG: debug logging to the eng
 void me_log(const char *fmt, ...);
 #define ME_WINMENU 1
 #include "keybind_win.h"   /* native Win32 keybinding editor (replaces the SDL overlay here) */
+#include "paths_win.h"     /* native Win32 storage-folder editor (Settings/Firmware/Cache) */
+#include "paths.h"         /* me_paths_* -- portable storage roots (no engine deps) */
 #endif
 
 /* "an input editor is open" -- pause game input + suppress the SDL overlay's input while either
    the native Win32 keybind window (bundle) or the in-SDL settings overlay (elsewhere) is up. */
 #ifdef ME_WINMENU
-#define EDIT_OPEN() (kbwin_is_open() || su_is_open(&g_su))
+#define EDIT_OPEN() (kbwin_is_open() || paths_win_is_open() || su_is_open(&g_su))
 #else
 #define EDIT_OPEN() (su_is_open(&g_su))
 #endif
@@ -199,6 +201,7 @@ enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
        IDM_ABOUT = 1030, IDM_CONTROLS, IDM_SETTINGS,
        IDM_RECORD = 1035,
        IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200, IDM_SET_GAMES,
+       IDM_PATHS = 1050,
        IDM_RECENT0 = 1100 };
 #define MAX_RECENT 8
 static HMENU g_recentmenu;
@@ -206,8 +209,7 @@ static char g_recent[MAX_RECENT][MAX_PATH]; static int g_nrecent;
 static char g_last_game[MAX_PATH];
 
 static void recent_path(char *out, size_t cap) {
-    const char *ad = getenv("APPDATA"); if (!ad) ad = getenv("TEMP"); if (!ad) ad = ".";
-    char dir[MAX_PATH]; snprintf(dir, sizeof dir, "%s\\magiceyes", ad); _mkdir(dir);
+    char dir[MAX_PATH]; me_paths_dir(ME_PATH_SETTINGS, dir, sizeof dir);   /* portable Settings dir */
     snprintf(out, cap, "%s\\recent.txt", dir);
 }
 static void recent_load(void) {
@@ -244,8 +246,8 @@ static void recent_rebuild_menu(void) {
 /* ---- games folder: persisted + exported as ME_GP2X_SD (mapped to /mnt/sd & /mnt/nand) ---- */
 static char g_games_dir[MAX_PATH];
 static void games_path(char *out, size_t cap) {
-    const char *ad = getenv("APPDATA"); if (!ad) ad = getenv("TEMP"); if (!ad) ad = ".";
-    snprintf(out, cap, "%s\\magiceyes\\games.txt", ad);
+    char dir[MAX_PATH]; me_paths_dir(ME_PATH_SETTINGS, dir, sizeof dir);   /* portable Settings dir */
+    snprintf(out, cap, "%s\\games.txt", dir);
 }
 static void games_load(void) {
     char p[MAX_PATH]; games_path(p, sizeof p);
@@ -278,6 +280,8 @@ static void build_menu(HWND hwnd) {
     g_recentmenu = CreatePopupMenu();
     AppendMenuA(file, MF_POPUP, (UINT_PTR)g_recentmenu, "Open &Recent");
     AppendMenuA(file, MF_STRING, IDM_RELOAD, "&Reload");
+    AppendMenuA(file, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(file, MF_STRING, IDM_PATHS, "&Settings...");
     AppendMenuA(file, MF_SEPARATOR, 0, NULL);
     AppendMenuA(file, MF_STRING, IDM_EXIT, "E&xit");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "&File");
@@ -354,6 +358,7 @@ static void start_game(const char *path) {
     snprintf(g_last_game, sizeof g_last_game, "%s", path);
     recent_add(path); recent_rebuild_menu();
     if (kbwin_is_open()) kbwin_close();                /* leaving the keybind editor to load a game */
+    if (paths_win_is_open()) paths_win_close();        /* ...and the storage-folder editor */
     if (su_is_open(&g_su)) su_close_and_save(&g_su);
     engine_request_reload(r);   /* engine stops the current game + hot-loads this one */
 }
@@ -422,6 +427,7 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_FW_F100:    boot_firmware(hwnd, "f100"); break;
     case IDM_FW_F200:    boot_firmware(hwnd, "f200"); break;
     case IDM_SET_GAMES:  pick_games_folder(hwnd); break;
+    case IDM_PATHS:      paths_win_open(hwnd); break;
     case IDM_CONTROLS:
         MessageBoxA(hwnd, "D-pad:    Arrow keys\nA/B/X/Y:  Z / X / A / S\nStart:    Enter\n"
                           "Select:   Backspace\nL / R:    Q / W\nVol +/-:  = / -\n"
@@ -678,6 +684,9 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     /* input bindings (defaults + bindings.conf) + the keybind settings overlay. Done after
        SDL_Init so the scancode/controller name APIs the loader uses are available. Open any
        controllers already attached; hotplug is handled in the event loop. */
+#ifdef ME_WINMENU
+    { char cfg[MAX_PATH]; me_paths_dir(ME_PATH_SETTINGS, cfg, sizeof cfg); ic_set_config_dir(cfg); }
+#endif
     ic_load(&g_ic);
     su_init(&g_su, &g_ic);
     for (int i = 0; i < SDL_NumJoysticks() && g_npads < ME_MAXPADS; i++)

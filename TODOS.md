@@ -45,11 +45,6 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
   chdir-anchored writes). *Remaining:* confirm the qemu backend and Wiz/Caanoo titles persist;
   absolute writes OUTSIDE the game dir and `truncate`/`link`/`symlink`/`utime`-by-path aren't
   redirected (no known title needs it).
-- **GPEComp decompression shouldn't clutter ROM dirs.** `gpecomp_to_tmp()`
-  (`host/engine/loader.c`) writes the decompressed payload beside the `.gpe` (fallback `%TEMP%`).
-  Decompress in-memory (load the ELF straight from the buffer) or to a dedicated cache dir
-  (`<exe_dir>/cache/<gamekey>/`). cwd is already decoupled via `g_game_root`, so this is purely
-  about not littering ROM folders.
 - **End-to-end firmware support.** Boot the device firmware, then launch games from the SD card.
   (In-process firmware install + gp2xmenu staging exist; see `firmware-boot-support`.)
 - **Touchscreen — guest-side backing.** Viewer mouse→`shm.touch_*` is done and feeds titles that

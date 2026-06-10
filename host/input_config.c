@@ -209,7 +209,19 @@ void ic_binding_describe(const ic_binding *b, char *out, size_t cap) {
 }
 
 /* ---- config file path + load/save ---- */
+static char s_config_dir[512];   /* override set by the bundle (me_paths Settings dir); "" = default */
+
+void ic_set_config_dir(const char *dir) {
+    if (dir && dir[0]) snprintf(s_config_dir, sizeof s_config_dir, "%s", dir);
+    else               s_config_dir[0] = 0;
+}
+
 static int ic_config_path(char *out, size_t cap) {
+    if (s_config_dir[0]) {                        /* portable override (bundle: me_paths Settings) */
+        IC_MKDIR(s_config_dir);
+        snprintf(out, cap, "%s/bindings.conf", s_config_dir);
+        return 1;
+    }
 #ifdef _WIN32
     const char *base = getenv("APPDATA"); if (!base) base = getenv("TEMP"); if (!base) base = ".";
     char dir[512]; snprintf(dir, sizeof dir, "%s\\magiceyes", base); IC_MKDIR(dir);

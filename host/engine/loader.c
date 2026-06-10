@@ -191,9 +191,22 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     return out;
 }
 
-/* If `elf` is a GPEComp self-extractor, decompress its UCL payload to the host scratch dir
-   (<tmpdir>/<stem>_tmp) and return that path in out (1); else 0. The .gpe stub is dynamically
-   linked (unrunnable natively), but the payload it carries is the static game. */
+/* 64-bit FNV-1a over the whole .gpe image -> 16 hex chars. Keys the GPEComp decompress cache by
+   CONTENT (not filename), so a renamed/moved .gpe maps to the same entry and is reused. Same idiom
+   as syscalls.c path_ino, widened to 64 bits to make dir-name collisions negligible. */
+static void content_key(const uint8_t *buf, size_t len, char out[17]) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < len; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
+    snprintf(out, 17, "%016llx", (unsigned long long)h);
+}
+
+/* If `elf` is a GPEComp self-extractor, decompress its UCL payload into the portable Cache dir
+   (<cache>/gpecomp/<content-hash>/<stem>_tmp) and return that path in out (1); else 0. The .gpe
+   stub is dynamically linked (unrunnable natively), but the payload it carries is the static game.
+   Caching there (a) never litters the (often read-only ROM) game folder, (b) survives a .gpe
+   rename, and (c) is reused on relaunch. The decompressed location is decoupled from asset
+   resolution: the engine chdir()s into g_game_root (the real .gpe dir, pinned by me_save_set_game
+   before this runs), so the game's relative Data/ still resolves. */
 static int gpecomp_to_tmp(const char *elf, char *out, size_t cap) {
     FILE *f = fopen(elf, "rb"); if (!f) return 0;
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
@@ -202,6 +215,29 @@ static int gpecomp_to_tmp(const char *elf, char *out, size_t cap) {
     if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return 0; }
     fclose(f);
     if (!gpecomp_detect(buf, (size_t)sz)) { free(buf); return 0; }
+
+    /* <stem> from the .gpe name, kept in the cached filename for readable logs/diagnostics. */
+    char stem[PATH_MAX]; snprintf(stem, sizeof stem, "%s", elf);
+    char *s1 = strrchr(stem, '/'), *s2 = strrchr(stem, '\\'), *s = s1 > s2 ? s1 : s2;
+    if (s) memmove(stem, s + 1, strlen(s + 1) + 1);
+    char *dot = strrchr(stem, '.'); if (dot) *dot = 0;
+    if (!stem[0]) snprintf(stem, sizeof stem, "game");
+
+    char key[17]; content_key(buf, (size_t)sz, key);
+    char base[PATH_MAX]; me_host_tmpdir(base, sizeof base);   /* <cache>, mkdir-p'd */
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s/gpecomp", base);      LMKDIR(dir);
+    snprintf(dir, sizeof dir, "%s/gpecomp/%s", base, key); LMKDIR(dir);
+    snprintf(out, cap, "%s/%s_tmp", dir, stem);
+
+    /* reuse a previous decompression of the same content (skip the decompress + write). */
+    struct stat st;
+    if (stat(out, &st) == 0 && st.st_size > 0) {
+        free(buf);
+        if (g_trace) fprintf(stderr, "  [gpecomp] %s -> %s (cached)\n", elf, out);
+        return 1;
+    }
+
     uint8_t *dec = NULL; size_t dlen = 0;
     if (gpecomp_decompress(buf, (size_t)sz, &dec, &dlen) != 0) {
         free(buf);
@@ -209,25 +245,8 @@ static int gpecomp_to_tmp(const char *elf, char *out, size_t cap) {
         return 0;
     }
     free(buf);
-    /* derive <gamedir> and <stem> from the .gpe path */
-    char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", elf);
-    char *d1 = strrchr(dir, '/'), *d2 = strrchr(dir, '\\'), *d = d1 > d2 ? d1 : d2;
-    const char *name = d ? d + 1 : elf;
-    char stem[PATH_MAX]; snprintf(stem, sizeof stem, "%s", name);
-    char *dot = strrchr(stem, '.'); if (dot) *dot = 0;
-    if (d) *d = 0; else snprintf(dir, sizeof dir, ".");
-    /* Prefer writing the decompressed game BESIDE the .gpe so the engine's chdir lands in the
-       game's own dir and its relative Data/ resolves. Fall back to the host scratch dir if the
-       game's location is read-only (the game may then not find its assets -- it's the best we can do). */
-    snprintf(out, cap, "%s/%s_tmp", dir, stem);
     FILE *o = fopen(out, "wb");
-    if (!o) {
-        char base[PATH_MAX]; me_host_tmpdir(base, sizeof base);
-        snprintf(out, cap, "%s/%s_tmp", base, stem);
-        o = fopen(out, "wb");
-        if (!o) { fprintf(stderr, "magiceyes: cannot write decompressed '%s': %s\n", out, strerror(errno)); free(dec); return 0; }
-        fprintf(stderr, "magiceyes: note: '%s' is read-only; decompressed to %s (the game may not find its Data/)\n", dir, out);
-    }
+    if (!o) { fprintf(stderr, "magiceyes: cannot write decompressed '%s': %s\n", out, strerror(errno)); free(dec); return 0; }
     size_t w = fwrite(dec, 1, dlen, o); fclose(o); free(dec);
     if (w != dlen) { fprintf(stderr, "magiceyes: short write to '%s'\n", out); return 0; }
 #ifndef _WIN32

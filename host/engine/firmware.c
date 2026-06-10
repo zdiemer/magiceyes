@@ -45,21 +45,12 @@ static const char *fw_dir_name(const char *device) {
     return NULL;
 }
 
-/* Writable staging root (matches where fwstage.c installs + the viewer keeps recent.txt):
-   %APPDATA%\magiceyes on Windows, $HOME/.magiceyes on Linux. Shared with syscalls.c
-   (rootfs candidate search + the Caanoo font overlay), so it's exported via engine.h. */
+/* Writable staging root for firmware: the configured Firmware dir (portable default
+   <exe_dir>/firmware; user-relocatable via the settings window). Staged installs land under
+   <root>/fw/<device>. Shared with syscalls.c (rootfs candidate search + the Caanoo font
+   overlay) and exported via engine.h. me_paths_dir mkdir-p's it, so this always succeeds. */
 int me_writable_root(char *out, size_t cap) {
-#ifdef _WIN32
-    const char *base = getenv("APPDATA");
-#else
-    const char *base = getenv("HOME");
-#endif
-    if (!base || !base[0]) return 0;
-#ifdef _WIN32
-    snprintf(out, cap, "%s\\magiceyes", base);
-#else
-    snprintf(out, cap, "%s/.magiceyes", base);
-#endif
+    me_paths_dir(ME_PATH_FIRMWARE, out, cap);
     return 1;
 }
 

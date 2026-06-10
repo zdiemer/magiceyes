@@ -26,6 +26,7 @@
 #include <elf.h>
 #include "gp2xshm.h"
 #include "report.h"   /* structured run telemetry (me_report / me_report_flush_json) */
+#include "paths.h"    /* portable, user-configurable storage roots (settings/firmware/cache) */
 
 /* ---- guest virtual memory layout ---- */
 #define STACK_TOP   0x80000000u
@@ -132,7 +133,7 @@ int  me_rootfs_select(const char *interp);  /* pick the rootfs holding this PT_I
 void me_rootfs_set(const char *dir);        /* firmware boot: pin a specific rootfs; NULL = unpin */
 
 /* ---- firmware.c: locate / install a device firmware ---- */
-int  me_writable_root(char *out, size_t cap);  /* %APPDATA%\magiceyes | $HOME/.magiceyes; 1=ok */
+int  me_writable_root(char *out, size_t cap);  /* configured Firmware dir (me_paths, portable default); 1=ok */
 int  me_firmware_paths(const char *device, char *rootfs, char *menu, size_t cap);  /* 1 if found */
 int  me_firmware_install(const char *file, const char *device);  /* stage a .zip/.img; 0 = ok */
 void me_firmware_sync_overlays(void);  /* heal shim overlay on already-installed OABI firmware */
