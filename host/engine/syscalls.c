@@ -713,13 +713,21 @@ static int sysfile_open(const char *p) {
         return memfd_make("#1 PREEMPT Mon Jan 1 00:00:00 UTC 2008\n");
     if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))
         return memfd_make("2.6.32\n");
-    if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab"))
+    if (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab")) {
         /* Include a /dev/shm tmpfs: glibc's shm_open() parses this for the POSIX shm directory;
            without it __shm_directory() returns "" and shm_open(open '') fails -> the fake-SDL /
-           fake-GLES shims can't map the /dev/shm framebuffer (no rendering). */
-        return memfd_make("/dev/root / ext2 rw 0 0\nnone /proc proc rw 0 0\n"
-                          "none /tmp tmpfs rw 0 0\nnone /dev/shm tmpfs rw 0 0\n"
-                          "/dev/mmcsd/disc0/part1 /mnt/sd vfat rw 0 0\n");
+           fake-GLES shims can't map the /dev/shm framebuffer (no rendering).
+           Show /mnt/sd mounted so the firmware menu lists games instead of "Insert SD Card" -- it
+           greps /proc/mounts by SD DEVICE NAME, which differs per device: Caanoo = /dev/mmcblk0p1,
+           GP2X/Wiz = /dev/mmcsd/disc0/part1. /mnt/sd maps to the host games dir (me_mount_resolve). */
+        static char mb[512];
+        snprintf(mb, sizeof mb,
+                 "/dev/root / ext2 rw 0 0\nnone /proc proc rw 0 0\n"
+                 "none /tmp tmpfs rw 0 0\nnone /dev/shm tmpfs rw 0 0\n"
+                 "%s /mnt/sd vfat rw 0 0\n",
+                 g_device == 2 ? "/dev/mmcblk0p1" : "/dev/mmcsd/disc0/part1");
+        return memfd_make(mb);
+    }
     if (!strcmp(p, "/etc/localtime"))
         return memfd_make_bin(TZ_UTC, sizeof TZ_UTC);
     return 0;
