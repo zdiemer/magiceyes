@@ -11,6 +11,7 @@
  */
 #include "engine.h"
 #include <string.h>
+#include <sys/stat.h>
 
 /* ---- evdev / joystick wire constants (linux/input.h, linux/joystick.h) ---- */
 #define EV_SYN 0x00
@@ -54,6 +55,8 @@ static void snapshot(uint32_t *btns, int *ax, int *ay) {
     int dn = (b >> GP2X_DOWN & 1) | (b >> GP2X_DOWNLEFT & 1) | (b >> GP2X_DOWNRIGHT & 1);
     int lf = (b >> GP2X_LEFT & 1) | (b >> GP2X_UPLEFT & 1) | (b >> GP2X_DOWNLEFT & 1);
     int rt = (b >> GP2X_RIGHT & 1) | (b >> GP2X_UPRIGHT & 1) | (b >> GP2X_DOWNRIGHT & 1);
+    /* Standard joystick convention (and verified against the Caanoo FW menu wheel): stick-up = -Y,
+       stick-down = +Y, so the highlight moves up for up and down for down. */
     *ax = rt ? AXIS_MAX : lf ? -AXIS_MAX : 0;
     *ay = dn ? AXIS_MAX : up ? -AXIS_MAX : 0;
 }
@@ -62,6 +65,22 @@ int input_classify(const char *path) {
     if (!strncmp(path, "/dev/input/event", 16)) return DEV_INPUT_EV;
     if (!strncmp(path, "/dev/input/js", 13) || !strncmp(path, "/dev/js", 7)) return DEV_INPUT_JS;
     return 0;
+}
+
+/* Advertise exactly ONE evdev node + ONE joystick node as character devices, so a guest that
+   ENUMERATES the input devices by stat()ing /dev/input/event%d (the real SDL 1.2 joystick scan does
+   exactly this -- __xstat() each candidate, skip the open if it's absent) finds the handheld and
+   stops. Only event0/js0 exist; event1.. would otherwise be opened+probed as duplicate joysticks.
+   Returns 1 (and fills a char-device stat) for those nodes, else 0. */
+int input_fake_node(const char *path, struct stat *s) {
+    int js = (!strcmp(path, "/dev/input/js0") || !strcmp(path, "/dev/js0"));
+    if (!js && strcmp(path, "/dev/input/event0")) return 0;
+    memset(s, 0, sizeof *s);
+    s->st_mode = S_IFCHR | 0660;
+    s->st_rdev = js ? ((13 << 8) | 0) : ((13 << 8) | 64);  /* input major 13, js minor 0 / evdev 64 */
+    s->st_ino  = js ? 0xE0E1 : 0xE0E0;
+    s->st_nlink = 1;
+    return 1;
 }
 
 /* is there an unreported input change on this fd? (poll()/select() POLLIN) */
@@ -92,8 +111,8 @@ static int js_pack(uint8_t *p, int type, int number, int val) {
 long input_read(int fd, uint32_t gbuf, uint32_t n) {
     int s = slot(fd); if (s < 0 || !g_inp[s].used) return 0;
     uint32_t btns; int ax, ay; snapshot(&btns, &ax, &ay);
-    if (getenv("ME_INPUTLOG")) { static int nr = 0;
-        if (nr++ < 30) fprintf(stderr, "[inp] read fd=%x btns=%08x ay=%d\n", fd, btns, ay); }
+    if (getenv("ME_INPUTLOG") && btns) { static int nr = 0;
+        if (nr++ < 40) fprintf(stderr, "[inp] read fd=%x btns=%08x ax=%d ay=%d\n", fd, btns, ax, ay); }
     uint8_t buf[16 * 64]; uint32_t off = 0;
     int isjs = (g_inp[s].type == DEV_INPUT_JS);
     int esz = isjs ? 8 : 16;

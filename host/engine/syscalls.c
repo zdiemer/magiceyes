@@ -1372,6 +1372,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a0, p, sizeof p);
         struct stat s;
         if (sd_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
+        if (input_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
         char hp[PATH_MAX]; resolve_io(p, 0, hp, sizeof hp);
         if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
@@ -1394,6 +1395,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         }
         else { read_cstr(a0, p, sizeof p);
                if (sd_fake_node(p, &s)) { fill_stat64(a1, &s); return 0; }   /* SD present (firmware) */
+               if (input_fake_node(p, &s)) { fill_stat64(a1, &s); return 0; } /* event0/js0 (SDL joy scan) */
                int mf = sysfile_open(p);   /* a faked path: report it as a regular file */
                if (mf) { struct memfile *m = memfd_get(mf); struct stat ms; memset(&ms, 0, sizeof ms);
                          ms.st_mode = S_IFREG | 0644; ms.st_size = m->len; free(m->data); m->used = 0;

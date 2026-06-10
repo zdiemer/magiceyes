@@ -186,6 +186,8 @@ long gpio_ioctl(uint32_t cmd, uint32_t arg);         /* /dev/GPIO GPH SDL_OpenGP
 /* input.c: reusable Linux input subsystem (evdev + joystick) fed from shm -> the analog stick +
    buttons for titles that read /dev/input/event* or /dev/input/js* (e.g. the Caanoo firmware menu). */
 int  input_classify(const char *path);               /* -> DEV_INPUT_EV / DEV_INPUT_JS / 0 */
+struct stat;
+int  input_fake_node(const char *path, struct stat *s); /* stat() event0/js0 as char devs (SDL scan) */
 void input_open(int fd, int type);                   /* seed per-fd state at open */
 long input_read(int fd, uint32_t gbuf, uint32_t n);  /* emit evdev/js events for state changes */
 long input_ioctl(int fd, uint32_t cmd, uint32_t arg);/* EVIOCG / JSIOCG capability queries */
