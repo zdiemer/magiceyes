@@ -375,14 +375,22 @@ long i2c_ioctl(uint32_t cmd, uint32_t arg) {
    `gp2xshm.h`/shm->buttons order (the same order the mmio GPIO path uses), so just hand back
    shm->buttons directly. (Knight Lore reads /dev/GPIO raw, NOT via paeryn's SDL_Joystick; an
    earlier PEPC_VK remap rotated DOWN/LEFT/RIGHT -> the "funky d-pad".) */
-/* GPH Caanoo SDL_OpenGPIO reads button state via ioctl() on /dev/GPIO (cmds 0x05/0x09/0x0b/0x10/
-   0x12/0x13), NOT read(). Hand the active-high GP2X button word back in the caller's buffer for each
-   query. (The exact per-cmd bank split is the GPH gpio driver's; returning the full word lets the
-   menu mask out the bits it wants.) */
+/* The Caanoo firmware libSDL polls /dev/GPIO via ioctl() for DEVICE STATUS, not buttons --
+   buttons arrive over the evdev joystick (input.c). Each call is ioctl(fd, cmd, &out) and the
+   kernel writes a status word to *out (arg). cmd map (from libSDL disasm, GPH SDL extensions):
+     0x05 SDL_SYS_JoystickUsbConCheck  0x09 SDL_SDStatus      0x0b SDL_HoldStatus
+     0x10 SDL_USBWLANStatus  0x11 SDL_USBSETStatus  0x12 SDL_USBGETStatus  0x13 SDL_USBENABLEStatus
+   Returning the button word here is what produced the alternating "USB Connected"/"Insert SD Card"
+   overlays. Report a clean handheld: no USB/WLAN, hold off, SD card inserted (so the menu shows the
+   SD game list). ME_CAANOO_NOSD forces no card. */
 long gpio_ioctl(uint32_t cmd, uint32_t arg) {
-    uint32_t v = g_shm ? g_shm->buttons : 0;
-    if (getenv("ME_INPUTLOG")) { static int n = 0; if (n++ < 40)
-        fprintf(stderr, "[gpioctl] cmd=%02x arg=%08x btns=%08x\n", cmd, arg, v); }
+    uint32_t v = 0;
+    switch (cmd) {
+        case 0x09: v = getenv("ME_CAANOO_NOSD") ? 0 : 1; break; /* SD card inserted */
+        default:   v = 0; break;                                /* USB/WLAN off, hold off */
+    }
+    if (getenv("ME_INPUTLOG")) { static int n = 0; if (n++ < 60)
+        fprintf(stderr, "[gpioctl] cmd=%02x arg=%08x -> status=%u\n", cmd, arg, v); }
     if (arg) uc_mem_write(g_uc, arg, &v, 4);
     return 0;
 }
