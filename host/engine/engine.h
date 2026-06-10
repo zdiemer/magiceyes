@@ -139,7 +139,8 @@ void me_firmware_sync_overlays(void);  /* heal shim overlay on already-installed
 int  me_firmware_boot_request(const char *device);  /* GUI: pin rootfs + reload its gp2xmenu; 1=ok */
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
-enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER };
+enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER,
+       DEV_INPUT_EV, DEV_INPUT_JS };   /* Linux input subsystem: /dev/input/event* and /dev/input/js* */
 #define DEVFD_BASE 0x10000000   /* far above real host fds (avoid aliasing) */
 struct memmap { uint32_t phys, guest, len; };
 
@@ -180,7 +181,15 @@ long dsp_write(uint32_t gbuf, uint32_t n);
 uint32_t dsp_pace_us(void);
 long dsp_ioctl(uint32_t cmd, uint32_t arg);
 long fb_ioctl(int fd, uint32_t cmd, uint32_t arg);   /* FBIOGET_*SCREENINFO / PAN_DISPLAY */
-long gpio_read(uint32_t gbuf, uint32_t n);           /* /dev/GPIO joystick button word */
+long gpio_read(uint32_t gbuf, uint32_t n);           /* /dev/GPIO joystick button word (read) */
+long gpio_ioctl(uint32_t cmd, uint32_t arg);         /* /dev/GPIO GPH SDL_OpenGPIO ioctl button query */
+/* input.c: reusable Linux input subsystem (evdev + joystick) fed from shm -> the analog stick +
+   buttons for titles that read /dev/input/event* or /dev/input/js* (e.g. the Caanoo firmware menu). */
+int  input_classify(const char *path);               /* -> DEV_INPUT_EV / DEV_INPUT_JS / 0 */
+void input_open(int fd, int type);                   /* seed per-fd state at open */
+long input_read(int fd, uint32_t gbuf, uint32_t n);  /* emit evdev/js events for state changes */
+long input_ioctl(int fd, uint32_t cmd, uint32_t arg);/* EVIOCG / JSIOCG capability queries */
+int  input_pending(int fd);                          /* poll()/select(): is an input event ready? */
 long i2c_read(uint32_t gbuf, uint32_t n);            /* /dev/i2c-0 handset serial (read) */
 long i2c_ioctl(uint32_t cmd, uint32_t arg);          /* /dev/i2c-0 I2C_RDWR serial */
 void gp2x_mmio_palette(uint32_t off, uint32_t val);  /* MLC palette port capture (MMSP2 page) */

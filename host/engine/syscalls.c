@@ -728,6 +728,11 @@ static int sysfile_open(const char *p) {
 long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
     (void)a5;
+    /* ME_TRACE_AFTER: enable the syscall trace only AFTER the guest has rendered (frame_seq), to
+       capture the input loop without the slow asset-load init drowning it. ~20k syscalls then off. */
+    if (getenv("ME_TRACE_AFTER")) { static long lc = -1;
+        if (lc < 0 && g_shm && g_shm->frame_seq > 60) lc = 0;
+        if (lc >= 0) { g_trace = (lc < 20000); lc++; } }
     if (g_trace)
         fprintf(stderr, "  [t%d] sc %u (%08x,%08x,%08x,%08x)\n",
                 g_self ? g_self->tid : -1, nr, a0, a1, a2, a3);
@@ -806,6 +811,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                   mf->pos += n; return n; }
         if (dev_type((int)a0) == DEV_I2C)  return i2c_read(a1, a2);  /* handset serial */
         if (dev_type((int)a0) == DEV_GPIO) return gpio_read(a1, a2); /* joystick buttons */
+        if (dev_type((int)a0) == DEV_INPUT_EV || dev_type((int)a0) == DEV_INPUT_JS)
+            return input_read((int)a0, a1, a2);                     /* evdev/js stick + buttons */
         if (dev_type((int)a0)) return 0;   /* other stub devices: EOF (never host-read a fake fd) */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         long r = read((int)a0, tmp, a2);
@@ -1055,6 +1062,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         int t = dev_type((int)a0);
         if (t == DEV_DSP) return dsp_ioctl(a1, a2);
         if (t == DEV_FB)  return fb_ioctl((int)a0, a1, a2);
+        if (t == DEV_GPIO) return gpio_ioctl(a1, a2);   /* GPH SDL_OpenGPIO button-query ioctls */
+        if (t == DEV_INPUT_EV || t == DEV_INPUT_JS) return input_ioctl((int)a0, a1, a2);
         if (t == DEV_I2C) return i2c_ioctl(a1, a2);
         return 0;
     }
@@ -1242,8 +1251,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             uint32_t fd = 0; uint16_t ev = 0, rev = 0;
             uc_mem_read(g_uc, a0 + i * 8, &fd, 4);
             uc_mem_read(g_uc, a0 + i * 8 + 4, &ev, 2);
+            int dt = dev_type((int)fd);
             if ((int)fd == PIPEFD_R) { if (g_pipe_w > g_pipe_r) rev |= 1; }  /* POLLIN */
-            else if (ev & 4) rev |= 4;                                       /* POLLOUT */
+            else if (dt == DEV_GPIO) { if (ev & 1) rev |= 1; }               /* button device: state always ready */
+            else if ((dt == DEV_INPUT_EV || dt == DEV_INPUT_JS) && (ev & 1) && input_pending((int)fd)) rev |= 1;
+            if (ev & 4) rev |= 4;                                            /* devices/files always writable */
             uc_mem_write(g_uc, a0 + i * 8 + 6, &rev, 2);
             if (rev) ready++;
         }

@@ -27,6 +27,7 @@ int dev_open(const char *path) {
        ioctl->0, writes discarded) lets the game proceed. */
     else if (!strcmp(path, "/dev/mmuhack"))   t = DEV_OTHER;
     else if (!strcmp(path, "/dev/shm/gp2x_fb")) t = DEV_SHMFB; /* fake-SDL shim's framebuffer shm */
+    else if ((t = input_classify(path))) { /* /dev/input/event*, /dev/input/js*: Linux input subsystem */ }
     else {
         /* A /dev node we don't model: record it (so the harness/agent learns which device a new
            title wants) but don't change behaviour -- fall through to the normal open() path. */
@@ -36,6 +37,7 @@ int dev_open(const char *path) {
     int i; for (i = 0; i < 64; i++) if (g_devtype[i] == 0) break;  /* reuse freed slots */
     if (i == 64) return -1;
     g_devtype[i] = t; g_fbnum[i] = fbno; if (i + 1 > g_devn) g_devn = i + 1;
+    if (t == DEV_INPUT_EV || t == DEV_INPUT_JS) input_open(DEVFD_BASE + i, t);
     if (g_trace) fprintf(stderr, "  DEV open %s -> fd=%d type=%d\n", path, DEVFD_BASE + i, t);
     return DEVFD_BASE + i;
 }
@@ -373,8 +375,20 @@ long i2c_ioctl(uint32_t cmd, uint32_t arg) {
    `gp2xshm.h`/shm->buttons order (the same order the mmio GPIO path uses), so just hand back
    shm->buttons directly. (Knight Lore reads /dev/GPIO raw, NOT via paeryn's SDL_Joystick; an
    earlier PEPC_VK remap rotated DOWN/LEFT/RIGHT -> the "funky d-pad".) */
+/* GPH Caanoo SDL_OpenGPIO reads button state via ioctl() on /dev/GPIO (cmds 0x05/0x09/0x0b/0x10/
+   0x12/0x13), NOT read(). Hand the active-high GP2X button word back in the caller's buffer for each
+   query. (The exact per-cmd bank split is the GPH gpio driver's; returning the full word lets the
+   menu mask out the bits it wants.) */
+long gpio_ioctl(uint32_t cmd, uint32_t arg) {
+    uint32_t v = g_shm ? g_shm->buttons : 0;
+    if (getenv("ME_INPUTLOG")) { static int n = 0; if (n++ < 40)
+        fprintf(stderr, "[gpioctl] cmd=%02x arg=%08x btns=%08x\n", cmd, arg, v); }
+    if (arg) uc_mem_write(g_uc, arg, &v, 4);
+    return 0;
+}
 long gpio_read(uint32_t gbuf, uint32_t n) {
     uint32_t v = g_shm ? g_shm->buttons : 0;   /* active-high; gp2xshm.h == GP2X button word */
+    if (getenv("ME_INPUTLOG") && v) { static int g = 0; if (g++ < 30) fprintf(stderr, "[gpio] read btns=%08x\n", v); }
     uint32_t k = n < 4 ? n : 4;
     if (gbuf && k) uc_mem_write(g_uc, gbuf, &v, k);
     return (long)k;

@@ -760,6 +760,20 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
             shm->buttons = 0;            /* pause game input while editing keybinds */
         } else {
             b = input_step(shm, b, &tx, &ty, &td);
+            /* ME_AUTOKEY="keys" -- scripted input for headless control testing. Once the guest has
+               actually rendered (frame_seq), press each key (u/d/l/r/a/b/x/y/s=start/e=select) in
+               turn, ~0.4s held per 0.8s slot -- decoupled from the variable boot time. */
+            { const char *ak = getenv("ME_AUTOKEY");
+              if (ak && shm->frame_seq > 60) { static Uint32 _t0 = 0; if (!_t0) _t0 = SDL_GetTicks();
+                  const char *ks = strchr(ak, ','); ks = ks ? ks + 1 : ak;
+                  double el = (SDL_GetTicks() - _t0) / 1000.0; int idx = (int)(el / 0.8); double in = el - idx * 0.8;
+                  if (idx >= 0 && idx < (int)strlen(ks) && in < 0.4) {
+                      static const char cs[] = "udlrabxyse";
+                      static const int  bs[] = { GP2X_UP, GP2X_DOWN, GP2X_LEFT, GP2X_RIGHT, GP2X_A,
+                                                 GP2X_B, GP2X_X, GP2X_Y, GP2X_START, GP2X_SELECT };
+                      const char *p = strchr(cs, ks[idx]); if (p) { b |= 1u << bs[p - cs];
+                          static int last = -1; if (idx != last) { last = idx;
+                              fprintf(stderr, "[autokey] press '%c' (seq=%u)\n", ks[idx], shm->frame_seq); } } } } }
             if (g_rep_on || !getenv("ME_VIEWER_NOINPUT")) {
                 shm->buttons = b;
                 shm->touch_x = (int16_t)tx; shm->touch_y = (int16_t)ty; shm->touch_down = (uint32_t)td;
