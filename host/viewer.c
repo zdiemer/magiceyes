@@ -196,17 +196,17 @@ static void toggle_fullscreen(SDL_Window *win) { apply_fullscreen(win, !g_cur_fs
 #ifdef ME_WINMENU
 /* ---- Win32 menu bar (bundle only: File->Open hot-reloads via the in-process engine) ---- */
 enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
-       IDM_SCALE1 = 1010, IDM_SCALE2, IDM_SCALE3, IDM_SCALE4, IDM_FULLSCREEN,
-       IDM_MUTE = 1020, IDM_VOL25, IDM_VOL50, IDM_VOL75, IDM_VOL100,
-       IDM_ABOUT = 1030, IDM_CONTROLS, IDM_SETTINGS,
+       IDM_SCALE1 = 1010, IDM_SCALE2, IDM_SCALE3, IDM_SCALE4, IDM_FULLSCREEN, IDM_SCREENSHOT,
+       IDM_ABOUT = 1030, IDM_SETTINGS,
        IDM_RECORD = 1035,
-       IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200, IDM_SET_GAMES,
+       IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200,
        IDM_PATHS = 1050,
        IDM_RECENT0 = 1100 };
 #define MAX_RECENT 8
 static HMENU g_recentmenu;
 static char g_recent[MAX_RECENT][MAX_PATH]; static int g_nrecent;
 static char g_last_game[MAX_PATH];
+static int g_shot_w = 320, g_shot_h = 240;   /* current present dims, for Video > Screenshot */
 
 static void recent_path(char *out, size_t cap) {
     char dir[MAX_PATH]; me_paths_dir(ME_PATH_SETTINGS, dir, sizeof dir);   /* portable Settings dir */
@@ -256,21 +256,104 @@ static void games_load(void) {
     fclose(f);
     if (g_games_dir[0]) _putenv_s("ME_GP2X_SD", g_games_dir);
 }
-static void pick_games_folder(HWND hwnd) {
-    BROWSEINFOW bi; memset(&bi, 0, sizeof bi);
-    bi.hwndOwner = hwnd; bi.lpszTitle = L"Select your games folder (it should contain a 'game' subfolder)";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return;
-    wchar_t wp[MAX_PATH];
-    if (SHGetPathFromIDListW(pidl, wp)) {
-        WideCharToMultiByte(CP_UTF8, 0, wp, -1, g_games_dir, sizeof g_games_dir, NULL, NULL);
-        _putenv_s("ME_GP2X_SD", g_games_dir);
-        char p[MAX_PATH]; games_path(p, sizeof p);
-        FILE *f = fopen(p, "w"); if (f) { fprintf(f, "%s\n", g_games_dir); fclose(f); }
-    }
-    CoTaskMemFree(pidl);
+/* ---- persisted app prefs (volume / mute / confirm-on-exit) in the Settings dir ---------------- */
+static int g_confirm_exit = 1;   /* Esc + window-close ask before quitting unless disabled */
+static void prefs_path(char *out, size_t cap) {
+    char dir[MAX_PATH]; me_paths_dir(ME_PATH_SETTINGS, dir, sizeof dir);
+    snprintf(out, cap, "%s\\prefs.txt", dir);
 }
+static void prefs_save(void) {
+    char p[MAX_PATH]; prefs_path(p, sizeof p);
+    FILE *f = fopen(p, "w"); if (!f) return;
+    fprintf(f, "volume=%d\nmute=%d\nconfirm_exit=%d\n", g_view_volume, g_view_mute, g_confirm_exit);
+    fclose(f);
+}
+static void prefs_load(void) {
+    char p[MAX_PATH]; prefs_path(p, sizeof p);
+    FILE *f = fopen(p, "r"); if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        char *eq = strchr(line, '='); if (!eq) continue; *eq = 0;
+        int v = atoi(eq + 1);
+        if (!strcmp(line, "volume"))            { if (v < 0) v = 0; if (v > 100) v = 100; g_view_volume = v; }
+        else if (!strcmp(line, "mute"))         g_view_mute = !!v;
+        else if (!strcmp(line, "confirm_exit")) g_confirm_exit = !!v;
+    }
+    fclose(f);
+}
+/* Accessors for the Audio tab of File > Settings (paths_win.c); changes persist immediately. */
+int  me_view_get_volume(void) { return g_view_volume; }
+int  me_view_get_mute(void)   { return g_view_mute; }
+void me_view_set_volume(int v) { if (v < 0) v = 0; if (v > 100) v = 100; g_view_volume = v; prefs_save(); }
+void me_view_set_mute(int on)  { g_view_mute = !!on; prefs_save(); }
+
+/* ---- confirm-exit dialog (Esc / window close) with a "Don't ask again" checkbox -------------
+   A tiny modal child window + local message loop -- MinGW has no resource-compiled dialogs, so we
+   build the controls by hand (same pattern as paths_win.c). Returns 1 to quit, 0 to stay. */
+enum { IDC_CE_DONTASK = 4001 };
+static int  s_ce_result;   /* -1 pending, 0 stay, 1 quit */
+static HWND s_ce_chk;
+static LRESULT CALLBACK ce_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK)     { s_ce_result = 1; return 0; }
+        if (LOWORD(wp) == IDCANCEL) { s_ce_result = 0; return 0; }
+        break;
+    case WM_CLOSE: s_ce_result = 0; return 0;
+    }
+    return DefWindowProcA(h, m, wp, lp);
+}
+static int confirm_exit_dialog(HWND parent) {
+    HINSTANCE inst = (HINSTANCE)GetModuleHandle(NULL);
+    static int reg = 0;
+    if (!reg) { reg = 1;
+        WNDCLASSA wc; memset(&wc, 0, sizeof wc);
+        wc.lpfnWndProc = ce_proc; wc.hInstance = inst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = "MagiceyesConfirm";
+        RegisterClassA(&wc);
+    }
+    const int CW = 360, CH = 158;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    RECT pr; int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (parent && GetWindowRect(parent, &pr)) {
+        x = pr.left + ((pr.right - pr.left) - CW) / 2;
+        y = pr.top  + ((pr.bottom - pr.top) - CH) / 2;
+    }
+    HWND dlg = CreateWindowExA(WS_EX_DLGMODALFRAME, "MagiceyesConfirm", "magiceyes", style,
+                               x, y, CW, CH, parent, NULL, inst, NULL);
+    if (!dlg) return 1;   /* can't build the dialog -> just quit */
+    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    CreateWindowA("STATIC", "Quit magiceyes?", WS_CHILD | WS_VISIBLE,
+                  20, 18, CW - 40, 20, dlg, NULL, inst, NULL);
+    s_ce_chk = CreateWindowA("BUTTON", "Don't ask me again",
+                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                  20, 46, CW - 40, 22, dlg, (HMENU)(INT_PTR)IDC_CE_DONTASK, inst, NULL);
+    HWND bq = CreateWindowA("BUTTON", "Quit", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                  CW - 200, CH - 64, 84, 28, dlg, (HMENU)(INT_PTR)IDOK, inst, NULL);
+    CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                  CW - 104, CH - 64, 84, 28, dlg, (HMENU)(INT_PTR)IDCANCEL, inst, NULL);
+    for (HWND c = GetWindow(dlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+        SendMessageA(c, WM_SETFONT, (WPARAM)font, TRUE);
+
+    s_ce_result = -1;
+    if (parent) EnableWindow(parent, FALSE);
+    ShowWindow(dlg, SW_SHOW); SetForegroundWindow(dlg); SetFocus(bq);
+    MSG msg;
+    while (s_ce_result < 0 && GetMessageA(&msg, NULL, 0, 0)) {
+        if (!IsDialogMessageA(dlg, &msg)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+    }
+    int quit    = (s_ce_result == 1);
+    int dontask = (SendMessageA(s_ce_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    if (parent) EnableWindow(parent, TRUE);
+    DestroyWindow(dlg); s_ce_chk = NULL;
+    if (quit && dontask) { g_confirm_exit = 0; prefs_save(); }
+    return quit;
+}
+/* Esc / close-box / Exit menu funnel here: honour the saved "don't ask" choice. */
+static int request_exit(HWND hwnd) { return g_confirm_exit ? confirm_exit_dialog(hwnd) : 1; }
+
 /* a device is "installed" if its staged gp2xmenu exists */
 static int fw_installed(const char *dev) { char r[1024], m[1024]; return me_firmware_paths(dev, r, m, sizeof r); }
 
@@ -285,24 +368,17 @@ static void build_menu(HWND hwnd) {
     AppendMenuA(file, MF_SEPARATOR, 0, NULL);
     AppendMenuA(file, MF_STRING, IDM_EXIT, "E&xit");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)file, "&File");
-    HMENU view = CreatePopupMenu();
-    AppendMenuA(view, MF_STRING, IDM_SCALE1, "Scale &1x");
-    AppendMenuA(view, MF_STRING, IDM_SCALE2, "Scale &2x");
-    AppendMenuA(view, MF_STRING, IDM_SCALE3, "Scale &3x");
-    AppendMenuA(view, MF_STRING, IDM_SCALE4, "Scale &4x");
-    AppendMenuA(view, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(view, MF_STRING, IDM_FULLSCREEN, "&Fullscreen\tF11");
-    AppendMenuA(view, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(view, MF_STRING, IDM_RECORD, "&Record input\tF9");
-    AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View");
-    HMENU audio = CreatePopupMenu();
-    AppendMenuA(audio, MF_STRING, IDM_MUTE, "&Mute");
-    AppendMenuA(audio, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(audio, MF_STRING, IDM_VOL25, "Volume 25%");
-    AppendMenuA(audio, MF_STRING, IDM_VOL50, "Volume 50%");
-    AppendMenuA(audio, MF_STRING, IDM_VOL75, "Volume 75%");
-    AppendMenuA(audio, MF_STRING, IDM_VOL100, "Volume 100%");
-    AppendMenuA(bar, MF_POPUP, (UINT_PTR)audio, "&Audio");
+    HMENU video = CreatePopupMenu();
+    AppendMenuA(video, MF_STRING, IDM_SCALE1, "Scale &1x");
+    AppendMenuA(video, MF_STRING, IDM_SCALE2, "Scale &2x");
+    AppendMenuA(video, MF_STRING, IDM_SCALE3, "Scale &3x");
+    AppendMenuA(video, MF_STRING, IDM_SCALE4, "Scale &4x");
+    AppendMenuA(video, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(video, MF_STRING, IDM_FULLSCREEN, "&Fullscreen\tF11");
+    AppendMenuA(video, MF_STRING, IDM_SCREENSHOT, "&Screenshot\tF12");
+    AppendMenuA(video, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(video, MF_STRING, IDM_RECORD, "&Record input\tF9");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)video, "&Video");
     HMENU fw = CreatePopupMenu();
     AppendMenuA(fw, MF_STRING, IDM_FW_INSTALL, "&Install firmware...");
     AppendMenuA(fw, MF_SEPARATOR, 0, NULL);
@@ -310,20 +386,16 @@ static void build_menu(HWND hwnd) {
     AppendMenuA(fw, MF_STRING | (fw_installed("caanoo") ? 0 : MF_GRAYED), IDM_FW_CAANOO, "Boot &Caanoo menu");
     AppendMenuA(fw, MF_STRING | (fw_installed("f100")   ? 0 : MF_GRAYED), IDM_FW_F100,   "Boot GP2X &F100 menu");
     AppendMenuA(fw, MF_STRING | (fw_installed("f200")   ? 0 : MF_GRAYED), IDM_FW_F200,   "Boot GP2X F&200 menu");
-    AppendMenuA(fw, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(fw, MF_STRING, IDM_SET_GAMES, "Set &games folder...");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)fw, "Fir&mware");
     HMENU inp = CreatePopupMenu();
     AppendMenuA(inp, MF_STRING, IDM_SETTINGS, "&Keybindings...\tF1");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)inp, "&Input");
     HMENU help = CreatePopupMenu();
-    AppendMenuA(help, MF_STRING, IDM_CONTROLS, "&Controls");
     AppendMenuA(help, MF_STRING, IDM_ABOUT, "&About");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help");
     recent_load(); recent_rebuild_menu();
     games_load();
     SetMenu(hwnd, bar);
-    if (g_view_mute) CheckMenuItem(bar, IDM_MUTE, MF_BYCOMMAND | MF_CHECKED);
 }
 static void start_game(const char *path) {
     char bin[MAX_PATH * 2];
@@ -403,6 +475,7 @@ static void boot_firmware(HWND hwnd, const char *dev) {
                     "magiceyes", MB_ICONWARNING);
 }
 static void input_record_toggle(void);   /* defined with the record/replay module below */
+static void save_screenshot(int w, int h);   /* defined below (Video > Screenshot / F12) */
 static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     switch (id) {
     case IDM_OPEN:   do_open_dialog(hwnd); break;
@@ -414,30 +487,23 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_SCALE3: apply_scale(win, 3); break;
     case IDM_SCALE4: apply_scale(win, 4); break;
     case IDM_FULLSCREEN: toggle_fullscreen(win); break;
-    case IDM_MUTE:   g_view_mute = !g_view_mute;
-        CheckMenuItem(GetMenu(hwnd), IDM_MUTE, MF_BYCOMMAND | (g_view_mute ? MF_CHECKED : MF_UNCHECKED)); break;
-    case IDM_VOL25:  g_view_volume = 25;  g_view_mute = 0; break;
-    case IDM_VOL50:  g_view_volume = 50;  g_view_mute = 0; break;
-    case IDM_VOL75:  g_view_volume = 75;  g_view_mute = 0; break;
-    case IDM_VOL100: g_view_volume = 100; g_view_mute = 0; break;
+    case IDM_SCREENSHOT: save_screenshot(g_shot_w, g_shot_h); break;
     case IDM_SETTINGS:   kbwin_open(hwnd, &g_ic, (int)shm->device); break;
     case IDM_FW_INSTALL: do_install_firmware(hwnd); break;
     case IDM_FW_WIZ:     boot_firmware(hwnd, "wiz"); break;
     case IDM_FW_CAANOO:  boot_firmware(hwnd, "caanoo"); break;
     case IDM_FW_F100:    boot_firmware(hwnd, "f100"); break;
     case IDM_FW_F200:    boot_firmware(hwnd, "f200"); break;
-    case IDM_SET_GAMES:  pick_games_folder(hwnd); break;
     case IDM_PATHS:      paths_win_open(hwnd); break;
-    case IDM_CONTROLS:
-        MessageBoxA(hwnd, "D-pad:    Arrow keys\nA/B/X/Y:  Z / X / A / S\nStart:    Enter\n"
-                          "Select:   Backspace\nL / R:    Q / W\nVol +/-:  = / -\n"
-                          "Gamepads work too (Xbox layout).\n\n"
-                          "Rebind any of these per system (GP2X/Wiz/Caanoo) in\n"
-                          "Input > Keybindings (or press F1).\n\n"
-                          "Fullscreen: F11\nQuit:     Esc",
-                    "Controls", MB_OK); break;
     case IDM_ABOUT:
-        MessageBoxA(hwnd, "magiceyes\nRun GP2X / Wiz games on a PC.\ngithub.com/zdiemer/magiceyes",
+        MessageBoxA(hwnd,
+                    "magiceyes"
+#ifdef ME_VERSION
+                    "  " ME_VERSION
+#endif
+                    "\nRun Game Park GP2X, Wiz, and Caanoo games on a PC.\n\n"
+                    "Copyright (c) 2026 Zach Diemer\n"
+                    "github.com/zdiemer/magiceyes",
                     "About magiceyes", MB_OK); break;
     default:
         if (id >= IDM_RECENT0 && id < IDM_RECENT0 + MAX_RECENT) {
@@ -647,6 +713,9 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB565,
         SDL_TEXTUREACCESS_STREAMING, w, h);
     int cur_w = w, cur_h = h;
+#ifdef ME_WINMENU
+    g_shot_w = cur_w; g_shot_h = cur_h;   /* keep the Video>Screenshot menu in sync with present dims */
+#endif
 #ifdef ME_BUNDLED
     if (g_fwlog) {
         int nd = SDL_GetNumRenderDrivers();
@@ -686,6 +755,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
        controllers already attached; hotplug is handled in the event loop. */
 #ifdef ME_WINMENU
     { char cfg[MAX_PATH]; me_paths_dir(ME_PATH_SETTINGS, cfg, sizeof cfg); ic_set_config_dir(cfg); }
+    prefs_load();   /* persisted volume / mute / confirm-on-exit (GUI prefs win over CLI defaults) */
 #endif
     ic_load(&g_ic);
     su_init(&g_su, &g_ic);
@@ -699,8 +769,16 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            /* window close + controller hotplug are processed regardless of the overlay */
-            if (e.type == SDL_QUIT) { running = 0; continue; }
+            /* window close (X / Alt+F4 / File>Exit) + controller hotplug processed regardless of
+               the overlay. The close box routes through request_exit (confirm unless disabled). */
+            if (e.type == SDL_QUIT) {
+#ifdef ME_WINMENU
+                if (request_exit(hwnd)) running = 0;
+#else
+                running = 0;
+#endif
+                continue;
+            }
             if (e.type == SDL_CONTROLLERDEVICEADDED) {
                 if (g_npads < ME_MAXPADS) { SDL_GameController *c = SDL_GameControllerOpen(e.cdevice.which);
                     if (c) g_pads[g_npads++] = c; }
@@ -732,7 +810,11 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
 #else
                 if (kc == SDLK_F1) su_open(&g_su, (int)shm->device);   /* in-SDL keybind overlay */
 #endif
+#ifdef ME_WINMENU
+                else if (kc == SDLK_ESCAPE) { if (request_exit(hwnd)) running = 0; }
+#else
                 else if (kc == SDLK_ESCAPE) running = 0;
+#endif
                 else if (kc == SDLK_F11 || (kc == SDLK_RETURN && (mod & KMOD_ALT)))
                     toggle_fullscreen(win);
                 else if (kc == SDLK_F12) save_screenshot(cur_w, cur_h);
@@ -834,6 +916,9 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
         /* resize texture if the game changed mode */
         if ((int)shm->width != cur_w || (int)shm->height != cur_h) {
             cur_w = (int)shm->width; cur_h = (int)shm->height;
+#ifdef ME_WINMENU
+            g_shot_w = cur_w; g_shot_h = cur_h;
+#endif
             if (cur_w > 0 && cur_h > 0) {
                 g_base_w = cur_w; g_base_h = cur_h;   /* scale presets follow the new mode */
                 SDL_DestroyTexture(tex);

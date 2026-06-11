@@ -112,6 +112,11 @@ void me_paths_dir(me_path_kind k, char *out, size_t cap) {
     if (k < 0 || k >= ME_PATH_NKINDS) { snprintf(out, cap, "."); return; }
     if (s_override[k][0]) snprintf(out, cap, "%s", s_override[k]);
     else                  me_paths_default(k, out, cap);
+#ifdef _WIN32
+    /* Defaults join the exe dir (backslashes) with "/sub"; overrides come from the picker
+       (backslashes). Normalise to a single separator so the UI never shows mixed slashes. */
+    for (char *p = out; *p; p++) if (*p == '/') *p = '\\';
+#endif
     mkdirs(out);
 }
 
