@@ -30,10 +30,6 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 - **Odonata — gameplay object-pool crash (PARKED).** Title+menu render, but a few seconds
   into gameplay hits the game's own assert (object.cpp:297) — dead sprites never freed.
   Decisive next test: compare under the qemu backend (correct nwfpe FPA + cooperative threads).
-- **Windows multi-reload crash.** Reloading TWICE to *different* games after a memory-heavy
-  first game (Vektar/Knight Lore) hard-crashes (access violation). Clean under Linux+ASan ⇒
-  a fork-internal / Windows-mem teardown issue. Repro: `ME_GP2X_NOBLIT`. Diagnostics:
-  `ME_FAULTLOG`, `ME_TEST_RELOAD="a;b"`. See `gp2x-static-titles-and-reload-crash`.
 - **Blazar — guest SIGSEGV (qemu backend only).** Inits gfx+audio ~2s then null+offset deref.
   Runs fine as a static title on the native engine; re-confirm the qemu-backend status.
 - **Knight Lore — red error screen (minor).** Missing `timidity.cfg` ⇒ no MIDI music;
@@ -90,8 +86,6 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
   the fake-SDL shim's qemu role, `magiceyes.sh`'s qemu branch). The native engine is already the
   shipping cross-platform path; qemu has been the verified-fast GP2X reference. Before flipping:
   confirm input + the remaining qemu-only titles (e.g. Wiz dynamic-libSDL games) run on the engine.
-  (The multi-reload teardown crash is RESOLVED 2026-06-10 — upstream Unicorn MinGW `qemu_vfree`
-  mismatch, `fork-patches/mingw_vfree.py`; see `gp2x-static-titles-and-reload-crash`.)
   Then drop the qemu build/run scripts + docs. One backend = less to maintain.
 - **Fold the Unicorn backend onto the shared `gp2x_device.c`** — it still has its own copy of the
   device logic; unify so there's one implementation. Low priority (fallback, and it works).
