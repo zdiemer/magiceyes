@@ -41,4 +41,4 @@ varied playability — they are not listed here.
 | Patissier | ⛔ Broken |
 | Propis | ✅ Playable |
 | Redemption: Liar | ✅ Playable |
-| Rhythmos | 🟡 Ingame |
+| Rhythmos | ✅ Playable |
