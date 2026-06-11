@@ -45,6 +45,16 @@ host/engine/fork-patches/apply_and_build.sh        # ME_UNICORN_FORK overrides ~
   so each FP op cost a full `uc_emu_start` restart (Odonata's per-bullet sin/cos → a few fps).
   Mirrors the UC_HOOK_INTR resume path; unhandled invalid insns still stop with
   `UC_ERR_INSN_INVALID`.
+- **`kuser_cmpxchg.py`** — emit the ARM kuser_cmpxchg helper (0xffff0fc0) as an in-TB host-atomic
+  `tcg_gen_atomic_cmpxchg_i32` in `qemu/target/arm/translate.c`, instead of the engine's
+  `svc #0x90fff0` trap form. EVERY glibc/libstdc++ atomic (each malloc-arena lock, every
+  `std::string` refcount) goes through this helper; a Caanoo title that loads many packed keysounds
+  (Rhythmos) fires it millions of times, and the svc trap ends a TB + exits the cpu loop each time —
+  song-load crawled (~0.06 MIPS, looked like a hang). The in-TB CAS is atomic across the
+  native-threads engine's many ucs because `parallel_cflags.py` forces `CF_PARALLEL`. (LDREX/STREX
+  can't be used: the exclusive monitor is per-uc and unreliable across our host threads → STREX
+  spuriously fails → infinite retry. A direct atomic_cmpxchg has no monitor.) ~1.8x on atomic-heavy
+  loading; verified no regression on the threaded GP2X reference (Payback).
 - **`mmap_lock.py`** — restore qemu's `mmap_lock()`/`mmap_unlock()` (no-op'd by Unicorn 2.0.1
   for single-uc use) as a real process-global recursive mutex
   (`qemu/include/exec/exec-all.h` + `qemu/accel/tcg/translate-all.c`). Serialises TB

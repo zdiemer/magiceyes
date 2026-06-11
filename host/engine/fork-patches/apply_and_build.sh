@@ -19,20 +19,20 @@ cd "$FORK"
 git config user.email "dev@magiceyes.local" 2>/dev/null || true
 git config user.name  "magiceyes"           2>/dev/null || true
 git checkout -B magiceyes >/dev/null 2>&1 || true
-# drop our prior patch commit(s) so we re-apply cleanly from vanilla
-while git log --oneline -1 | grep -qi "gp2x:"; do git reset --hard HEAD~1 >/dev/null; done
+# Drop our prior patch commits so we re-apply cleanly: reset to the first commit (top-down) whose
+# message is NOT one of ours (prefixes "gp2x:"/"mingw:") -- i.e. the vanilla upstream base.
+BASE=$(git log --format='%H %s' | awk '!/^[0-9a-f]+ (gp2x|mingw):/{print $1; exit}')
+[ -n "$BASE" ] && git reset --hard "$BASE" >/dev/null
 
-python3 "$HERE/smc_freeze.py" "$FORK"
-git add -A
-git commit -q -m "gp2x: SMC-freeze in softmmu notdirty/TLB path" && echo "  committed SMC-freeze" || true
-
-python3 "$HERE/parallel_cflags.py" "$FORK"
-git add -A
-git commit -q -m "gp2x: CF_PARALLEL for real host atomics (native-threads swp)" && echo "  committed CF_PARALLEL" || true
-
-python3 "$HERE/fpa_resume.py" "$FORK"
-git add -A
-git commit -q -m "gp2x: resume in place after a handled invalid insn (FPA emulation perf)" && echo "  committed FPA-resume" || true
+# Patch order matters (later patches edit files the earlier ones may have touched). Each .py is
+# idempotent; commit messages mirror the existing branch so the log stays stable.
+apply() { python3 "$HERE/$1" "$FORK"; git add -A; git commit -q -m "$2" && echo "  committed $1" || true; }
+apply smc_freeze.py     "gp2x: SMC-freeze in softmmu notdirty/TLB path"
+apply parallel_cflags.py "gp2x: CF_PARALLEL for real host atomics (native-threads swp)"
+apply fpa_resume.py     "gp2x: resume in place after a handled invalid insn (FPA emulation perf)"
+apply mingw_vfree.py    "mingw: qemu_vfree must __mingw_aligned_free, not VirtualFree"
+apply mmap_lock.py      "gp2x: real process-global recursive mmap_lock (was a Unicorn no-op)"
+apply kuser_cmpxchg.py  "gp2x: kuser_cmpxchg as in-TB host-atomic CAS (atomic-heavy code perf)"
 
 echo "== build fork (force re-bundle) =="
 cd "$FORK/build"
