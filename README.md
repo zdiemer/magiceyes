@@ -73,18 +73,8 @@ magiceyes.exe [options] [game]
 ## Supported games
 
 magiceyes is under active development; coverage grows as device features and games are
-exercised. The full per-title compatibility map (GP2X / Wiz / Caanoo, with proposed fixes) is in
-[`COMPATIBILITY.md`](COMPATIBILITY.md). Highlights of what runs today:
-
-| Device | Game | Status |
-|--------|------|--------|
-| GP2X | **Payback** (commercial) | ✅ Full gameplay — video, audio, input, 30 fps |
-| GP2X | **Blazar**, **Quartz 2**, **Vektar** | ✅ Render + play with audio/input |
-| GP2X | **Knight Lore** | ✅ Plays (MIDI music needs a `timidity.cfg` you supply) |
-| GP2X | **Odonata**, **Wind & Water** | ⚠️ Render/run; need a device rootfs (dynamically linked) |
-| Wiz | **Deicide 3** (commercial, Inka DRM) | ⚠️ Intro only |
-| Wiz | **Cave Story / NXEngine** | ✅ Full |
-| Wiz | **Her Knights**, **Patissier** | ⚠️ Boot to render + audio (Her Knights BGM imperfect) |
+exercised. See [`COMPATIBILITY.md`](COMPATIBILITY.md) for the per-title compatibility map
+across GP2X, Wiz, and Caanoo.
 
 The native Windows build runs **statically-linked GP2X titles** out of the box.
 **Dynamically-linked titles** (most Wiz games and a few GP2X games) additionally need a
