@@ -773,13 +773,25 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             /* window close (X / Alt+F4 / File>Exit) + controller hotplug processed regardless of
-               the overlay. The close box routes through request_exit (confirm unless disabled). */
-            if (e.type == SDL_QUIT) {
+               the overlay. The close box routes through request_exit (confirm unless disabled).
+               Handle BOTH the per-window CLOSE and SDL_QUIT: SDL only auto-translates the X button
+               into SDL_QUIT when the closing window is the LAST SDL window, but the GL host-GPU
+               backend (glgpu.c) keeps a hidden second OPENGL window alive -- so for GL titles the X
+               produced a CLOSE with no SDL_QUIT and the old SDL_QUIT-only handler ignored it (the
+               window wouldn't close; only Esc, which routes through request_exit directly, worked). */
+            if (e.type == SDL_QUIT ||
+                (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE
+                 && e.window.windowID == SDL_GetWindowID(win))) {
 #ifdef ME_WINMENU
-                if (request_exit(hwnd)) running = 0;
+                int do_quit = request_exit(hwnd);
 #else
-                running = 0;
+                int do_quit = 1;
 #endif
+                /* a single X click can yield a CLOSE *and* an SDL_QUIT; collapse the pair so the
+                   confirm dialog runs once (and a stray queued close can't re-prompt on cancel). */
+                SDL_FlushEvent(SDL_QUIT);
+                SDL_FlushEvent(SDL_WINDOWEVENT);
+                if (do_quit) running = 0;
                 continue;
             }
             if (e.type == SDL_CONTROLLERDEVICEADDED) {
