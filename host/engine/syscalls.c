@@ -852,9 +852,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (t == DEV_SHMFB) return shmfb_mmap(a1);
         if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
         long r = do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
-        if (fd >= 0 && getenv("ME_MMAPLOG")) { /* file-backed map: print base+len+fd+path for the lib layout */
-            char lp[256] = "?", pf[64]; snprintf(pf, sizeof pf, "/proc/self/fd/%d", fd);
+        if (fd >= 0 && getenv("ME_MMAPLOG")) { /* file-backed map: print base+len+fd(+path) for the lib layout */
+            char lp[256] = "?";
+#ifndef _WIN32                                 /* /proc/self/fd readlink is a Linux-only triage aid */
+            char pf[64]; snprintf(pf, sizeof pf, "/proc/self/fd/%d", fd);
             ssize_t ln = readlink(pf, lp, sizeof lp - 1); if (ln >= 0) lp[ln] = 0; else lp[0] = '?', lp[1] = 0;
+#endif
             fprintf(stderr, "  [mmap] fd=%d off=%llx len=%x prot=%x -> %08lx  %s\n",
                     fd, (unsigned long long)a5 * 4096, a1, a3, r, lp);
         }
