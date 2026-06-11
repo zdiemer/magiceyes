@@ -1027,15 +1027,24 @@ int SDL_ConvertAudio(SDL_AudioCVT *cvt) {
     int dbps = (p.df & 0xFF) / 8; if (dbps < 1) dbps = 1;
     int d_signed = (p.df & 0x8000) ? 1 : 0;
     int dc = p.dc ? p.dc : 1;
-    double ratio = (double)p.dr / (double)p.sr;        /* resample -> dst rate */
-    int out_frames = (int)(in_frames * ratio);
+    /* Resample with 16.16 FIXED-POINT, never soft-float. The guest ARM has no FPU, so the old
+       per-sample `double` math (o/ratio, the lerp) compiled to __aeabi_dmul/__adddf3/__fixdfsi
+       calls -- ~150 guest instructions per output sample. A song's full background-music track is
+       ~3.3M frames (U8 stereo, ~2.5 min); converting it that way takes minutes under the engine's
+       interpreter and looked like a hang on song launch (Rhythmos). Integer math is far faster and
+       ratio==1 (same rate, the common case here) degenerates to a straight copy. */
+    long long out_ll = p.sr ? (long long)in_frames * (long long)p.dr / (long long)p.sr : in_frames;
+    int out_frames = out_ll > 0 ? (int)out_ll : 0;
+    unsigned step = p.dr ? (unsigned)(((unsigned long long)p.sr << 16) / (unsigned)p.dr) : (1u << 16);
     Uint8 *ob = cvt->buf;
+    unsigned long long pos = 0;                         /* 16.16 sample position (64-bit: a long
+                                                           track * 65536 overflows 32 bits) */
     int o;
     for (o = 0; o < out_frames; o++) {
-        double sp = o / ratio;
-        int i0 = (int)sp, i1 = i0 + 1; if (i1 >= in_frames) i1 = in_frames - 1;
-        double fr = sp - i0;
-        int s16 = (int)(g_cvt_mono[i0] * (1.0 - fr) + g_cvt_mono[i1] * fr);
+        int i0 = (int)(pos >> 16), i1 = i0 + 1; if (i1 >= in_frames) i1 = in_frames - 1;
+        int s16 = g_cvt_mono[i0];
+        unsigned fr = (unsigned)pos & 0xffff;
+        if (fr) s16 += (int)(((long long)(g_cvt_mono[i1] - g_cvt_mono[i0]) * (int)fr) >> 16);
         for (c = 0; c < dc; c++) {
             int idx = o * dc + c;
             if (dbps == 2) {                            /* S16 (assume signed little-endian) */
@@ -1045,6 +1054,7 @@ int SDL_ConvertAudio(SDL_AudioCVT *cvt) {
                 ob[idx] = d_signed ? (Uint8)(signed char)v8 : (Uint8)(v8 + 128);
             }
         }
+        pos += step;
     }
     cvt->len_cvt = out_frames * dc * dbps;
     return 0;
