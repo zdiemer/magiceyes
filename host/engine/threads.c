@@ -151,18 +151,24 @@ static void fxq_init(void) {
 static struct fxq *fxq_for(uint32_t a) { return &g_fxq[(a >> 2) % NFXQ]; }
 
 /* FUTEX_WAIT: block iff *uaddr == val. Called holding g_biglock; releases it while
-   blocked so other threads run, re-acquires on wake. Returns 0 woken, -EAGAIN if value
-   mismatched. */
-int futex_wait(uint32_t uaddr, uint32_t val) {
+   blocked so other threads run, re-acquires on wake. `abstime` (CLOCK_REALTIME absolute, NULL =
+   infinite) is the guest's timeout -- HONOURING it is essential: glibc's timed waits
+   (pthread_cond_timedwait, adaptive/timed mutex) call FUTEX_WAIT[_BITSET] with a deadline and
+   expect to wake and re-poll when it elapses. Ignoring it (always pthread_cond_wait) left a
+   single-threaded guest blocked indefinitely on a timed wait -- it only progressed on stray
+   hash-collision wakes, which is what made Rhythmos's GPAC movie init crawl for minutes.
+   Returns 0 woken, -ETIMEDOUT on timeout, -EAGAIN if value mismatched. */
+int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime) {
     struct fxq *q = fxq_for(uaddr);
     pthread_mutex_lock(&q->m);
     uint32_t cur = 0; uc_mem_read(g_uc, uaddr, &cur, 4);
     if (cur != val) { pthread_mutex_unlock(&q->m); return -11; /* EAGAIN */ }
     BIGLOCK_UNLOCK();                           /* let others run while we block */
-    pthread_cond_wait(&q->c, &q->m);           /* atomically releases q->m */
+    int r = abstime ? pthread_cond_timedwait(&q->c, &q->m, abstime)
+                    : pthread_cond_wait(&q->c, &q->m);   /* atomically releases q->m */
     pthread_mutex_unlock(&q->m);
     BIGLOCK_LOCK();
-    return 0;
+    return (r == ETIMEDOUT) ? -110 /* -ETIMEDOUT: guest re-checks + re-polls */ : 0;
 }
 int futex_wake(uint32_t uaddr, int n) {
     struct fxq *q = fxq_for(uaddr);

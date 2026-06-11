@@ -253,7 +253,7 @@ extern int g_threaddump;
 void uc_hook_std(uc_engine *u);
 uc_engine *uc_new_thread(void);
 void *thread_entry(void *arg);
-int futex_wait(uint32_t uaddr, uint32_t val);
+int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime);
 int futex_wake(uint32_t uaddr, int n);
 void futex_wake_all(void);   /* broadcast every wait-queue (teardown: free blocked threads) */
 void sigsuspend_wait(void);

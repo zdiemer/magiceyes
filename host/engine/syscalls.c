@@ -1188,7 +1188,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 20:   return g_self->tid;  /* getpid (LinuxThreads: 1 pid per thread) */
     case 224:  return g_self->tid;  /* gettid */
     case 64:   return g_self->ppid;  /* getppid (LinuxThreads orphan check) */
-    case 256:  return 1;  /* set_tid_address */
+    case 256:  return g_self->tid;  /* set_tid_address: returns the caller's TID. MUST match gettid(224)
+                                       -- glibc caches this return as THREAD_SELF->tid, and a recursive/
+                                       owner-checked mutex compares __owner (set from that) against gettid.
+                                       Returning a constant 1 here while gettid returns g_self->tid made
+                                       the check never match -> the thread deadlocked re-locking a mutex
+                                       it already owned (Rhythmos GPAC movie init). */
     case 338:  return 0;  /* set_robust_list */
     case 174: { /* rt_sigaction(signum, act, oldact, sigsetsize) */
         int sig = (int)a0;
@@ -1280,13 +1285,38 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         BIGLOCK_LOCK();
         return 0;
     }
-    case 240: { /* futex(uaddr, op, val, ...) — mask off PRIVATE_FLAG(0x80)+CLOCK_REALTIME(0x100) */
+    case 240: { /* futex(uaddr, op, val, timeout, ...) — mask off PRIVATE_FLAG(0x80)+CLOCK_REALTIME(0x100) */
         int op = (int)(a1 & 0x7f);
         /* WAIT_BITSET(9)/WAKE_BITSET(10) behave like WAIT/WAKE for our purposes (we ignore the
-           bitset + abs timeout). Mapping WAIT_BITSET to futex_wait also makes glibc's NPTL-init
-           FUTEX_CLOCK_REALTIME probe return -EAGAIN (value mismatch) as it asserts it must. */
-        if (op == 0 || op == 9)  return futex_wait(a0, a2);       /* FUTEX_WAIT[_BITSET] */
-        if (op == 1 || op == 10) return futex_wake(a0, (int)a2);  /* FUTEX_WAKE[_BITSET] */
+           bitset). We DO honour the timeout (a3): FUTEX_WAIT's is a RELATIVE timespec, WAIT_BITSET's
+           is ABSOLUTE (CLOCK_REALTIME if flag 0x100, else CLOCK_MONOTONIC). Compute a CLOCK_REALTIME
+           absolute deadline; NULL a3 = infinite. (Ignoring it stalled single-threaded timed waits.) */
+        if (op == 0 || op == 9) {
+            struct timespec abst; int have = 0;
+            if (a3) {
+                uint32_t gt[2] = {0, 0}; uc_mem_read(g_uc, a3, gt, 8);   /* 32-bit tv_sec, tv_nsec */
+                long long rel_ns;
+                if (op == 0) rel_ns = (long long)gt[0] * 1000000000LL + gt[1];   /* relative */
+                else {                                                            /* absolute */
+                    struct timespec now;
+                    clock_gettime((a1 & 0x100) ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
+                    rel_ns = ((long long)gt[0] - now.tv_sec) * 1000000000LL + ((long long)gt[1] - now.tv_nsec);
+                }
+                if (rel_ns < 0) rel_ns = 0;
+                struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+                long long t = (long long)now.tv_sec * 1000000000LL + now.tv_nsec + rel_ns;
+                abst.tv_sec = (time_t)(t / 1000000000LL); abst.tv_nsec = (long)(t % 1000000000LL);
+                have = 1;
+            }
+            if (getenv("ME_FUTEXLOG")) { static int n=0; if (n++<40) {
+                uint32_t m[5]={0}; uc_mem_read(g_uc, a0, m, 20);   /* mutex: __lock,__count,__owner,+12,+16 */
+                fprintf(stderr,"FUTEX wait op=%d addr=%08x val=%u tmo=%d | __lock=%u __count=%u __owner=%u w12=%u w16=%u | tid=%d pc=%08x\n",
+                        op,a0,a2,have,m[0],m[1],m[2],m[3],m[4],g_self?g_self->tid:-1,g_self?g_self->last_pc:0);} }
+            return futex_wait(a0, a2, have ? &abst : NULL);          /* FUTEX_WAIT[_BITSET] */
+        }
+        if (op == 1 || op == 10) { if (getenv("ME_FUTEXLOG")) { static int w=0; if(w++<40)
+                fprintf(stderr,"FUTEX wake addr=%08x n=%d\n", a0, (int)a2); }
+            return futex_wake(a0, (int)a2); }                        /* FUTEX_WAKE[_BITSET] */
         return 0;
     }
     case 120: { /* clone(flags, child_stack, ptid, tls, ctid) -> a native host thread */
