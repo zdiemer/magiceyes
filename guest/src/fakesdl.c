@@ -40,6 +40,7 @@
 #include <dlfcn.h>
 #include <setjmp.h>
 #include <pthread.h>
+#include <errno.h>
 
 #include "gp2xshm.h"
 #include "glcmd.h"      /* ME_NR_REPORT: surface unsupported SDL features into the engine's run report */
@@ -760,7 +761,18 @@ void SDL_Delay(Uint32 ms) {
 struct SDL_mutex { pthread_mutex_t m; };
 SDL_mutex *SDL_CreateMutex(void) {
     SDL_mutex *x = malloc(sizeof *x);
-    if (x) pthread_mutex_init(&x->m, NULL);
+    if (x) {
+        /* RECURSIVE, matching real SDL 1.2 (src/thread/pthread/SDL_sysmutex.c). SDL mutexes are
+           documented to be re-entrant by the same thread, and callers rely on it -- e.g. Rhythmos's
+           embedded GPAC wraps its node-registry lock in SDL_mutexP via LockEnter, and Register()
+           holds it while FindClass() re-locks it. A plain (NULL-attr / non-recursive) mutex here
+           self-deadlocked that re-entry -> the song-launch "hang". */
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&x->m, &attr);
+        pthread_mutexattr_destroy(&attr);
+    }
     return x;
 }
 int  SDL_mutexP(SDL_mutex *x) { return x ? pthread_mutex_lock(&x->m)   : -1; }  /* SDL_LockMutex   */
@@ -774,6 +786,26 @@ SDL_cond *SDL_CreateCond(void) {
     return x;
 }
 void SDL_DestroyCond(SDL_cond *x) { if (x) { pthread_cond_destroy(&x->c); free(x); } }
+
+/* Condition-variable ops. GPAC's MPEG-4 systems runtime (compiled into Rhythmos)
+   uses these for its event/thread signalling; without them lazy symbol resolution
+   aborts the game ("undefined symbol: SDL_CondBroadcast") the moment a song loads. */
+int SDL_CondSignal(SDL_cond *x)    { return x ? pthread_cond_signal(&x->c)    : -1; }
+int SDL_CondBroadcast(SDL_cond *x) { return x ? pthread_cond_broadcast(&x->c) : -1; }
+int SDL_CondWait(SDL_cond *x, SDL_mutex *m) {
+    return (x && m) ? pthread_cond_wait(&x->c, &m->m) : -1;
+}
+/* SDL 1.2: returns 0 if signalled, SDL_MUTEX_TIMEDOUT(1) on timeout. Default cond
+   attr uses CLOCK_REALTIME, so build the deadline from that clock. */
+int SDL_CondWaitTimeout(SDL_cond *x, SDL_mutex *m, Uint32 ms) {
+    if (!x || !m) return -1;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec  += ms / 1000;
+    ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    return pthread_cond_timedwait(&x->c, &m->m, &ts) == ETIMEDOUT ? 1 : 0;
+}
 
 struct SDL_Thread { pthread_t t; int (*fn)(void *); void *data; };
 static void *sdl_thread_trampoline(void *p) {
@@ -794,6 +826,69 @@ void SDL_WaitThread(SDL_Thread *th, int *status) {
     if (status) *status = 0;
     free(th);
 }
+/* Calling thread's id. GPAC compares these to detect re-entrancy, so only
+   per-thread consistency matters, not the exact value. */
+Uint32 SDL_ThreadID(void) {
+    Uint32 id = (Uint32)(uintptr_t)pthread_self();
+    if (getenv("FAKESDL_TIDLOG")) { static int n = 0;
+        if (n++ < 80) fprintf(stderr, "SDL_ThreadID -> %08x\n", id); }
+    return id;
+}
+
+/* --- GPH Pollux hardware video-overlay extensions ----------------------------
+   On a real Caanoo the MLC has a dedicated YUV video layer beneath the RGB
+   framebuffer. Rhythmos decodes its MPEG-4 background (via the GPAC systems lib
+   compiled into the .gpe) into planar Y/Cb/Cr in video memory, hands the layer
+   the planes' physical addresses (FB_VMEMINFO), positions it (FB_VIDEO_CONF),
+   and draws its UI on the RGB layer leaving the video region as the colour-key
+   so the movie shows through. We have no hardware layer, so we capture the layer
+   state here and composite it in present() (see g_fbvid_*). Layout mirrors
+   the game passes real pointers. FB_VMEMINFO / FB_VIDEO_CONF / FB_RGBSET come
+   from the SDK's pollux_fb_cfg.h (pulled in via SDL_video.h). */
+
+/* Captured overlay state, consumed by present(). */
+static int          g_fbvid_on = 0;
+static FB_VMEMINFO  g_fbvid_mem;
+static FB_VIDEO_CONF g_fbvid_conf;
+static int          g_fbvid_have_conf = 0;
+
+static int fblog(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("FAKESDL_FBLOG") ? 1 : 0;
+    return v;
+}
+
+int SDL_FBVideoStart(FB_VMEMINFO *m) {
+    if (m) { g_fbvid_mem = *m; g_fbvid_on = 1; }
+    if (fblog() && m)
+        fprintf(stderr, "fakesdl: FBVideoStart fourcc=%08x %dx%d Lu=%08x/%u Cb=%08x/%u Cr=%08x/%u dev=%u\n",
+                m->FourCC, m->Width, m->Height, m->LuAddr, m->LuStride,
+                m->CbAddr, m->CbStride, m->CrAddr, m->CrStride, m->VideoDev);
+    return 0;
+}
+int SDL_FBVideoMemoryUpdate(FB_VMEMINFO *m) {
+    if (m) { g_fbvid_mem = *m; g_fbvid_on = 1; }
+    if (fblog() && m)
+        fprintf(stderr, "fakesdl: FBVideoMemUpdate Lu=%08x Cb=%08x Cr=%08x\n",
+                m->LuAddr, m->CbAddr, m->CrAddr);
+    return 0;
+}
+int SDL_FBVideoUpdate(FB_VIDEO_CONF *c) {
+    if (c) { g_fbvid_conf = *c; g_fbvid_have_conf = 1; }
+    if (fblog() && c)
+        fprintf(stderr, "fakesdl: FBVideoUpdate fourcc=%08x key=%08x src=%dx%d dst=%dx%d rect=(%d,%d,%d,%d)\n",
+                c->FourCC, c->ColorKey, c->SrcWidth, c->SrcHeight, c->DstWidth, c->DstHeight,
+                c->Left, c->Top, c->Right, c->Bottom);
+    return 0;
+}
+int SDL_FBVideoStop(unsigned int *v) { (void)v; g_fbvid_on = 0;
+    if (fblog()) fprintf(stderr, "fakesdl: FBVideoStop\n"); return 0; }
+int SDL_FBDeviceEnable(unsigned int *v) {
+    if (fblog()) fprintf(stderr, "fakesdl: FBDeviceEnable=%u\n", v ? *v : 0); return 0; }
+int SDL_FBRGBControl(FB_RGBSET *s)   { (void)s; return 0; }
+int SDL_FBVideoPriority(unsigned int *v) { (void)v; return 0; }
+int SDL_FBLayerTPColor(unsigned int *v)  { (void)v; return 0; }
+int SDL_FBLayerAlphaBLD(unsigned int *v) { (void)v; return 0; }
 
 /* SDL 1.2 timer: fire `cb` every `interval` ms; cb returns 0 to stop or the next interval. The menu
    uses only a couple, so one helper thread per timer is fine. */

@@ -130,10 +130,38 @@ void mem_register_external(uint32_t guest, uint32_t len, void *host) {
 }
 
 /* Map every recorded region into a fresh uc — the native-thread (and ARM940 second-core) factory. */
+/* Populate the ARMv5 kuser helper page's trampoline code into u's 0xffff0000 page (NOT the TLS
+   slot at 0xffff0ff0, which is per-thread). Shared by the main-uc setup and the per-thread
+   private kuser pages in uc_map_all. */
+void kuser_populate(uc_engine *u) {
+    uint32_t mb = 0xe1a0f00eu;                        /* mov pc,lr (memory_barrier) */
+    uc_mem_write(u, 0xffff0fa0u, &mb, 4);
+    uint32_t cx[] = {0xef90fff0u, 0xe1a0f00eu};       /* svc #0x90fff0 ; mov pc,lr (cmpxchg) */
+    uc_mem_write(u, 0xffff0fc0u, cx, sizeof cx);
+    uint32_t gt[] = {0xe59f0008u, 0xe1a0f00eu};       /* get_tls: ldr r0,[pc,#8]; mov pc,lr */
+    uc_mem_write(u, 0xffff0fe0u, gt, sizeof gt);
+    uint32_t ver = 2; uc_mem_write(u, 0xffff0ffcu, &ver, 4);
+    uint32_t tramp[] = {0xe3a070adu, 0xef000000u};    /* SIG_TRAMP: mov r7,#173; svc 0 */
+    uc_mem_write(u, 0xffff0f00u, tramp, sizeof tramp);
+}
+
 void uc_map_all(uc_engine *u) {
     REGLOCK_LOCK();
-    for (int i = 0; i < g_nreg; i++)
+    for (int i = 0; i < g_nreg; i++) {
+        if (g_reg[i].addr == 0xffff0000u) {
+            /* The kuser TLS slot (0xffff0ff0) is PER-THREAD: ARMv5 has no HW TLS register, so the
+               real kernel context-switches it. A SHARED backing lets the last thread to start
+               clobber every other thread's tls -> the guest's pthread_self()/__kuser_get_tls
+               returns the wrong TCB -> two threads see the same ThreadId (Rhythmos's GPAC movie
+               player then aborts on its `ProcessLocked != ThreadId()` lock assert). Give each
+               worker uc a PRIVATE copy of the page; the trampoline code is identical, only the
+               tls differs (written by thread_entry / set_tls). */
+            uc_mem_map(u, 0xffff0000u, PAGE, UC_PROT_READ | UC_PROT_EXEC);
+            kuser_populate(u);
+            continue;
+        }
         uc_mem_map_ptr(u, g_reg[i].addr, g_reg[i].len, g_reg[i].perms, g_reg[i].host);
+    }
     REGLOCK_UNLOCK();
 }
 

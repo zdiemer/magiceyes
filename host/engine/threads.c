@@ -42,7 +42,10 @@ static uint32_t g_pchook = 0;
 static void pchook_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     (void)uc; (void)size; (void)user;
     static unsigned long n = 0;
-    if (++n <= 4) {
+    /* ME_PCHOOK_EQ: only fire when r0==r4 (the Lock() assert-fail condition); logs the
+       caller + which thread owns the lock. Lets us catch just the failing re-entry. */
+    if (getenv("ME_PCHOOK_EQ") && gread(UC_ARM_REG_R0) != gread(UC_ARM_REG_R4)) return;
+    if (++n <= 12) {
         static const int rr[13] = {UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3,
             UC_ARM_REG_R4,UC_ARM_REG_R5,UC_ARM_REG_R6,UC_ARM_REG_R7,UC_ARM_REG_R8,
             UC_ARM_REG_R9,UC_ARM_REG_R10,UC_ARM_REG_R11,UC_ARM_REG_R12};
@@ -82,10 +85,37 @@ static void looppc_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     }
 }
 
+/* ME_MUTEXWATCH=0xADDR: trace pthread_mutex_init/lock/unlock of one mutex + caller, to find a
+   missing-unlock / double-lock. Addresses are the EABI libpthread's (base 0x40020000). */
+static uint32_t g_mutexwatch = 0;
+static void mutex_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)size; (void)user;
+    if (gread(UC_ARM_REG_R0) != g_mutexwatch) return;
+    uint32_t pc = (uint32_t)addr, sp = gread(UC_ARM_REG_SP);
+    const char *op = pc == 0x40028624u ? "LOCK" : pc == 0x4002a1f4u ? "UNLOCK"
+                   : pc == 0x40028930u ? "TRYLOCK" : pc == 0x40027e24u ? "INIT" : "?";
+    char bt[160]; int o = 0;
+    for (int k = 0; k < 120 && o < 130; k++) {   /* bl-validated guest return addresses */
+        uint32_t w = 0; uc_mem_read(uc, sp + k * 4, &w, 4);
+        if (!(w & 3) && w >= 0x8000 && w < 0x19bc00) {
+            uint32_t ins = 0;
+            if (uc_mem_read(uc, w - 4, &ins, 4) == UC_ERR_OK && (ins >> 24) == 0xeb)
+                o += snprintf(bt + o, sizeof bt - o, " %08x", w);
+        }
+    }
+    fprintf(stderr, "MUTEX %-6s %08x tid=%d lr=%08x bt:%s\n",
+            op, g_mutexwatch, g_self ? g_self->tid : -1, gread(UC_ARM_REG_LR), bt);
+}
+
 /* ---- per-uc hooks + factory ------------------------------------------------ */
 void uc_hook_std(uc_engine *u) {
     uc_hook h;
     uc_hook_add(u, &h, UC_HOOK_INTR, intr_cb, NULL, 1, 0);
+    if (!g_mutexwatch) { const char *e = getenv("ME_MUTEXWATCH"); if (e) g_mutexwatch = strtoul(e, NULL, 0); }
+    if (g_mutexwatch) for (uint32_t a = 0; a < 4; a++) {
+        uint32_t pcs[] = {0x40027e24u, 0x40028624u, 0x40028930u, 0x4002a1f4u};
+        uc_hook_add(u, &h, UC_HOOK_CODE, mutex_cb, NULL, pcs[a], pcs[a]);
+    }
     uc_hook_add(u, &h, UC_HOOK_INSN_INVALID, fpa_invalid_cb, NULL, 1, 0);  /* FPA float emulation */
     if (!g_pchook) { const char *e = getenv("ME_PCHOOK"); if (e) g_pchook = strtoul(e, NULL, 0); }
     if (g_pchook) uc_hook_add(u, &h, UC_HOOK_CODE, pchook_cb, NULL, g_pchook, g_pchook);

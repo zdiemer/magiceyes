@@ -91,6 +91,7 @@ void *guest_to_host(uint32_t gaddr);   /* host ptr backing a guest addr (host-at
 int  mem_nreg(void);                   /* region-registry occupancy (diag) */
 int read_guest(void *dst, uint32_t gaddr, uint32_t len); /* copy guest bytes (spans regions); 0 ok, -1 unmapped */
 void uc_map_all(uc_engine *u);   /* map all guest regions into a fresh uc (thread/940 factory) */
+void kuser_populate(uc_engine *u);   /* write the kuser helper trampoline code into u's page */
 /* shared GP2X physical RAM (upper memory): one host backing, /dev/mem mmaps are windows into it */
 extern uint8_t *g_pram;
 int   phys_in_pram(uint32_t phys, uint32_t len);

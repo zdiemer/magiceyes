@@ -306,17 +306,8 @@ static void print_usage(const char *p0) {
 /* Map + populate the ARMv5 kuser helper page (no HW TLS/atomics). Redone for each fresh uc
    (uc_close drops the mappings, mem_reset frees the backing), so a reload re-installs it. */
 static void map_kuser_page(void) {
-    uc_engine *u = g_uc;
     map_region(0xffff0000u, PAGE, UC_PROT_READ | UC_PROT_EXEC);
-    uint32_t mb = 0xe1a0f00eu;                        /* mov pc,lr (memory_barrier) */
-    uc_mem_write(u, 0xffff0fa0u, &mb, 4);
-    uint32_t cx[] = {0xef90fff0u, 0xe1a0f00eu};       /* svc #0x90fff0 ; mov pc,lr (cmpxchg) */
-    uc_mem_write(u, 0xffff0fc0u, cx, sizeof cx);
-    uint32_t gt[] = {0xe59f0008u, 0xe1a0f00eu};       /* get_tls: ldr r0,[pc,#8]; mov pc,lr */
-    uc_mem_write(u, 0xffff0fe0u, gt, sizeof gt);
-    uint32_t ver = 2; uc_mem_write(u, 0xffff0ffcu, &ver, 4);
-    uint32_t tramp[] = {0xe3a070adu, 0xef000000u};    /* SIG_TRAMP: mov r7,#173; svc 0 */
-    uc_mem_write(u, 0xffff0f00u, tramp, sizeof tramp);
+    kuser_populate(g_uc);   /* worker ucs get their own PRIVATE copy in uc_map_all (per-thread tls) */
 }
 
 /* Per-game setup: a fresh uc over a clean address space, the kuser page, the ELF, the SysV

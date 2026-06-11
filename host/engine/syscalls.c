@@ -1317,6 +1317,40 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (op == 1 || op == 10) { if (getenv("ME_FUTEXLOG")) { static int w=0; if(w++<40)
                 fprintf(stderr,"FUTEX wake addr=%08x n=%d\n", a0, (int)a2); }
             return futex_wake(a0, (int)a2); }                        /* FUTEX_WAKE[_BITSET] */
+        /* REQUEUE(3)/CMP_REQUEUE(4): glibc pthread_cond_broadcast moves cond waiters to the mutex
+           futex instead of waking them all (anti-thundering-herd). We don't model a per-futex wait
+           queue we can splice, so we WAKE every waiter on the cond futex (a0); each re-tests its
+           predicate and re-blocks on the target (a4, the mutex) naturally. Spurious wakeups are
+           permitted by the futex contract, so this is correct, just less optimal. Without it cond
+           broadcasts were dropped and every waiter hung (Rhythmos/GPAC song-load deadlock). */
+        if (op == 3 || op == 4) {
+            if (op == 4) { uint32_t cur = 0; uc_mem_read(g_uc, a0, &cur, 4);
+                if (cur != a5) return -11 /*EAGAIN*/; }             /* CMP_REQUEUE val3 check */
+            if (getenv("ME_FUTEXLOG")) { static int r=0; if(r++<40)
+                fprintf(stderr,"FUTEX requeue op=%d addr=%08x -> %08x (wake-all)\n", op, a0, a4); }
+            return futex_wake(a0, INT_MAX);
+        }
+        /* WAKE_OP(5): atomically *uaddr2 = (*uaddr2 OP oparg); wake a2 on uaddr; if (oldval CMP
+           cmparg) wake a3 on uaddr2. Encoded in a5 per the FUTEX_OP macro. */
+        if (op == 5) {
+            uint32_t enc = a5;
+            int oper = (enc >> 28) & 0xf, cmp = (enc >> 24) & 0xf;
+            int oparg = (enc >> 12) & 0xfff, cmparg = enc & 0xfff;
+            if (oper & 8) { oparg = 1 << (oparg & 0x1f); oper &= 7; }   /* FUTEX_OP_OPARG_SHIFT */
+            uint32_t oldv = 0; uc_mem_read(g_uc, a4, &oldv, 4);
+            uint32_t newv = oldv;
+            switch (oper) { case 0: newv = (uint32_t)oparg; break; case 1: newv = oldv + oparg; break;
+                case 2: newv = oldv | oparg; break; case 3: newv = oldv & ~(uint32_t)oparg; break;
+                case 4: newv = oldv ^ (uint32_t)oparg; break; }
+            uc_mem_write(g_uc, a4, &newv, 4);
+            long n = futex_wake(a0, (int)a2);
+            int w2; switch (cmp) { case 0: w2 = (oldv == (uint32_t)cmparg); break;
+                case 1: w2 = (oldv != (uint32_t)cmparg); break; case 2: w2 = ((int)oldv < cmparg); break;
+                case 3: w2 = ((int)oldv <= cmparg); break; case 4: w2 = ((int)oldv > cmparg); break;
+                case 5: w2 = ((int)oldv >= cmparg); break; default: w2 = 0; break; }
+            if (w2) n += futex_wake(a4, (int)a3);
+            return n;
+        }
         return 0;
     }
     case 120: { /* clone(flags, child_stack, ptid, tls, ctid) -> a native host thread */
