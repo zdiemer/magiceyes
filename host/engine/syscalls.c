@@ -122,7 +122,7 @@ void me_rootfs_init(void) {
    runs dynamic GP2X titles too -- so an ambiguous title falls through to candidate order, which
    prefers fw/wiz. Returns 1 if candidate i is a wrong-device fw dir for this title. */
 static int cand_device_mismatch(int i) {
-    if (g_device != 1) return 0;                /* only a confident Wiz title is picky */
+    if (g_device != ME_DEV_WIZ) return 0;       /* only a confident Wiz title is picky */
     const char *p = g_cands[i];
     return strstr(p, "/fw/f100") || strstr(p, "/fw/f200");
 }
@@ -152,7 +152,7 @@ int me_rootfs_select(const char *interp) {
    Caanoo title would pull the firmware's glibc-2.3.6 under the Debian ld-linux.so.3 it's linked to
    -> ABI breakage. */
 static int caanoo_font_overlay(const char *guest, char *out, size_t cap) {
-    if (g_device != 2 || strncmp(guest, "/usr/gp2x/", 10)) return 0;
+    if (!me_model()->font_overlay || strncmp(guest, "/usr/gp2x/", 10)) return 0;
     char hp[PATH_MAX], wr[PATH_MAX]; struct stat s;
     /* 1. an installed Caanoo firmware (e.g. the user booted the firmware menu) wins. */
     if (me_writable_root(wr, sizeof wr)) {
@@ -720,7 +720,7 @@ static int sysfile_open(const char *p) {
                  "/dev/root / ext2 rw 0 0\nnone /proc proc rw 0 0\n"
                  "none /tmp tmpfs rw 0 0\nnone /dev/shm tmpfs rw 0 0\n"
                  "%s /mnt/sd vfat rw 0 0\n",
-                 g_device == 2 ? "/dev/mmcblk0p1" : "/dev/mmcsd/disc0/part1");
+                 me_model()->sd_devnode);
         return memfd_make(mb);
     }
     if (!strcmp(p, "/etc/localtime"))

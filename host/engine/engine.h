@@ -27,6 +27,7 @@
 #include "gp2xshm.h"
 #include "report.h"   /* structured run telemetry (me_report / me_report_flush_json) */
 #include "paths.h"    /* portable, user-configurable storage roots (settings/firmware/cache) */
+#include "device_model.h"  /* enum me_device + me_model() per-device capability table */
 
 /* ---- guest virtual memory layout ---- */
 #define STACK_TOP   0x80000000u
@@ -117,8 +118,7 @@ uint32_t setup_stack(int argc, char **argv);
 extern uint32_t g_at_base;   /* AT_BASE: interpreter (ld.so) load base; 0 = static binary */
 extern int g_is_dynamic;     /* 1 once load_elf has loaded a dynamically-linked title */
 extern int g_eabi;           /* current syscall ABI: 1 = EABI (svc #0), 0 = legacy OABI */
-extern int g_caanoo_dev;     /* 1 if the loaded binary is a Caanoo title (Pollux/DGE sonames) */
-extern int g_device;         /* viewer-header device: 0=GP2X 1=GP2X Wiz 2=GP2X Caanoo (set in load_elf) */
+extern int g_device;         /* viewer-header device: enum me_device (set in load_elf); index into me_model() */
 
 /* ---- GL render offload: glgpu.c dispatches glr_* to the host-GPU (OpenGL) or software (glraster.c)
    backend; the shim forwards draws via the ME_NR_GL_* syscalls ---- */
@@ -158,7 +158,7 @@ extern uint32_t g_fb_stride;   /* present row stride in bytes (gpu940 video buff
 extern int g_fb_bpp;           /* present source depth: 16 RGB565 (default) or 32 XRGB (gpu940) */
 extern uint32_t g_fb_xoff;     /* x pixel offset into each present row (gpu940 centering) */
 extern uint32_t g_blit_guest;   /* guest base of the 0xe0020000 blitter window */
-extern int g_caanoo_bpp; extern uint32_t g_caanoo_pitch;   /* Pollux MLC layer depth (bytes/px) + pitch */
+extern int g_mlc_bpp; extern uint32_t g_mlc_pitch;   /* Pollux/LF1000 MLC layer depth (bytes/px) + pitch */
 extern int g_oadr_driven;   /* game drives present via OADR writes -> async present off */
 extern int g_frame_ready;   /* OADR write -> helper thread presents this frame (off-render-thread) */
 extern uint32_t g_aud_freq, g_aud_ch, g_aud_bits;

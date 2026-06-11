@@ -90,8 +90,7 @@ static uint32_t load_interp(const char *guest_interp) {
 /* ---- ELF loader (static EXEC or dynamic ET_EXEC w/ PT_INTERP) ---- */
 /* Returns the entry PC (the interpreter's, for a dynamic binary), or 0 on a recoverable
    failure (bad path/format) so the caller can go idle instead of killing the GUI process. */
-int g_caanoo_dev = 0;   /* set in load_elf: binary links Pollux/Caanoo GLES libs -> Caanoo device */
-int g_device = 0;       /* viewer-header device, set in load_elf: 0=GP2X 1=GP2X Wiz 2=GP2X Caanoo */
+int g_device = 0;       /* viewer-header device, set in load_elf: enum me_device (index into me_model()) */
 
 /* case-insensitive equality (MinGW lacks a portable strcasecmp in <string.h> here). */
 static int eq_ci(const char *a, const char *b) {
@@ -178,10 +177,8 @@ uint32_t load_elf(const char *path) {
         dev = caanoo ? 2 : (wiz ? 1 : (so3 ? 2 : 0));
     }
     g_device = dev;
-    g_caanoo_dev = (dev == 2);   /* the shim's per-device joystick map keys on this */
     if (g_trace) fprintf(stderr, "  device=%d (%s) interp=%s\n", dev,
-                         dev == 2 ? "Caanoo" : dev == 1 ? "Wiz" : "GP2X",
-                         interp[0] ? interp : "(static)");
+                         me_model()->name, interp[0] ? interp : "(static)");
 
     /* The program loads at its fixed vaddrs (ET_EXEC, bias 0). PIE (ET_DYN main) isn't a GP2X
        case, so we don't relocate the main image. */
@@ -242,9 +239,9 @@ uint32_t setup_stack(int argc, char **argv) {
         snprintf(envbuf[nenv], sizeof envbuf[0], "FAKESDL_FPS=%s", f ? f : "60"); envs[nenv] = envbuf[nenv]; nenv++;
         /* device profile for the shim's per-device joystick map (GP2X/Wiz default vs Caanoo's
            analog-stick-axes + native button order). Explicit MAGICEYES_DEVICE wins; else use the
-           auto-detected device (g_caanoo_dev from the binary's sonames in load_elf). */
+           auto-detected device's guest tag (me_model()->guest_env; NULL for GP2X/Wiz). */
         const char *dev = getenv("MAGICEYES_DEVICE");
-        if (!dev && g_caanoo_dev) dev = "caanoo";
+        if (!dev) dev = me_model()->guest_env;
         if (dev && nenv < 11) { snprintf(envbuf[nenv], sizeof envbuf[0], "MAGICEYES_DEVICE=%s", dev);
                                 envs[nenv] = envbuf[nenv]; nenv++; }
         /* Forward shim debug toggles from the host env (the guest getenv reads only the envp we

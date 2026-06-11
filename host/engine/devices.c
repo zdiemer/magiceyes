@@ -107,8 +107,8 @@ uint32_t g_fb_xoff = 0;       /* x pixel offset into each row (gpu940 centers 32
    registers in the 0xC0000000 block, choosing a pixel depth our default RGB565 present doesn't
    match (the menu uses 24bpp RGB888, pitch 960 -> presented as 16bpp it shears + mis-colours).
    Capture HSTRIDE (bytes/pixel) + VSTRIDE (pitch) from the MLC layer so present can convert. */
-int g_caanoo_bpp = 0;         /* MLCHSTRIDE (bytes/pixel): 0 = unset (use RGB565), 2/3/4 */
-uint32_t g_caanoo_pitch = 0;  /* MLCVSTRIDE (bytes/row) */
+int g_mlc_bpp = 0;         /* MLCHSTRIDE (bytes/pixel): 0 = unset (use RGB565), 2/3/4 */
+uint32_t g_mlc_pitch = 0;  /* MLCVSTRIDE (bytes/row) */
 void record_memmap(uint32_t phys, uint32_t guest, uint32_t len) {
     if (g_nmem < 64) { g_mem[g_nmem] = (struct memmap){phys, guest, len}; g_nmem++; }
 }
@@ -131,13 +131,13 @@ extern int g_pal_have;
 void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
     int nz = 0; long nzc = 0;   /* nzc: # of non-zero indices this frame (accumulation diag) */
-    if (g_device == 2 && g_caanoo_bpp >= 3) {  /* Caanoo 24/32bpp (firmware menu) -> RGB565.
+    if (me_model()->bgr_present && g_mlc_bpp >= 3) {  /* Pollux/LF1000 24/32bpp -> RGB565.
             Pixels are B,G,R[,X] (SDL Rmask=0xff0000). The firmware menu draws 24bpp pixels into the
             640-byte-pitch fbdev (only ~213 px/row) and the real Pollux MLC upscales ~1.5x to the
             320px panel -- so derive the source width from pitch and nearest-neighbour-scale it to 320
             (srcw==320 for titles that use a full-width 24/32bpp surface => identity). */
-        int bpp = g_caanoo_bpp;
-        uint32_t pitch = g_caanoo_pitch ? g_caanoo_pitch : (uint32_t)320 * bpp;
+        int bpp = g_mlc_bpp;
+        uint32_t pitch = g_mlc_pitch ? g_mlc_pitch : (uint32_t)320 * bpp;
         int srcw = (int)(pitch / (uint32_t)bpp); if (srcw < 1) srcw = 320;
         uint16_t *dst = (uint16_t *)g_shm->pixels;
         for (int y = 0; y < 240; y++) {
@@ -284,7 +284,7 @@ void gp2x_cacheflush(uint32_t guest) {
 #define FB_LEN_  (320 * 240 * 2)
 static void fill_vscreeninfo(uint32_t gbuf) {
     uint8_t b[160]; memset(b, 0, sizeof b);
-    int c = (g_device == 2);                                    /* Caanoo menu: 24bpp BGR888 */
+    int c = (me_model()->fb_bpp == 24);                         /* Pollux/LF1000 24bpp BGR888 */
     *(uint32_t *)(b + 0)  = 320; *(uint32_t *)(b + 4)  = 240;   /* xres / yres */
     *(uint32_t *)(b + 8)  = 320; *(uint32_t *)(b + 12) = 480;   /* xres_v / yres_v (2 pages) */
     *(uint32_t *)(b + 24) = c ? 24 : 16;                        /* bits_per_pixel */
@@ -301,7 +301,7 @@ static void fill_vscreeninfo(uint32_t gbuf) {
 }
 static void fill_fscreeninfo(uint32_t gbuf, uint32_t smem_start) {
     uint8_t b[80]; memset(b, 0, sizeof b);
-    uint32_t bypp = (g_device == 2) ? 3 : 2;       /* Caanoo menu draws 24bpp; GP2X 16bpp */
+    uint32_t bypp = (me_model()->fb_bpp == 24) ? 3 : 2;   /* Pollux/LF1000 24bpp; GP2X 16bpp */
     memcpy(b + 0, "MagicEyes-MLC", 13);            /* id[16] */
     *(uint32_t *)(b + 16) = smem_start;            /* smem_start (phys base) */
     *(uint32_t *)(b + 20) = (uint32_t)320 * 240 * bypp * 2; /* smem_len (2 pages) */
@@ -694,11 +694,12 @@ static int mlc_config_write(uint32_t off, uint32_t val) {
     return 1;                                               /* known display config, not "unknown" */
 }
 
-/* Caanoo (Pollux) MLC layer registers in the 0xC0000000 block (polluxregs.h): capture the
+/* Pollux/LF1000 MLC layer registers in the 0xC0000000 block (polluxregs.h): capture the
    framebuffer geometry + scanout so present_guest shows the right buffer at the right depth.
+   The LF1000 (Didj) MLC register map is byte-identical to Pollux, so Caanoo + Didj share this.
    layer0: HSTRIDE0=0x4028 VSTRIDE0=0x402c ADDRESS0=0x4038; layer1: HSTRIDE1=0x405c VSTRIDE1=0x4060
    ADDRESS1=0x406c (the firmware menu uses layer 1, 24bpp RGB888). */
-static void caanoo_mlc_write(uint32_t off, uint32_t val) {
+static void pollux_mlc_write(uint32_t off, uint32_t val) {
     if (getenv("ME_MLCLOG")) {   /* trace MLC layer-register programming to read off the real format */
         const char *nm = off==0x4004?"SCREENSIZE": off==0x4024?"CONTROL0": off==0x4028?"HSTRIDE0":
             off==0x402c?"VSTRIDE0": off==0x4038?"ADDRESS0": off==0x400c?"LEFTRIGHT0": off==0x4010?"TOPBOTTOM0":
@@ -712,10 +713,10 @@ static void caanoo_mlc_write(uint32_t off, uint32_t val) {
        an OVERLAY -- the firmware menu programs it as a 24bpp video plane while its UI lives on the
        16bpp /dev/fb0 buffer; letting layer-1's format drive present_guest read the 16bpp UI as
        24bpp/960 -> tripled/washed garbage. (ME_MLCL1 re-enables layer-1 capture for diagnosis.) */
-    case 0x4028: g_caanoo_bpp = (int)val; break;                  /* MLCHSTRIDE0 = bytes/pixel */
-    case 0x402c: g_caanoo_pitch = val; break;                     /* MLCVSTRIDE0 = pitch (bytes/row) */
-    case 0x405c: if (getenv("ME_MLCL1")) g_caanoo_bpp = (int)val; break;
-    case 0x4060: if (getenv("ME_MLCL1")) g_caanoo_pitch = val; break;
+    case 0x4028: g_mlc_bpp = (int)val; break;                     /* MLCHSTRIDE0 = bytes/pixel */
+    case 0x402c: g_mlc_pitch = val; break;                        /* MLCVSTRIDE0 = pitch (bytes/row) */
+    case 0x405c: if (getenv("ME_MLCL1")) g_mlc_bpp = (int)val; break;
+    case 0x4060: if (getenv("ME_MLCL1")) g_mlc_pitch = val; break;
     /* MLC layer scanout base (flip). 0x4038/0x406c are MLCADDRESS0/1; the Caanoo firmware menu writes
        the base to its layer's 0x4058 register instead. The value may be a PHYSICAL address (titles
        that poke /dev/mem) OR a GUEST address (the menu's mmap'd 24bpp surface, e.g. 0x4653d020) -- try
@@ -738,8 +739,8 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     uint32_t off = (uint32_t)addr - g_mmsp2_guest;
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  MMSP2 wr %04x sz%d=%08x\n", off, size, (uint32_t)value); }
-    if (g_device == 2 && off >= 0x4000 && off <= 0x44b8) {   /* Pollux MLC (Caanoo) */
-        caanoo_mlc_write(off, (uint32_t)value); return;
+    if (me_model()->pollux_mlc && off >= 0x4000 && off <= 0x44b8) {   /* Pollux/LF1000 MLC */
+        pollux_mlc_write(off, (uint32_t)value); return;
     }
     /* ARM940 second-core control (clock 0x904, DualCPU ctrl/int 0x3b40-0x3b48). The value is also
        stored in the mapped MMSP2 RAM (so the game can read it back); here we just act on it. */
@@ -845,7 +846,7 @@ void devices_reset(void) {
     g_blit_guest = 0; memset(&g_blt, 0, sizeof g_blt);
     g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0;
     g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0;
-    g_caanoo_bpp = 0; g_caanoo_pitch = 0;
+    g_mlc_bpp = 0; g_mlc_pitch = 0;
     g_flip_active = 0; g_flip_guest = 0;
     g_oadr_driven = 0; g_frame_ready = 0;
     g_aud_freq = 44100; g_aud_ch = 2; g_aud_bits = 16;

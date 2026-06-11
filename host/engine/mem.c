@@ -316,7 +316,7 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
         /* Caanoo (Pollux) firmware menu draws 24bpp BGR into /dev/fb0. We advertise the fbdev as
            24bpp (line_length 960) so its libSDL renders a full 320px-wide surface; present it via the
            Caanoo 24bpp path (reads B,G,R at pitch 960 = 320 px/row, no scaling). */
-        if (g_device == 2) { g_caanoo_bpp = 3; g_caanoo_pitch = 960; }
+        if (me_model()->fb_bpp == 24) { g_mlc_bpp = 3; g_mlc_pitch = 960; }
         if (getenv("ME_FBWATCH")) {   /* TEMP: count guest writes into this fb (execution vs aliasing) */
             extern void fbwatch_cb(uc_engine*, uc_mem_type, uint64_t, int, int64_t, void*);
             static uc_hook fbh; uc_hook_add(g_uc, &fbh, UC_HOOK_MEM_WRITE, fbwatch_cb, NULL,
