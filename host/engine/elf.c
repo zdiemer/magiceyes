@@ -258,6 +258,14 @@ uint32_t setup_stack(int argc, char **argv) {
             const char *v = getenv(host);
             if (v) { snprintf(envbuf[nenv], sizeof envbuf[0], "%s=%s", fwd[i], v); envs[nenv] = envbuf[nenv]; nenv++; }
         }
+        /* glibc malloc tuning, forwarded verbatim from the host env (no ME_ prefix): lets us pin
+           MALLOC_ARENA_MAX / turn on MALLOC_CHECK_ to diagnose (and work around) heap corruption in
+           multi-threaded titles without rebuilding. */
+        static const char *mfwd[] = { "MALLOC_ARENA_MAX", "MALLOC_CHECK_", "MALLOC_PERTURB_" };
+        for (int i = 0; i < (int)(sizeof mfwd / sizeof mfwd[0]) && nenv < 27; i++) {
+            const char *v = getenv(mfwd[i]);
+            if (v) { snprintf(envbuf[nenv], sizeof envbuf[0], "%s=%s", mfwd[i], v); envs[nenv] = envbuf[nenv]; nenv++; }
+        }
         /* Tell the shim to emit structured run-report lines (the engine ingests them off stderr).
            Off by default so a normal play session does no per-frame report work in the guest. */
         if ((getenv("ME_DEBUG") || getenv("ME_REPORT")) && nenv < 27) {

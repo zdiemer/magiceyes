@@ -830,8 +830,13 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 45: { /* brk(addr) */
         if (a0 == 0) return g_brk;
         uint32_t na = ALIGN_UP(a0);
+        /* RWX, like do_mmap: the brk heap is EXECUTABLE on the Caanoo (ARMv5 Linux, no XN). GPAC's
+           in-heap code allocator (CodeAlloc/CodeUnlock in Rhythmos) malloc's a small block, writes a
+           code thunk into it, and blx's it; a R/W-only heap page faulted the fetch (a protection
+           fault mem_invalid_cb doesn't catch -> the decoder thread died). */
         if (na > ALIGN_UP(g_brk))
-            map_region(ALIGN_UP(g_brk), na - ALIGN_UP(g_brk), UC_PROT_READ | UC_PROT_WRITE);
+            map_region(ALIGN_UP(g_brk), na - ALIGN_UP(g_brk),
+                       UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
         g_brk = a0;
         return g_brk;
     }
@@ -847,9 +852,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (t == DEV_SHMFB) return shmfb_mmap(a1);
         if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
         long r = do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
-        if (fd >= 0 && getenv("ME_MMAPLOG"))   /* file-backed map: print base+len+fd to build the lib layout */
-            fprintf(stderr, "  [mmap] fd=%d off=%llx len=%x prot=%x -> %08lx\n",
-                    fd, (unsigned long long)a5 * 4096, a1, a3, r);
+        if (fd >= 0 && getenv("ME_MMAPLOG")) { /* file-backed map: print base+len+fd+path for the lib layout */
+            char lp[256] = "?", pf[64]; snprintf(pf, sizeof pf, "/proc/self/fd/%d", fd);
+            ssize_t ln = readlink(pf, lp, sizeof lp - 1); if (ln >= 0) lp[ln] = 0; else lp[0] = '?', lp[1] = 0;
+            fprintf(stderr, "  [mmap] fd=%d off=%llx len=%x prot=%x -> %08lx  %s\n",
+                    fd, (unsigned long long)a5 * 4096, a1, a3, r, lp);
+        }
         return r;
     }
     case 91: { /* munmap(addr, len) — recycle via the free-list rather than uc_mem_unmap,
