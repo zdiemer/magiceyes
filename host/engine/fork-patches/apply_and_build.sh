@@ -41,4 +41,4 @@ rm -f "$FORK/build/libunicorn.a"; ninja >/dev/null 2>&1     # custom bundle step
 ls -la "$FORK/build/libunicorn.a"
 
 echo "== rebuild bin/me_unicorn (engine modules) against the fork =="
-ME_UNICORN_FORK="$FORK" "$REPO/host/engine/build_engine.sh"
+ME_UNICORN_FORK="$FORK" bash "$REPO/host/engine/build_engine.sh"

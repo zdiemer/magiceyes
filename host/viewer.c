@@ -679,17 +679,20 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
     SDL_SetMainReady();                /* required when SDL_MAIN_HANDLED is set */
 #endif
 
+#ifndef _WIN32
     /* When PULSE_SERVER is set the box is running PulseAudio (possibly over a
        socket, e.g. a remote/containerised display); SDL may otherwise default to
        a backend (ALSA) with no usable device and fail to open. Prefer PulseAudio
        in that case, unless the user pinned SDL_AUDIODRIVER. Harmless on a normal
-       desktop, where PULSE_SERVER is usually unset and SDL autodetects. */
+       desktop, where PULSE_SERVER is usually unset and SDL autodetects. (Linux-only:
+       PULSE_SERVER is never set on Windows, and MinGW has no setenv.) */
     if (getenv("PULSE_SERVER") && !getenv("SDL_AUDIODRIVER")) {
         setenv("SDL_AUDIODRIVER", "pulseaudio", 1);
     }
     /* Request a generous PulseAudio server buffer; some setups otherwise drop the
        stream under latency spikes. */
     if (!getenv("PULSE_LATENCY_MSEC")) setenv("PULSE_LATENCY_MSEC", "120", 1);
+#endif
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1;
@@ -859,8 +862,10 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
         /* clamp the live touch (Caanoo; mouse -> guest pixels), then record/replay buttons+touch
            together (frame_seq-keyed; see the module above) and apply. */
         int tx = touch_x, ty = touch_y, td = touch_down;
-        if (tx < 0) tx = 0; if (cur_w > 0 && tx >= cur_w) tx = cur_w - 1;
-        if (ty < 0) ty = 0; if (cur_h > 0 && ty >= cur_h) ty = cur_h - 1;
+        if (tx < 0) tx = 0;
+        if (cur_w > 0 && tx >= cur_w) tx = cur_w - 1;
+        if (ty < 0) ty = 0;
+        if (cur_h > 0 && ty >= cur_h) ty = cur_h - 1;
         if (EDIT_OPEN()) {
             shm->buttons = 0;            /* pause game input while editing keybinds */
         } else {

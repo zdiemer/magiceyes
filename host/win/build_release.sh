@@ -28,4 +28,13 @@ bash "$REPO/host/win/get_sdl2.sh"
 
 # 4. Build the version-stamped bundle, then package it.
 MAGICEYES_VERSION="$VERSION" ME_UNICORN_FORK="$FORK" bash "$REPO/host/win/build_bundle_win.sh"
+
+# ME_BUILD_ONLY=1 stops here with just bin/magiceyes.exe + bin/SDL2.dll built. This is the CI
+# compile/link gate: package.sh bundles the firmware/game rootfs assets (rootfs-eabi, rootfs-win,
+# Caanoo fonts), which are gitignored and absent on a clean CI checkout. Releases (release.yml)
+# and local builds run the full package step where those assets exist.
+if [ -n "${ME_BUILD_ONLY:-}" ]; then
+  echo "ME_BUILD_ONLY set -> skipping package.sh (exe-only compile gate)"
+  exit 0
+fi
 MAGICEYES_VERSION="$VERSION" bash "$REPO/host/win/package.sh"

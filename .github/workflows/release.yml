@@ -34,6 +34,18 @@ jobs:
           path: ~/sdl2-mingw
           key: sdl2-mingw-2.30.9
 
+      # The firmware/game-derived runtime assets package.sh bundles (rootfs-eabi, rootfs-win,
+      # Caanoo fonts, guest stubs) are gitignored and absent on a clean runner. They live on the
+      # `release-assets` prerelease, refreshed by host/win/stage_release_assets.sh. Restore them to
+      # the exact tree layout package.sh expects (assets/..., bin/guest/...).
+      - name: Fetch staged release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download release-assets -R "$GITHUB_REPOSITORY" -p release-assets.tar.gz
+          tar xzf release-assets.tar.gz
+          rm -f release-assets.tar.gz
+
       - name: Build + package (version from tag)
         run: bash host/win/build_release.sh "${GITHUB_REF_NAME#v}"
 

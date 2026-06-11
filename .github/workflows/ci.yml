@@ -33,14 +33,19 @@ jobs:
           path: ~/sdl2-mingw
           key: sdl2-mingw-2.30.9
 
-      - name: Build bundle
-        run: bash host/win/build_release.sh "ci-${GITHUB_SHA::8}"
+      # Compile/link gate only: build magiceyes.exe but skip package.sh, which bundles the
+      # gitignored firmware/game rootfs assets (rootfs-eabi, rootfs-win, Caanoo fonts) absent on a
+      # clean CI checkout. The full asset bundle is packaged by release.yml / local builds.
+      - name: Build bundle (exe-only)
+        run: ME_BUILD_ONLY=1 bash host/win/build_release.sh "ci-${GITHUB_SHA::8}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: magiceyes-win64
-          path: dist/*.zip
+          path: |
+            bin/magiceyes.exe
+            bin/SDL2.dll
           if-no-files-found: error
 
   # Functional self-test of the Linux engine: ELF load + SVC syscalls + the structured run report
