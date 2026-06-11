@@ -53,6 +53,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Body: a committed RELEASE_NOTES_<version>.md is the curated changelog; fall back to
+          # GitHub's auto-generated notes when there isn't one for this tag.
+          NOTES_FILE="RELEASE_NOTES_${GITHUB_REF_NAME#v}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES_FILE")
+          else
+            NOTES_ARGS=(--generate-notes)
+          fi
           # Idempotent: if the release already exists (e.g. the first one was seeded
           # locally), just attach/refresh the asset instead of failing.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
@@ -60,5 +68,5 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" dist/*.zip \
               --title "magiceyes $GITHUB_REF_NAME" \
-              --generate-notes
+              "${NOTES_ARGS[@]}"
           fi
