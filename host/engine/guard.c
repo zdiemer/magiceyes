@@ -59,13 +59,34 @@ static int is_fault_code(DWORD c) {
            c == EXCEPTION_DATATYPE_MISALIGNMENT || c == EXCEPTION_ARRAY_BOUNDS_EXCEEDED;
 }
 
+/* ME_FAULTLOG diag: print the faulting thread's stack as module+offset frames, so an UNGUARDED
+   (armed=0) host fault during teardown can be traced to its call path without a debugger. */
+USHORT WINAPI RtlCaptureStackBackTrace(ULONG, ULONG, PVOID *, PULONG);
+static void log_backtrace(void) {
+    PVOID fr[40]; USHORT n = RtlCaptureStackBackTrace(0, 40, fr, NULL);
+    for (USHORT i = 0; i < n; i++) {
+        HMODULE m = NULL; char nm[MAX_PATH] = "?";
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)fr[i], &m) && m) {
+            char full[MAX_PATH]; GetModuleFileNameA(m, full, sizeof full);
+            const char *b = strrchr(full, '\\'); b = b ? b + 1 : full;
+            snprintf(nm, sizeof nm, "%s+0x%zx", b, (size_t)((uintptr_t)fr[i] - (uintptr_t)m));
+        }
+        fprintf(stderr, "    #%-2u %p %s\n", i, fr[i], nm);
+    }
+}
+
 static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     DWORD c = ep->ExceptionRecord->ExceptionCode;
-    if (getenv("ME_FAULTLOG") && is_fault_code(c)) {   /* diag: log every host fault, armed or not */
+    if (getenv("ME_FAULTLOG") && (is_fault_code(c) || c == EXCEPTION_STACK_OVERFLOW)) {   /* diag: log every host fault, armed or not */
         uintptr_t fa = ep->ExceptionRecord->NumberParameters >= 2
                      ? (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1] : 0;
-        fprintf(stderr, "FAULT code=%08lx pc=%p addr=%p armed=%d\n",
-                (unsigned long)c, ep->ExceptionRecord->ExceptionAddress, (void *)fa, g_armed);
+        fprintf(stderr, "FAULT code=%08lx pc=%p addr=%p armed=%d tid=%lu\n",
+                (unsigned long)c, ep->ExceptionRecord->ExceptionAddress, (void *)fa, g_armed,
+                (unsigned long)GetCurrentThreadId());
+        fflush(stderr);
+        if (getenv("ME_FAULTBT")) log_backtrace();   /* opt-in: can re-fault under PageHeap/overflow */
     }
     if (!g_armed || !is_fault_code(c))
         return EXCEPTION_CONTINUE_SEARCH;   /* not ours (incl. STACK_OVERFLOW): crash as before */
@@ -158,4 +179,5 @@ int guarded_present(void) {
     g_armed = 0;
     return 0;
 }
+
 #endif

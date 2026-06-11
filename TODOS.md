@@ -85,8 +85,13 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 - **Engine headless self-drain.** The Unicorn engine's audio producer paces against the viewer
   consuming the shm ring, so a headless run blocks once the ring fills. Self-drain `a_read` by
   wall clock when no viewer is attached (`viewer_heartbeat` already distinguishes the two).
-- **Make qemu the default GP2X path** in `magiceyes.sh` once input is confirmed (the native
-  engine is the shipping cross-platform path; qemu stays as the verified-fast reference).
+- **Migrate Linux to the Unicorn backend; deprecate qemu.** Make the native Unicorn engine
+  (`host/engine/`) the sole backend on Linux/WSL too, retiring the qemu-user path (`host/qemu/`,
+  the fake-SDL shim's qemu role, `magiceyes.sh`'s qemu branch). The native engine is already the
+  shipping cross-platform path; qemu has been the verified-fast GP2X reference. Before flipping:
+  confirm input + the remaining qemu-only titles (e.g. Wiz dynamic-libSDL games) run on the engine,
+  and that the multi-reload teardown crash is resolved (see `gp2x-static-titles-and-reload-crash`).
+  Then drop the qemu build/run scripts + docs. One backend = less to maintain.
 - **Fold the Unicorn backend onto the shared `gp2x_device.c`** — it still has its own copy of the
   device logic; unify so there's one implementation. Low priority (fallback, and it works).
 - **Consolidate debug switches.** Fold the env-gated probes in `fakesdl.c` (`FAKESDL_BLIT_LOG`,

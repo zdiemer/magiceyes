@@ -235,11 +235,36 @@ void engine_stop_all_threads(void) {
     BIGLOCK_UNLOCK();
     futex_wake_all();
     pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
+    /* TWO passes, deliberately: (1) JOIN every worker, THEN (2) close every uc. uc_close mutates
+       process-global qemu state (address-space teardown, etc.); doing it interleaved -- close
+       worker i while workers i+1.. are STILL EXECUTING TCG (not yet joined) -- raced that global
+       state against their memory accesses and corrupted a uc's internal pointers, which then
+       crashed in a later free() inside arm_release. After pass 1 NO guest thread is running, so
+       pass 2's closes touch no live state. (The multi-reload hard-crash: gp2x-static-titles-and-
+       reload-crash.) */
     for (int i = 1; i < g_nth; i++)
-        if (g_th[i].th) {
-            pthread_join(g_th[i].th, NULL); g_th[i].th = 0;
-            if (g_th[i].uc) { uc_close(g_th[i].uc); g_th[i].uc = NULL; }
-        }
+        if (g_th[i].th) { pthread_join(g_th[i].th, NULL); g_th[i].th = 0; }
+    /* Close each DISTINCT worker uc exactly once. If a uc pointer is aliased across slots (two
+       g_th[] entries, or a worker slot equal to the main g_th[0].uc), closing it twice double-frees
+       its TCGContext -- a later uc_close/arm_release then walks freed memory and faults in
+       qht_destroy (the multi-reload hard-crash, gp2x-static-titles-and-reload-crash; confirmed
+       under PageHeap+cdb as a UAF of the malloc'd tcg_ctx). Dedup here, and clear g_th[0].uc too
+       if it aliases a worker so the main-uc close skips it.
+       Close UNDER g_biglock: engine_request_reload (viewer/File->Open) scans g_th[].uc calling
+       uc_emu_stop under g_biglock, so a reload request mid-teardown must not see a uc being closed. */
+    uc_engine *closed[MAXTH]; int nclosed = 0;
+    for (int i = 1; i < g_nth; i++) {
+        uc_engine *u = g_th[i].uc;
+        if (!u) continue;
+        g_th[i].uc = NULL;
+        if (g_th[0].uc == u) g_th[0].uc = NULL;          /* main aliases this worker -> skip later */
+        int dup = 0; for (int j = 0; j < nclosed; j++) if (closed[j] == u) { dup = 1; break; }
+        if (dup) continue;                                /* already closed this round */
+        closed[nclosed++] = u;
+        BIGLOCK_LOCK();
+        uc_close(u);
+        BIGLOCK_UNLOCK();
+    }
 }
 
 /* Viewer thread (File->Open): request an in-process hot reload of host_path. Records the

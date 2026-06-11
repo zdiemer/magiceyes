@@ -16,6 +16,20 @@
 
 FILE *g_log = NULL;   /* ME_LOGFILE diagnostic sink (see engine.h DIAG) */
 
+/* ME_HEAPCHECK: validate the process heap at teardown phase boundaries to pinpoint which step
+   first corrupts it (the multi-reload crash surfaces later, inside a free in uc_close). */
+#ifdef _WIN32
+#include <windows.h>
+void heap_check(const char *tag) {
+    static int on = -1; if (on < 0) on = getenv("ME_HEAPCHECK") ? 1 : 0;
+    if (!on) return;
+    if (!HeapValidate(GetProcessHeap(), 0, NULL))
+        fprintf(stderr, "HEAP CORRUPT at: %s (tid=%lu)\n", tag, (unsigned long)GetCurrentThreadId());
+}
+#else
+void heap_check(const char *tag) { (void)tag; }
+#endif
+
 /* ME_FWLOG: opt-in firmware/viewer debug logging that goes to DIAG (the ME_LOGFILE), so it is
    visible from the -mwindows bundle (which has no stderr). Callable from viewer.c too. */
 int g_fwlog = 0;
@@ -358,10 +372,24 @@ static uint32_t engine_reset_and_load(const char *path) {
                                               present, then block new ones for the whole teardown
                                               +load (held until after g_reloading is cleared) */
     g_reloading = 1;
+    static int s_reload_n = 0; int rn = ++s_reload_n;
+    if (getenv("ME_FAULTLOG")) fprintf(stderr, "[reload#%d] BEGIN g_nth=%d main_uc=%p g_uc=%p\n",
+                                       rn, g_nth, (void *)g_th[0].uc, (void *)g_uc);
+    heap_check("reload-begin");
     me940_stop();                                       /* halt the 2nd core before its RAM is freed */
     engine_stop_all_threads();                          /* join workers, close their ucs */
+    heap_check("after-stop-threads");
+    if (getenv("ME_FAULTLOG")) fprintf(stderr, "[reload#%d] threads stopped; closing main_uc=%p\n",
+                                       rn, (void *)g_th[0].uc);
+    /* close the main uc under g_biglock too -- same reason as the worker closes in
+       engine_stop_all_threads: a concurrent engine_request_reload scans g_th[].uc / uc_emu_stop. */
+    BIGLOCK_LOCK();
     if (g_th[0].uc) { uc_close(g_th[0].uc); g_th[0].uc = NULL; }
+    BIGLOCK_UNLOCK();
+    heap_check("after-main-close");
+    if (getenv("ME_FAULTLOG")) fprintf(stderr, "[reload#%d] main_uc closed; mem_reset\n", rn);
     mem_reset();                                        /* free guest RAM (every uc now closed) */
+    heap_check("after-mem-reset");
     engine_reset_globals();
     g_exit = 0; g_exit_code = 0;
     if (g_reload_chdir) { chdir_to_game_root(path); g_reload_chdir = 0; }  /* File->Open: into the new game's dir */
@@ -370,6 +398,7 @@ static uint32_t engine_reset_and_load(const char *path) {
        prior core, and mem_reset freed the old shared RAM; this re-loads the firmware fresh. */
     if (g_940_firmware[0]) me940_load_and_start(g_940_firmware);
     uint32_t entry = engine_load_game(path);
+    heap_check("after-load");
     g_reloading = 0;
     pthread_mutex_unlock(&g_present_lock);   /* new guest RAM is mapped -> present may resume */
     if (g_trace) fprintf(stderr, "  [reload] -> %s entry=%08x\n", path, entry);
