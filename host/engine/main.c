@@ -502,7 +502,11 @@ int main(int argc, char **argv) {
                 snprintf(interp, sizeof interp, "/lib/ld-linux.so.2");
             if (!me_rootfs_select(interp)) {
                 me_report(MR_MISSING_ROOTFS_LIB, 0, interp, 0);
-                if (strstr(interp, "ld-linux.so.3"))   /* EABI: rootfs-eabi ships with magiceyes */
+                if (strstr(interp, "ld-uClibc.so.0"))  /* Didj/LF1000: uClibc + LeapFrog MPI runtime */
+                    fprintf(stderr, "magiceyes: '%s' is a LeapFrog Didj title that needs the uClibc +\n"
+                                    "  LeapFrog 'MPI' runtime in a Didj rootfs (assets/rootfs-didj). Assemble it\n"
+                                    "  with host/win/stage_rootfs_didj.sh, or set ME_GP2X_ROOTFS_DIDJ to it.\n", bin);
+                else if (strstr(interp, "ld-linux.so.3"))   /* EABI: rootfs-eabi ships with magiceyes */
                     fprintf(stderr, "magiceyes: '%s' needs the EABI runtime that ships with magiceyes,\n"
                                     "  but it's missing. Reinstall magiceyes (it bundles rootfs-eabi next to\n"
                                     "  the exe), or rebuild it with host/win/stage_rootfs_eabi.sh.\n", bin);

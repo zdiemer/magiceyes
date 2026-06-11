@@ -75,16 +75,19 @@ static void rootfs_build_cands(void) {
     g_ncand = 0;
     const char *env  = getenv("ME_GP2X_ROOTFS");
     const char *env3 = getenv("ME_GP2X_ROOTFS_EABI");
+    const char *envd = getenv("ME_GP2X_ROOTFS_DIDJ");   /* uClibc + LeapFrog MPI runtime */
     if (env  && g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env);
     if (env3 && g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", env3);
-    static const char *names[] = { "rootfs", "rootfs-win", "rootfs-eabi" };
-    if (g_exe_dir[0]) for (size_t n = 0; n < 3; n++) {
+    if (envd && g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s", envd);
+    static const char *names[] = { "rootfs", "rootfs-win", "rootfs-eabi", "rootfs-didj" };
+    if (g_exe_dir[0]) for (size_t n = 0; n < sizeof names / sizeof names[0]; n++) {
         if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/%s", g_exe_dir, names[n]);
         if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/assets/%s", g_exe_dir, names[n]);
         if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "%s/../assets/%s", g_exe_dir, names[n]);
     }
     if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-win");
     if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-eabi");
+    if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs-didj");
     if (g_ncand < NCAND) snprintf(g_cands[g_ncand++], PATH_MAX, "assets/rootfs/0/rootfs");
     /* Firmware installed in-process (Firmware -> Install firmware) lands in the writable root as a
        whole OABI glibc-2.3.6 rootfs with our shim overlaid -- add it so a dynamic Wiz/GP2X title
@@ -102,9 +105,10 @@ void me_rootfs_init(void) {
     if (g_rootfs_ok >= 0) return;
     rootfs_build_cands();
     g_rootfs_ok = 0;
-    /* default active rootfs = first candidate providing any dynamic linker */
+    /* default active rootfs = first candidate providing any dynamic linker (glibc or uClibc) */
     for (int i = 0; i < g_ncand; i++)
-        if (cand_has(i, "/lib/ld-linux.so.2") || cand_has(i, "/lib/ld-linux.so.3")) {
+        if (cand_has(i, "/lib/ld-linux.so.2") || cand_has(i, "/lib/ld-linux.so.3") ||
+            cand_has(i, "/lib/ld-uClibc.so.0")) {
             snprintf(g_rootfs, sizeof g_rootfs, "%s", g_cands[i]); g_rootfs_ok = 1;
             if (g_trace) fprintf(stderr, "  [rootfs] default %s\n", g_rootfs); return;
         }
@@ -416,6 +420,14 @@ static int sd_fake_node(const char *p, struct stat *s) {
 }
 
 void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
+    /* `struct stat` for the plain stat/lstat/fstat syscalls (nr 106/107/108). Field OFFSETS are
+       the same for OABI and EABI, but the total SIZE differs: the GP2X OABI glibc-2.3.6 struct is
+       88 bytes, while the ARM **EABI** newstat struct is only **64** (st_dev@0 st_ino@4 st_mode@8
+       st_nlink@10 st_uid@12 st_gid@14 st_rdev@16 st_size@20 st_blksize@24 st_blocks@28
+       atime/mtime/ctime + 2 unused, ending at 64). uClibc's ld.so (Didj) uses nr 106 with a
+       64-byte buffer on its stack; writing 88 overran it onto _dl_map_cache's saved sl (the GOT
+       pointer), zeroing it -> a deref through sl=0 right after the call. Size it by ABI, exactly
+       like fill_stat64's 96-vs-104 split. */
     uint8_t b[88]; memset(b, 0, sizeof b);
     *(uint32_t *)(b + 0)  = (uint32_t)hs->st_dev;
     *(uint32_t *)(b + 4)  = (uint32_t)hs->st_ino;
@@ -425,7 +437,7 @@ void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
     *(uint32_t *)(b + 20) = (uint32_t)hs->st_size;
     *(uint32_t *)(b + 24) = 4096;
     *(uint32_t *)(b + 28) = (uint32_t)((hs->st_size + 511) / 512);
-    uc_mem_write(g_uc, gbuf, b, sizeof b);
+    uc_mem_write(g_uc, gbuf, b, g_eabi ? 64 : sizeof b);
 }
 
 /* Fill the GP2X OABI glibc-2.3.6 `struct stat64` -- sizeof **96**, NOT 104. This glibc
@@ -1106,6 +1118,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         char p[1024]; read_cstr(a0, p, sizeof p);
         int d = dev_open(p); if (d >= 0) return d;
         if (g_trace) fprintf(stderr, "  open '%s' flags=%x\n", p, (int)a1);
+        /* Never expose the host's ld.so.cache/preload: me_rootfs_resolve already skips them to
+           force a clean LD_LIBRARY_PATH search, but resolve_io would otherwise fall back to the
+           HOST file. Leaking the host's glibc cache here makes uClibc's _dl_map_cache (Didj)
+           mmap+munmap a corrupt cache, and that path clobbered ld.so's GOT pointer (sl) on return
+           -> a fault before any NEEDED lib was opened. ENOENT makes the linker skip the cache. */
+        if (!strcmp(p, "/etc/ld.so.cache") || !strcmp(p, "/etc/ld.so.preload")) return -ENOENT;
         if (getenv("ME_NOMOUNTS") && (!strcmp(p, "/proc/mounts") || !strcmp(p, "/etc/mtab")))
             return -ENOENT;   /* test: make setmntent() fail cleanly instead of feeding getmntent */
         /* Linux /proc + /etc files glibc reads: serve canned content host-independently. The

@@ -152,8 +152,22 @@ uint32_t load_elf(const char *path) {
         if (eq_ci(envdev, "caanoo")) dev = 2;
         else if (eq_ci(envdev, "wiz")) dev = 1;
         else if (eq_ci(envdev, "gp2x") || eq_ci(envdev, "f100") || eq_ci(envdev, "f200")) dev = 0;
+        else if (eq_ci(envdev, "didj")) dev = 3;
     }
-    if (dev < 0 && !interp[0]) dev = 0;   /* static ELF -> GP2X */
+    if (dev < 0 && !interp[0]) dev = 0;   /* static ELF -> GP2X (Didj titles are all dynamic) */
+    if (dev < 0) {
+        /* Didj (LeapFrog LF1000): the uClibc dynamic linker is unique to Didj among supported
+           devices, and its games/launcher link the LeapFrog "MPI" HAL libs. Either signal -> Didj.
+           Checked before the Caanoo/Wiz heuristics since those assume a glibc ld-linux interp. */
+        int didj = strstr(interp, "ld-uClibc.so.0") != NULL;
+        if (!didj) {
+            static const char *didj_sig[] = { "libDisplayMPI", "libAudioMPI", "libButtonMPI",
+                                              "libKernelMPI", "libLightningBase" };
+            for (unsigned k = 0; k < sizeof didj_sig / sizeof didj_sig[0]; k++)
+                if (buf_has(buf, sz, didj_sig[k])) { didj = 1; break; }
+        }
+        if (didj) dev = 3;
+    }
     if (dev < 0) {
         /* Pollux/Caanoo-only sonames + device nodes (probed: present on no GP2X/Wiz title). */
         static const char *caanoo_sig[] = {
