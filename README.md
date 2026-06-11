@@ -76,12 +76,6 @@ magiceyes is under active development; coverage grows as device features and gam
 exercised. See [`COMPATIBILITY.md`](COMPATIBILITY.md) for the per-title compatibility map
 across GP2X, Wiz, and Caanoo.
 
-The native Windows build runs **statically-linked GP2X titles** out of the box.
-**Dynamically-linked titles** (most Wiz games and a few GP2X games) additionally need a
-device *root filesystem* (the firmware's shared libraries) — see
-[Build from source](#build-from-source--developer-notes); a packaged firmware path is on
-the [roadmap](#planned).
-
 ## Known issues
 
 - **Hot-loading games can crash on Windows.** Opening a second or third *different* game
