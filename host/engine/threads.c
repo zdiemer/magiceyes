@@ -53,6 +53,35 @@ static void pchook_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     }
 }
 
+/* ---- ME_LOOPPC: histogram of executed block PCs once frame_seq freezes, to pin a hang's loop body. */
+#define NLOOPPC 512
+static struct { uint32_t pc; unsigned long n; } g_looppc[NLOOPPC];
+static int g_looppc_on = 0;
+static uint32_t g_looppc_from = 0;
+void looppc_dump(void) {
+    if (!g_looppc_on) return;
+    /* simple selection of the top 16 by count */
+    fprintf(stderr, "== LOOPPC histogram (top block PCs while frozen) ==\n");
+    for (int top = 0; top < 40; top++) {
+        int best = -1; unsigned long bn = 0;
+        for (int i = 0; i < NLOOPPC; i++) if (g_looppc[i].n > bn) { bn = g_looppc[i].n; best = i; }
+        if (best < 0) break;
+        fprintf(stderr, "  %08x  %lu\n", g_looppc[best].pc, g_looppc[best].n);
+        g_looppc[best].n = 0;   /* consume so the next pass finds the next-highest */
+    }
+}
+static void looppc_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)uc; (void)size; (void)user;
+    extern gp2x_shm_t *g_shm;
+    if (!g_shm || g_shm->frame_seq < g_looppc_from) return;
+    uint32_t pc = (uint32_t)addr;
+    int h = (pc >> 2) & (NLOOPPC - 1);
+    for (int i = 0; i < NLOOPPC; i++) {
+        int j = (h + i) & (NLOOPPC - 1);
+        if (g_looppc[j].n == 0 || g_looppc[j].pc == pc) { g_looppc[j].pc = pc; g_looppc[j].n++; return; }
+    }
+}
+
 /* ---- per-uc hooks + factory ------------------------------------------------ */
 void uc_hook_std(uc_engine *u) {
     uc_hook h;
@@ -60,6 +89,8 @@ void uc_hook_std(uc_engine *u) {
     uc_hook_add(u, &h, UC_HOOK_INSN_INVALID, fpa_invalid_cb, NULL, 1, 0);  /* FPA float emulation */
     if (!g_pchook) { const char *e = getenv("ME_PCHOOK"); if (e) g_pchook = strtoul(e, NULL, 0); }
     if (g_pchook) uc_hook_add(u, &h, UC_HOOK_CODE, pchook_cb, NULL, g_pchook, g_pchook);
+    if (!g_looppc_on) { const char *e = getenv("ME_LOOPPC"); if (e) { g_looppc_on = 1; g_looppc_from = strtoul(e, NULL, 0); } }
+    if (g_looppc_on) uc_hook_add(u, &h, UC_HOOK_BLOCK, looppc_cb, NULL, 1, 0);
     uc_hook_add(u, &h, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
     if (!g_nwatch) { const char *e = getenv("ME_WATCH");
@@ -328,6 +359,22 @@ void dump_threads(const char *why) {
             uint32_t w = 0; uc_mem_read(t->uc, sp + k * 4, &w, 4);
             if (w >= 0x8100 && w < 0x19bc00) fprintf(stderr, " %08x", w);
         }
+        /* PRECISE call chain: a stack word W is a real ARM return address only if the instruction
+           at W-4 is a bl (0xeb......) or blx-imm (0xfa/0xfb......). Filters out data that merely
+           looks like a .text address. Scans both the main binary and the loaded libs. */
+        fprintf(stderr, "\n      ra:");
+        for (int k = 0; t->uc && k < 256; k++) {
+            uint32_t w = 0; uc_mem_read(t->uc, sp + k * 4, &w, 4);
+            if (!(w & 3) && w >= 0x8000 && w < 0x71000000) {   /* word-aligned, in code arena */
+                uint32_t insn = 0;
+                if (uc_mem_read(t->uc, w - 4, &insn, 4) == UC_ERR_OK) {
+                    uint32_t top = insn >> 24;
+                    if (top == 0xeb || top == 0xfa || top == 0xfb)   /* bl / blx imm */
+                        fprintf(stderr, " %08x", w);
+                }
+            }
+        }
         fprintf(stderr, "\n");
     }
+    looppc_dump();   /* ME_LOOPPC: hot block PCs since the last dump (the frozen loop body) */
 }

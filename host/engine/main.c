@@ -228,10 +228,13 @@ static void *helper_thread(void *arg) {
         }
         if (prof && now - prof_t >= 2.0) {
             double dt = now - prof_t; uint32_t fs = g_shm ? g_shm->frame_seq : 0;
-            extern unsigned long g_fpa_n, g_fpa_ops;
-            fprintf(DIAG, "PROF: %.1f fps  mmsp2_rd=%.0f/s wr=%.0f/s fault=%.0f/s  fpa=%.0f/s(ops=%.0f/s)\n",
-                    (fs - prof_fs) / dt, g_n_rd / dt, g_n_wr / dt, g_n_fault / dt, g_fpa_n / dt, g_fpa_ops / dt);
+            extern unsigned long g_fpa_n, g_fpa_ops, g_uc_newmap, g_uc_unmap;
+            static unsigned long pm = 0, pu = 0;
+            fprintf(DIAG, "PROF: %.1f fps  mmsp2_rd=%.0f/s wr=%.0f/s fault=%.0f/s  fpa=%.0f/s  newmap=%.0f/s unmap=%.0f/s\n",
+                    (fs - prof_fs) / dt, g_n_rd / dt, g_n_wr / dt, g_n_fault / dt, g_fpa_n / dt,
+                    (g_uc_newmap - pm) / dt, (g_uc_unmap - pu) / dt);
             prof_fs = fs; prof_t = now; g_n_rd = g_n_wr = g_n_fault = 0; g_fpa_n = g_fpa_ops = 0;
+            pm = g_uc_newmap; pu = g_uc_unmap;
         }
         if (g_threaddump && now - tdp >= 2.0) { tdp = now; dump_threads("periodic"); }
         /* Flush the JSON report periodically so even a hard kill leaves a recent snapshot on disk

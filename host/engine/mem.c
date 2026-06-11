@@ -3,6 +3,7 @@
 #include "engine.h"
 
 struct freereg g_mfree[256]; int g_nmfree = 0;
+unsigned long g_uc_newmap = 0, g_uc_unmap = 0;   /* diag: JIT-flush triggers (new uc map / uc_mem_unmap) */
 
 /* ---- host-backed guest memory ----------------------------------------------
  * Every guest region is backed by a host allocation and mapped via uc_mem_map_ptr,
@@ -55,6 +56,7 @@ void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms) {
             if (host == MAP_FAILED) die("host mmap", UC_ERR_OK);
             uc_err e = uc_mem_map_ptr(u, p, len, perms, host);
             if (e && e != UC_ERR_MAP) die("uc_mem_map_ptr", e);
+            g_uc_newmap++;   /* diag: a new uc mapping flushes Unicorn's JIT translation cache */
             if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0]))
                 g_reg[g_nreg++] = (struct gregion){p, len, perms, host, 0};
             p = run;
@@ -66,6 +68,8 @@ void ensure_mapped(uc_engine *u, uint32_t addr, uint32_t size, int perms) {
 void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
     ensure_mapped(g_uc, addr, size, perms);
 }
+
+int mem_nreg(void) { return g_nreg; }   /* diagnostics: region-registry occupancy (cap = array size) */
 
 /* Host pointer backing guest address gaddr (for host-atomic ops, e.g. kuser cmpxchg). */
 void *guest_to_host(uint32_t gaddr) {
@@ -224,9 +228,15 @@ long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) 
             for (int i = 0; i < g_nmfree; i++)    /* reuse a freed same-size region */
                 if (g_mfree[i].len == l) { at = g_mfree[i].addr; g_mfree[i] = g_mfree[--g_nmfree]; reused = 1; break; }
             if (reused) {
-                if (!getenv("ME_NOZERO")) {        /* recycled memory must read as zero */
-                    uint8_t *z = calloc(1, l);
-                    if (z) { uc_mem_write(g_uc, at, z, l); free(z); }
+                if (!getenv("ME_NOZERO")) {        /* recycled memory must read as zero (anon mmap) */
+                    /* memset the host backing directly -- one pass, no calloc+memcpy. The old
+                       calloc(l)+uc_mem_write(l) was ~3 passes over l plus a host malloc/free per
+                       call; a song reloading many MB-sized keysound buffers made that the dominant
+                       cost of song-load. A freed region is always one contiguous host-backed
+                       gregion (a single mmap), so a flat memset covers it. */
+                    void *hp = guest_to_host(at);
+                    if (hp) memset(hp, 0, l);
+                    else { uint8_t *z = calloc(1, l); if (z) { uc_mem_write(g_uc, at, z, l); free(z); } }
                 }
             } else {
                 /* align power-of-two allocs to their size (2MB thread stacks must be

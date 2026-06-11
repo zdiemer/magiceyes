@@ -736,9 +736,14 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     if (getenv("ME_TRACE_AFTER")) { static long lc = -1;
         if (lc < 0 && g_shm && g_shm->frame_seq > 60) lc = 0;
         if (lc >= 0) { g_trace = (lc < 20000); lc++; } }
+    /* ME_TRACE_FROMFRAME=N: turn the (uncapped) syscall trace on once frame_seq >= N -- to capture a
+       late-running busy loop (e.g. a freeze) without the boot syscalls exhausting a budget first. */
+    if (getenv("ME_TRACE_FROMFRAME")) { static int armed = -1;
+        if (armed < 0) armed = atoi(getenv("ME_TRACE_FROMFRAME"));
+        if (g_shm && (int)g_shm->frame_seq >= armed) g_trace = 1; }
     if (g_trace)
-        fprintf(stderr, "  [t%d] sc %u (%08x,%08x,%08x,%08x)\n",
-                g_self ? g_self->tid : -1, nr, a0, a1, a2, a3);
+        fprintf(stderr, "  [t%d] sc %u pc=%08x (%08x,%08x,%08x,%08x)\n",
+                g_self ? g_self->tid : -1, nr, g_self ? g_self->last_pc : 0, a0, a1, a2, a3);
     /* refresh fb periodically — only until the game drives present via OADR (frame-synced) */
     { static unsigned c = 0; if (g_fb_guest && !g_oadr_driven && (++c & 63) == 0) present_active(); }
     switch (nr) {
@@ -841,13 +846,17 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         int fd = (a4 == 0xffffffffu) ? -1 : (int)a4, t = dev_type(fd);
         if (t == DEV_SHMFB) return shmfb_mmap(a1);
         if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
-        return do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
+        long r = do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
+        if (fd >= 0 && getenv("ME_MMAPLOG"))   /* file-backed map: print base+len+fd to build the lib layout */
+            fprintf(stderr, "  [mmap] fd=%d off=%llx len=%x prot=%x -> %08lx\n",
+                    fd, (unsigned long long)a5 * 4096, a1, a3, r);
+        return r;
     }
     case 91: { /* munmap(addr, len) — recycle via the free-list rather than uc_mem_unmap,
                   which flushes the JIT cache. Real-unmap only if the list overflows. */
         uint32_t a = ALIGN_DN(a0), l = ALIGN_UP(a1);
         if (l) { if (g_nmfree < 256) g_mfree[g_nmfree++] = (struct freereg){a, l};
-                 else uc_mem_unmap(g_uc, a, l); }
+                 else { extern unsigned long g_uc_unmap; g_uc_unmap++; uc_mem_unmap(g_uc, a, l); } }
         return 0;
     }
     case 2: { /* fork.
@@ -1415,9 +1424,11 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         }
         return tot;
     }
-    case 0xfff0: {  /* kuser_cmpxchg, host-atomic (r0=oldval, r1=newval, r2=ptr).
-                       Atomic vs other threads' raw guest stores because it CASes the same
-                       host memory the guest's stores hit. Success: r0=0 + CPSR C set. */
+    case 0xfff0: {  /* kuser_cmpxchg, host-atomic (r0=oldval, r1=newval, r2=ptr). Fallback path only:
+                       the forked Unicorn now emits this helper as an in-TB host-atomic CAS at
+                       translation time (fork-patches/kuser_cmpxchg.py), so the `svc #0x90fff0` form
+                       never actually executes. Kept correct in case a build runs without that patch.
+                       Atomic vs other threads' raw guest stores (same host backing). Success: r0=0+C. */
         uint32_t *hp = (uint32_t *)guest_to_host(a2);
         uint32_t expected = a0;
         int ok = hp && __atomic_compare_exchange_n(hp, &expected, a1, 0,
