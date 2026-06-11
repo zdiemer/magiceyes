@@ -292,7 +292,17 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
     /* /dev/mem mapping of GP2X upper RAM -> a window into the shared physical-RAM backing, so the
        920, repeat mappings, and the ARM940 all alias the same bytes. MMSP2 reg windows
        (phys 0xC0000000 / 0xE0020000) are NOT RAM and keep the per-mapping anon path below. */
-    if (type == DEV_MEM && phys_in_pram(phys, len))
+    uint32_t alias0, alias1;
+    if (type == DEV_MEM && phys != 0xC0000000u && phys != 0xE0020000u &&
+        phys_to_guest(phys, &alias0) && phys_to_guest(phys + len - 1, &alias1) &&
+        alias1 - alias0 == len - 1) {
+        /* A previously-mapped /dev/mem phys: alias the SAME guest pages (one physical RAM = one set
+           of bytes). Lets a second mapper -- e.g. our SDL shim re-mmapping the Pollux video memory
+           to read the game's decoded YV12 planes -- see exactly what the first mapper wrote, instead
+           of a fresh zero anon region. Reg windows (0xC0000000 MMSP2 / 0xE0020000 blitter) keep the
+           per-mapping path so their hooks stay correct. */
+        at = alias0;
+    } else if (type == DEV_MEM && phys_in_pram(phys, len))
         at = (uint32_t)pram_map(phys, len, addr);
     else
         at = do_mmap(addr, len, flags | GMAP_ANON, -1, 0);

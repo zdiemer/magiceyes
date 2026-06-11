@@ -200,6 +200,9 @@ static gp2x_shm_t *g_shm = NULL;
 /* Set once this shim starts presenting; the fake-SDL shim weak-refs this and stops presenting
    its own (empty) screen so a hybrid SDL+GLES title (Propis/Rhythmos) shows the GL frame. */
 int magiceyes_gl_active = 0;
+/* fake-SDL's YUV movie-overlay compositor (present-time). Weak: titles with no video layer just
+   skip it. Lets a GLES-rendered title (Rhythmos) still show the SDL-shim's decoded video. */
+extern void magiceyes_video_composite(uint16_t *dst, int w, int h) __attribute__((weak));
 static int   g_fbw = 320, g_fbh = 240;
 static uint32_t *g_cbuf = NULL;     /* RGBA8888 colour buffer (g_fbw*g_fbh) */
 static unsigned long g_start_ms = 0;
@@ -890,6 +893,10 @@ EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) {
     (void)d; (void)s;
     if (gl_offload()) {
         me_sc1(ME_NR_GL_PRESENT, 0);   /* engine converts its native cbuf -> shm + frame_seq++ */
+        /* The engine just filled g_shm->pixels with the host-GPU frame; composite the YUV movie
+           layer into it here (same shm the SDL path writes). */
+        if (magiceyes_video_composite && g_shm)
+            magiceyes_video_composite((uint16_t *)g_shm->pixels, g_fbw, g_fbh);
         goto framecap;
     }
     if (!g_shm || !g_cbuf) return EGL_TRUE;
@@ -902,6 +909,9 @@ EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) {
             dst[y * GP2XSHM_MAXW + x] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         }
     }
+    /* Composite the fake-SDL movie layer (YUV video overlay) UNDER this GL frame -- Rhythmos draws
+       its gameplay through GLES, so the SDL present path that normally does this never runs. */
+    if (magiceyes_video_composite) magiceyes_video_composite(dst, g_fbw, g_fbh);
     g_shm->width = g_fbw; g_shm->height = g_fbh; g_shm->frame_seq++;
     if (gl_log() && (++g_n_swap % 120) == 1) {
         int nz = 0; for (int i = 0; i < g_fbw * g_fbh; i++) if (g_cbuf[i] & 0x00FFFFFF) { nz = 1; break; }

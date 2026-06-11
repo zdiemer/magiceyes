@@ -255,6 +255,10 @@ SDL_Surface *SDL_SetVideoMode(int w, int h, int bpp, Uint32 flags) {
 }
 SDL_Surface *SDL_GetVideoSurface(void) { return g_screen; }
 
+/* defined in the FB-overlay section; exported so the fakegles shim composites the same movie layer
+   under GL-rendered titles (Rhythmos draws its gameplay via GLES, not SDL). */
+void magiceyes_video_composite(uint16_t *dst, int w, int h);
+
 static void present(SDL_Surface *s) {
     if (!g_shm || !s) return;
     if (gl_owns_fb()) return;          /* GLES title: the fakegles shim presents the GL frame */
@@ -277,6 +281,7 @@ static void present(SDL_Surface *s) {
             }
         }
     }
+    magiceyes_video_composite(dst, w, h);   /* show the YUV movie layer through colour-keyed UI pixels */
     g_shm->width = w; g_shm->height = h;
     g_shm->frame_seq++;
 }
@@ -858,6 +863,73 @@ static int fblog(void) {
     return v;
 }
 
+/* --- software video-overlay compositor --------------------------------------
+   The Pollux MLC scans a YUV plane out beneath the RGB framebuffer. We have no such
+   layer, so we read the game's decoded planes out of video memory, convert to
+   RGB565, and composite them in present() wherever the RGB (SDL) layer is the
+   colour-key -- giving the movie-background-with-UI-on-top look in software. */
+#define VID_W 320
+#define VID_H 240
+static uint16_t g_videobuf[VID_W * VID_H];
+static volatile int g_video_have = 0;      /* a frame is ready in g_videobuf */
+static uint16_t g_video_key = 0;           /* RGB565 colour-key (UI pixels == key show video) */
+
+/* mmap window onto the Pollux video memory (physical). The engine aliases repeat /dev/mem maps of
+   an already-mapped phys (mem.c dev_mmap), so this sees exactly the bytes the game decoded. */
+static uint8_t *g_vmem = NULL;
+static uint32_t g_vmem_base = 0, g_vmem_len = 0;
+static uint8_t *vmem_ptr(uint32_t phys, uint32_t need) {
+    if (g_vmem && phys >= g_vmem_base && phys + need <= g_vmem_base + g_vmem_len)
+        return g_vmem + (phys - g_vmem_base);
+    if (g_vmem) { munmap(g_vmem, g_vmem_len); g_vmem = NULL; }
+    uint32_t base = phys & ~0xFFFFFu, len = 0x600000;   /* 1MB-aligned base, 6MB window */
+    int fd = open("/dev/mem", O_RDWR);
+    if (fd < 0) return NULL;
+    void *m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, base);
+    close(fd);
+    if (m == MAP_FAILED) return NULL;
+    g_vmem = m; g_vmem_base = base; g_vmem_len = len;
+    return (phys + need <= base + len) ? g_vmem + (phys - base) : NULL;
+}
+
+/* planar YUV 4:2:0 -> RGB565 (BT.601, fixed-point). */
+static void yuv420_to_rgb565(const uint8_t *Y, int ys, const uint8_t *U, int us,
+                             const uint8_t *V, int vs) {
+    for (int y = 0; y < VID_H; y++) {
+        const uint8_t *yr = Y + y * ys, *ur = U + (y >> 1) * us, *vr = V + (y >> 1) * vs;
+        uint16_t *o = g_videobuf + y * VID_W;
+        for (int x = 0; x < VID_W; x++) {
+            int yy = yr[x], uu = ur[x >> 1] - 128, vv = vr[x >> 1] - 128;
+            int r = yy + ((91881 * vv) >> 16);
+            int g = yy - ((22554 * uu + 46802 * vv) >> 16);
+            int b = yy + ((116130 * uu) >> 16);
+            if (r < 0) r = 0; else if (r > 255) r = 255;
+            if (g < 0) g = 0; else if (g > 255) g = 255;
+            if (b < 0) b = 0; else if (b > 255) b = 255;
+            o[x] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        }
+    }
+}
+
+/* Composite the current video frame UNDER the SDL/RGB layer: a destination pixel equal to the
+   colour-key is "transparent" on the RGB layer, so the movie shows through there. Called from
+   present() after the SDL surface has been copied into dst. */
+void magiceyes_video_composite(uint16_t *dst, int w, int h) {
+    if (!g_video_have) return;
+    static int full = -1; if (full < 0) full = getenv("FAKESDL_VIDEO_FULL") ? 1 : 0;
+    int vw = w < VID_W ? w : VID_W, vh = h < VID_H ? h : VID_H;
+    long matched = 0;
+    for (int y = 0; y < vh; y++) {
+        Uint16 *o = dst + y * GP2XSHM_MAXW;
+        const uint16_t *v = g_videobuf + y * VID_W;
+        for (int x = 0; x < vw; x++)
+            if (full || o[x] == g_video_key) { o[x] = v[x]; matched++; }
+    }
+    if (fblog()) { static int n = 0; if ((n++ % 120) == 0)
+        fprintf(stderr, "fakesdl: composite matched=%ld/%d key=%04x dst[c]=%04x\n",
+                matched, vw * vh, g_video_key, dst[(vh/2)*GP2XSHM_MAXW + vw/2]); }
+}
+
 int SDL_FBVideoStart(FB_VMEMINFO *m) {
     if (m) { g_fbvid_mem = *m; g_fbvid_on = 1; }
     if (fblog() && m)
@@ -869,8 +941,35 @@ int SDL_FBVideoStart(FB_VMEMINFO *m) {
 int SDL_FBVideoMemoryUpdate(FB_VMEMINFO *m) {
     if (m) { g_fbvid_mem = *m; g_fbvid_on = 1; }
     if (fblog() && m)
-        fprintf(stderr, "fakesdl: FBVideoMemUpdate Lu=%08x Cb=%08x Cr=%08x\n",
-                m->LuAddr, m->CbAddr, m->CrAddr);
+        fprintf(stderr, "fakesdl: FBVideoMemUpdate Addr=%08x %dx%d Lu=%08x/%u Cb=%08x/%u Cr=%08x/%u "
+                "LuOff=%08x CbOff=%08x CrOff=%08x\n",
+                m->Address, m->Width, m->Height, m->LuAddr, m->LuStride, m->CbAddr, m->CbStride,
+                m->CrAddr, m->CrStride, m->LuOffset, m->CbOffset, m->CrOffset);
+    /* The plane PHYSICAL addresses live in Lu/Cb/Cr-Offset (the *Addr fields are 0). Pull the YV12
+       planes out of video memory and convert to RGB565 for present() to composite. Strides come
+       from the FBVideoStart vmem; default to a contiguous 320x240 4:2:0 layout if unset. */
+    if (m && m->LuOffset) {
+        uint32_t lus = g_fbvid_mem.LuStride ? g_fbvid_mem.LuStride : VID_W;
+        uint32_t cbs = g_fbvid_mem.CbStride ? g_fbvid_mem.CbStride : VID_W / 2;
+        uint32_t crs = g_fbvid_mem.CrStride ? g_fbvid_mem.CrStride : VID_W / 2;
+        uint32_t lo = m->LuOffset < m->CbOffset ? m->LuOffset : m->CbOffset;
+        if (m->CrOffset < lo) lo = m->CrOffset;
+        uint8_t *Y = vmem_ptr(m->LuOffset, lus * VID_H);
+        uint8_t *U = vmem_ptr(m->CbOffset, cbs * (VID_H / 2));
+        uint8_t *V = vmem_ptr(m->CrOffset, crs * (VID_H / 2));
+        (void)lo;
+        if (Y && U && V) {
+            yuv420_to_rgb565(Y, lus, U, cbs, V, crs);
+            g_video_key = (uint16_t)(g_fbvid_have_conf ? (g_fbvid_conf.ColorKey & 0xFFFF) : 0);
+            g_video_have = 1;
+            if (fblog()) { static int n = 0; if ((n++ % 120) == 0)
+                fprintf(stderr, "fakesdl: video frame Y[c]=%u Ymid=%u rgb[c]=%04x key=%04x vmem=%p\n",
+                        Y[0], Y[lus * (VID_H/2) + VID_W/2], g_videobuf[VID_H/2*VID_W + VID_W/2],
+                        g_video_key, (void*)g_vmem); }
+        } else if (fblog()) { static int w = 0; if (w++ < 3)
+            fprintf(stderr, "fakesdl: video planes NULL Y=%p U=%p V=%p (vmem map failed)\n",
+                    (void*)Y, (void*)U, (void*)V); }
+    }
     return 0;
 }
 int SDL_FBVideoUpdate(FB_VIDEO_CONF *c) {
@@ -881,7 +980,7 @@ int SDL_FBVideoUpdate(FB_VIDEO_CONF *c) {
                 c->Left, c->Top, c->Right, c->Bottom);
     return 0;
 }
-int SDL_FBVideoStop(unsigned int *v) { (void)v; g_fbvid_on = 0;
+int SDL_FBVideoStop(unsigned int *v) { (void)v; g_fbvid_on = 0; g_video_have = 0;
     if (fblog()) fprintf(stderr, "fakesdl: FBVideoStop\n"); return 0; }
 int SDL_FBDeviceEnable(unsigned int *v) {
     if (fblog()) fprintf(stderr, "fakesdl: FBDeviceEnable=%u\n", v ? *v : 0); return 0; }
