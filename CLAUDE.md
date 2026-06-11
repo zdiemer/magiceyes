@@ -25,9 +25,9 @@ live in the memory files (see `MEMORY.md`) and `host/*/README.md`; read `README.
   GLES1.1/EGL shim). Remaining: Rhythmos AVI-video background. See
   `caanoo-gpu-emulation`.
 
-*Open issue (Windows-only):* hot-reloading twice to different games after a
-memory-heavy first game hard-crashes (fork/Windows teardown; clean under Linux+ASan).
-See `gp2x-static-titles-and-reload-crash`.
+*(Resolved 2026-06-10:* the Windows-only multi-reload hard-crash was upstream Unicorn's
+MinGW `qemu_vfree` releasing CRT-heap pointers with `VirtualFree` — fixed by
+`host/engine/fork-patches/mingw_vfree.py`. See `gp2x-static-titles-and-reload-crash`.)
 
 ## Two backends (core design)
 

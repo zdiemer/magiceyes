@@ -39,6 +39,26 @@ host/engine/fork-patches/apply_and_build.sh        # ME_UNICORN_FORK overrides ~
   shared backing. (Correctness fix for the native-threads model; the kuser-cmpxchg path is
   already host-atomic. NB: this was not itself the Payback loading-deadlock fix — that was resolved
   separately in the native-threads model.)
+- **`fpa_resume.py`** — resume emulation in place after a *handled* invalid instruction
+  (`qemu/accel/tcg/cpu-exec.c`). The engine emulates legacy ARM FPA float ops in a
+  UC_HOOK_INSN_INVALID callback; stock Unicorn halts the CPU after every handled invalid insn,
+  so each FP op cost a full `uc_emu_start` restart (Odonata's per-bullet sin/cos → a few fps).
+  Mirrors the UC_HOOK_INTR resume path; unhandled invalid insns still stop with
+  `UC_ERR_INSN_INVALID`.
+- **`mmap_lock.py`** — restore qemu's `mmap_lock()`/`mmap_unlock()` (no-op'd by Unicorn 2.0.1
+  for single-uc use) as a real process-global recursive mutex
+  (`qemu/include/exec/exec-all.h` + `qemu/accel/tcg/translate-all.c`). Serialises TB
+  codegen/invalidation across the native-threads engine's many ucs over one shared RAM backing;
+  TB *execution* stays parallel.
+- **`mingw_vfree.py`** — fix upstream Unicorn's broken MinGW `qemu_vfree`
+  (`qemu/util/oslib-posix.c`): `qemu_try_memalign`'s `__MINGW32__` branch allocates with
+  `__mingw_aligned_malloc` (CRT heap) but `qemu_vfree` released it with
+  `VirtualFree(ptr, 0, MEM_RELEASE)`. The kernel rounds the address down to its region base, so
+  the call usually fails silently (leak) — but when the rounded base coincides with a real
+  allocation base it **releases an entire heap region**, corrupting live allocations. This was
+  the Windows-only multi-reload teardown crash (`qht_destroy` frees the qht bucket arrays via
+  `qemu_vfree` on every `uc_close`); root-caused with PageHeap + TTD, see
+  `gp2x-static-titles-and-reload-crash`. Fix: pair with `__mingw_aligned_free`.
 
 ## Licensing
 Unicorn/qemu are GPLv2; binaries linking the fork make magiceyes GPLv2-compatible.

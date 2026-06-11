@@ -89,8 +89,9 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
   (`host/engine/`) the sole backend on Linux/WSL too, retiring the qemu-user path (`host/qemu/`,
   the fake-SDL shim's qemu role, `magiceyes.sh`'s qemu branch). The native engine is already the
   shipping cross-platform path; qemu has been the verified-fast GP2X reference. Before flipping:
-  confirm input + the remaining qemu-only titles (e.g. Wiz dynamic-libSDL games) run on the engine,
-  and that the multi-reload teardown crash is resolved (see `gp2x-static-titles-and-reload-crash`).
+  confirm input + the remaining qemu-only titles (e.g. Wiz dynamic-libSDL games) run on the engine.
+  (The multi-reload teardown crash is RESOLVED 2026-06-10 — upstream Unicorn MinGW `qemu_vfree`
+  mismatch, `fork-patches/mingw_vfree.py`; see `gp2x-static-titles-and-reload-crash`.)
   Then drop the qemu build/run scripts + docs. One backend = less to maintain.
 - **Fold the Unicorn backend onto the shared `gp2x_device.c`** — it still has its own copy of the
   device logic; unify so there's one implementation. Low priority (fallback, and it works).
