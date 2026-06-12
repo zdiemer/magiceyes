@@ -1474,6 +1474,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
+        /* A directory handle (dirfd_make) is synthetic, not a host fd -- recognise it like the
+           fstat64 path does (case 197), or uClibc's opendir() fstat's the fd, sees the host
+           fstat fail, and reports the directory as empty (Didj RealAppManager: "No modules
+           found in /Didj/Base/Brio/Module/" -> BOOTFAIL). */
+        if (dirfd_get((int)a0)) { struct stat ds; memset(&ds, 0, sizeof ds);
+            ds.st_mode = S_IFDIR | 0755; ds.st_ino = 2; fill_oabi_stat(a1, &ds); return 0; }
         struct memfile *mf = memfd_get((int)a0);
         if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
                   ms.st_size = mf->len; fill_oabi_stat(a1, &ms); return 0; }

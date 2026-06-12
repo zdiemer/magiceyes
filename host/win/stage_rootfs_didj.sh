@@ -43,21 +43,34 @@ cp -a "$SRC"/. "$OUT"/
 echo "[didj] uClibc base staged -> $OUT"
 ls "$OUT/lib/" | grep -E 'ld-uClibc|libc\.so|libm\.so|libpthread|libdl' || true
 
-# Optional: overlay the MPI/Lightning runtime from the Didj OS image (Phase C/D).
-if [ -n "${DIDJ_OS_IMG:-}" ] && [ -f "$DIDJ_OS_IMG" ]; then
-    echo "[didj] overlaying MPI/Lightning libs from $DIDJ_OS_IMG"
+# Optional: overlay the Didj OS runtime from the "Didj OS" FAT16 image (Phase C/D).
+# The real device mounts this image at /Didj, runs /Didj/Base/bin/RealAppManager (the base
+# UI + game launcher) with LD_LIBRARY_PATH=/Didj/Base/Brio/lib:/Didj/Base/lib. We mirror that:
+# stage the whole Base/ tree at <rootfs>/Didj/Base (RealAppManager opens fonts/UI/settings by
+# absolute /Didj path), and ALSO copy every .so into <rootfs>/lib so ld.so finds them via the
+# default /lib:/usr/lib search (no LD_LIBRARY_PATH change needed). assets/ is gitignored.
+DIDJ_OS_IMG="${DIDJ_OS_IMG:-/mnt/f/Roms/Didj/didj-roms/Didj OS}"
+if [ -f "$DIDJ_OS_IMG" ]; then
+    echo "[didj] staging Didj OS runtime from $DIDJ_OS_IMG"
     MNT="$(mktemp -d)"
     if sudo mount -o loop,ro "$DIDJ_OS_IMG" "$MNT" 2>/dev/null; then
-        # Copy every shared library the Base/ tree provides into the rootfs /lib.
-        find "$MNT" -name '*.so' -o -name '*.so.*' 2>/dev/null | while read -r so; do
+        mkdir -p "$OUT/Didj"
+        cp -a "$MNT/Base" "$OUT/Didj/" 2>/dev/null || true
+        [ -d "$MNT/Data" ] && cp -a "$MNT/Data" "$OUT/Didj/" 2>/dev/null || true
+        # Mirror every shared object into /lib so the default linker search resolves them.
+        find "$OUT/Didj" \( -name '*.so' -o -name '*.so.*' \) 2>/dev/null | while read -r so; do
             cp -a "$so" "$OUT/lib/" 2>/dev/null || true
         done
         sudo umount "$MNT"
-        echo "[didj] MPI/Lightning overlay done"
+        echo "[didj] Didj OS runtime staged -> $OUT/Didj/Base ; libs mirrored into $OUT/lib"
+        ls "$OUT/lib" | grep -cE 'MPI|Lightning' | xargs -I{} echo "[didj]   {} MPI/Lightning libs in /lib"
     else
-        echo "[didj] WARN: could not loop-mount $DIDJ_OS_IMG (need root); skipping MPI overlay"
+        echo "[didj] WARN: could not loop-mount $DIDJ_OS_IMG (need root); skipping runtime overlay"
     fi
     rmdir "$MNT" 2>/dev/null || true
+else
+    echo "[didj] (no Didj OS image at $DIDJ_OS_IMG -> uClibc base only; set DIDJ_OS_IMG for the runtime)"
 fi
 
-echo "[didj] done. Point the engine at it with ME_GP2X_ROOTFS_DIDJ=$OUT (or it auto-finds assets/rootfs-didj)."
+echo "[didj] done. Run: ME_GP2X_ROOTFS_DIDJ=$OUT MAGICEYES_DEVICE=didj \\"
+echo "         bin/me_unicorn $OUT/Didj/Base/bin/RealAppManager"
