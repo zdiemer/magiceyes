@@ -122,6 +122,12 @@ long mq_timedsend_sys(int fd, uint32_t gmsg, uint32_t len, uint32_t prio, uint32
     while (pos > 0 && q->msg[pos - 1].prio < prio) { q->msg[pos] = q->msg[pos - 1]; pos--; }
     uint8_t *buf = malloc(len ? len : 1);
     if (len) read_guest(buf, gmsg, len);
+    if (getenv("ME_MQLOG")) {   /* trace event traffic: queue + size + first bytes (event-type id) */
+        static int nn = 0;
+        if (nn++ < 400) { fprintf(stderr, "  [mq] send '%s' len=%u prio=%u bytes=", q->name, len, prio);
+            for (uint32_t i = 0; i < len && i < 16; i++) fprintf(stderr, "%02x ", buf[i]);
+            fprintf(stderr, "\n"); }
+    }
     q->msg[pos].data = buf; q->msg[pos].len = len; q->msg[pos].prio = prio;
     q->count++;
     pthread_cond_signal(&q->not_empty);

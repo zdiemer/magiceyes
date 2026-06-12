@@ -85,6 +85,14 @@ static int didj_dpad(uint32_t b) {
 
 static int is_didj(void) { return g_device == ME_DEV_DIDJ; }
 
+/* Set once the guest's input loop actually CONSUMES an input event (returns >0 from a read) --
+   the firmware opens/probes /dev/input/event0 early just to read its name, long before the button
+   task is pumping, so "device opened" is too early a signal. From the first real read the guest is
+   processing input and can reset its own inactivity timer; the Didj clock-pacing in syscalls.c stops
+   capping at that point so the splash/menu run at real rate, while boot's input-less window stays
+   paced (otherwise the Brio inactivity timer fires at ~10s before the button task is even alive). */
+int g_input_active = 0;
+
 /* per-open state: the last input snapshot we reported, so a read emits only what changed */
 struct inpst { int used, type; uint32_t last_btns; int last_ax, last_ay; int js_synced; };
 static struct inpst g_inp[64];
@@ -171,8 +179,14 @@ long input_read(int fd, uint32_t gbuf, uint32_t n) {
             if (dchg >> i & 1)
                 off += ev_pack(buf + off, EV_KEY, DIDJ_DPAD[i], (dpad >> i) & 1);
         if (off && off + 16 <= n) off += ev_pack(buf + off, EV_SYN, SYN_REPORT, 0);
+        if (getenv("ME_INPUTLOG") && off) { static int nr = 0; if (nr++ < 60) {
+            fprintf(stderr, "[didj-inp] fd=%x n=%u off=%u evs:", fd, n, off);
+            for (uint32_t o = 0; o + 16 <= off; o += 16)
+                fprintf(stderr, " {t=%u c=%u v=%d}", *(uint16_t*)(buf+o+8), *(uint16_t*)(buf+o+10), *(int32_t*)(buf+o+12));
+            fprintf(stderr, "\n"); } }
         g_inp[s].last_btns = btns; g_inp[s].last_ax = ax; g_inp[s].last_ay = ay;
         if (!off) return -11;                /* O_NONBLOCK: EAGAIN */
+        g_input_active = 1;                  /* guest consuming input -> lift Didj clock pacing */
         uc_mem_write(g_uc, gbuf, buf, off); return (long)off;
     }
 

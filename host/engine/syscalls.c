@@ -763,6 +763,12 @@ static int sysfile_open(const char *p) {
        then mounts /Cart and loads the game), "0" = none (idle base UI). */
     if (!strcmp(p, "/sys/devices/platform/lf1000-nand/cartridge"))
         return memfd_make(g_cart_dir[0] ? "1\n" : "0\n");
+    /* Didj USB vbus (lf1000-usbgadget): CAppManager::IsUsbConnected reads this; when "1" (cable
+       present / docked) the inactivity-shutdown uses the long ~10min timeout instead of the ~10s
+       one. ME_DIDJ_USB=1 reports docked. Experimental: does NOT itself enter PC-connect mode (that
+       needs host enumeration), just keeps the device awake. */
+    if (!strcmp(p, "/sys/devices/platform/lf1000-usbgadget/vbus") || !strcmp(p, "/flags/vbus"))
+        return memfd_make(getenv("ME_DIDJ_USB") ? "1\n" : "0\n");
     if (!strcmp(p, "/proc/sys/kernel/version"))
         return memfd_make("#1 PREEMPT Mon Jan 1 00:00:00 UTC 2008\n");
     if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))
@@ -787,31 +793,28 @@ static int sysfile_open(const char *p) {
     return 0;
 }
 
-/* ---- guest monotonic clock (Didj inactivity / boot pacing) ----
+/* ---- guest monotonic clock (Didj boot pacing -- OPT-IN debug tool) ----
  * The Brio inactivity-shutdown timer (CAppManager::UpdateInactivity) accumulates
- * CKernelMPI::GetElapsedTimeAsMSecs() deltas, which we serve from the host wall-clock
- * (gettimeofday). Our emulated Didj boot is several times slower than real hardware (~15-30s
- * vs ~5s to render the first menu), so on the raw wall-clock the guest perceives 15-30s of
- * "inactivity" during boot and shuts itself down BEFORE the home menu appears -- before the
- * button task is even alive to register a key-press. So for Didj we hand the guest a virtual
- * monotonic clock that advances by at MOST one frame's worth per sample: when the emulator
- * stalls between two time reads (a slow boot frame / fault storm), the guest clock ticks one
- * step, not the real seconds that elapsed. At steady state (frequent reads, small real deltas)
- * it tracks host time exactly, so menu/in-game animation + audio pacing are unchanged. This is
- * the GP2X TCOUNT model (guest time == game-sim dt, not host wall-clock). ME_DIDJ_CLOCKSTEP=us
- * overrides the cap; ME_DIDJ_CLOCKSTEP=0 disables (raw wall-clock). */
+ * CKernelMPI::GetElapsedTimeAsMSecs() deltas, served from the host wall-clock (gettimeofday).
+ * Our emulated Didj boot is ~3-4x slower than real hardware, so the button task only comes alive
+ * at ~10s of real boot -- right at the inactivity threshold -- leaving no margin to reset it. This
+ * pacing caps each pre-input-active sample at ME_DIDJ_CLOCKSTEP us so the guest's perceived boot
+ * time stays low. It is OPT-IN (default off = raw wall-clock) because it did NOT resolve the
+ * shutdown on its own: the boot samples the clock too frequently for a cap to bind reliably, and
+ * the real blocker is that button input never resets the inactivity timer (the button task reads
+ * correct evdev events but posts no CButtonMessage -- see didj-lf1000-support memory, Wall 1). Kept
+ * as a tunable for further work; g_input_active (set on the first input read) lifts the cap. */
+extern int g_input_active;
 static void guest_timeofday(struct timeval *out) {
     struct timeval tv; gettimeofday(&tv, NULL);
     long long real = (long long)tv.tv_sec * 1000000LL + tv.tv_usec;
-    static long long vclock = 0, last_real = 0; static int init = 0;
-    long long cap = 50000;   /* ~one 20fps frame; only binds when reads are sparse (slow boot) */
-    if (g_device == ME_DEV_DIDJ) {
-        const char *e = getenv("ME_DIDJ_CLOCKSTEP"); if (e) cap = atoll(e);
-    } else cap = 0;          /* other devices: untouched host wall-clock */
-    if (cap > 0) {
+    const char *step = (g_device == ME_DEV_DIDJ) ? getenv("ME_DIDJ_CLOCKSTEP") : NULL;
+    if (step) {   /* opt-in boot pacing: cap each pre-input-active sample at ME_DIDJ_CLOCKSTEP us */
+        long long cap = atoll(step);
+        static long long vclock = 0, last_real = 0; static int init = 0;
         if (!init) { init = 1; last_real = real; vclock = real; }
-        else { long long d = real - last_real; last_real = real;
-               if (d < 0) d = 0; if (d > cap) d = cap; vclock += d; }
+        else { long long d = real - last_real; last_real = real; if (d < 0) d = 0;
+               if (!g_input_active && cap > 0 && d > cap) d = cap; vclock += d; }
         real = vclock;
     }
     out->tv_sec = (time_t)(real / 1000000LL); out->tv_usec = (long)(real % 1000000LL);
