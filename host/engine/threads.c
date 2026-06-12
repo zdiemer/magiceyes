@@ -128,6 +128,7 @@ void uc_hook_std(uc_engine *u) {
              p && g_nwatch < 4; p = strtok(NULL, ",")) g_watch[g_nwatch++] = strtoul(p, NULL, 0); }
     for (int i = 0; i < g_nwatch; i++)
         uc_hook_add(u, &h, UC_HOOK_MEM_WRITE, watch_cb, NULL, g_watch[i], g_watch[i] + 3);
+    me_btrace_hook(u);   /* ME_DIDJ_BTRACE: trace libButton's button task on this uc (Wall 1) */
 }
 
 uc_engine *uc_new_thread(void) {

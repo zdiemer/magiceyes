@@ -282,6 +282,7 @@ long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) 
         ssize_t n = pread(fd, tmp, len, (off_t)off);
         if (n > 0) uc_mem_write(g_uc, at, tmp, n);
         free(tmp);
+        me_btrace_note_mmap(fd, at, off, len);   /* Wall-1 debug: learn libButton's load base */
     }
     return at;
 }

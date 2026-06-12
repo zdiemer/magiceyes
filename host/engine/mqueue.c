@@ -155,6 +155,9 @@ long mq_timedreceive_sys(int fd, uint32_t gmsg, uint32_t maxlen, uint32_t gprio,
     q->count--;
     pthread_cond_signal(&q->not_full);
     pthread_mutex_unlock(&q->m);
+    if (getenv("ME_MQLOG")) { static int nn = 0; if (nn++ < 400)
+        fprintf(stderr, "  [mq] recv '%s' len=%u (q->count now %d) tid=%d\n",
+                q->name, msg.len, q->count, g_self ? g_self->tid : -1); }
     uint32_t n = msg.len < maxlen ? msg.len : maxlen;
     if (n) uc_mem_write(g_uc, gmsg, msg.data, n);
     if (gprio) { uint32_t p = msg.prio; uc_mem_write(g_uc, gprio, &p, 4); }

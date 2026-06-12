@@ -200,6 +200,10 @@ void input_open(int fd, int type);                   /* seed per-fd state at ope
 long input_read(int fd, uint32_t gbuf, uint32_t n);  /* emit evdev/js events for state changes */
 long input_ioctl(int fd, uint32_t cmd, uint32_t arg);/* EVIOCG / JSIOCG capability queries */
 int  input_pending(int fd);                          /* poll()/select(): is an input event ready? */
+/* Didj button-task tracer (ME_DIDJ_BTRACE; didj_btrace.c) -- Wall-1 debug */
+void me_btrace_note_open(const char *guest_path, int fd);
+void me_btrace_note_mmap(int fd, uint32_t at, uint64_t off, uint32_t len);
+void me_btrace_hook(uc_engine *u);
 long i2c_read(uint32_t gbuf, uint32_t n);            /* /dev/i2c-0 handset serial (read) */
 long i2c_ioctl(uint32_t cmd, uint32_t arg);          /* /dev/i2c-0 I2C_RDWR serial */
 /* lf1000_devices.c: LF1000 (Didj) display driver nodes — /dev/{dpc,mlc,layer0..2,ga3d}. The

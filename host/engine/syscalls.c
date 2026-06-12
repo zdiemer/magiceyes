@@ -1252,7 +1252,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
         if (getenv("ME_OPENLOG")) { char b[1300]; snprintf(b, sizeof b,
             "OPEN '%s' [%s] flags=%x -> %ld%s\n", p, hp, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
-        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track((int)r, path_ino(hp)); return r; }
+        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track((int)r, path_ino(hp));
+                      me_btrace_note_open(p, (int)r); return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
         if (e2 == ENOENT && ++g_self->enoent_streak > 3) {
