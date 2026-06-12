@@ -115,6 +115,25 @@ static void shut_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
             rr(uc, UC_ARM_REG_LR) - g_lb_base, g_self ? g_self->tid : -1, g_input_active);
 }
 
+/* CGameStateHandler::Update (libLightningBase 0x11fb4): per-frame state pump. It updates the
+ * current state's vtable Update only if handler[41]!=0 && handler[24]!=handler[8]; else it skips. */
+static void gsh_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)size; (void)user;
+    if (g_bt_budget <= 0) return;
+    uint32_t rel = (uint32_t)addr - g_lb_base;
+    if (rel == 0x11fb4) {
+        static int n = 0; if (n++ % 20) return;
+        uint32_t h = rr(uc, UC_ARM_REG_R0), f = 0, s24 = 0, s8 = 0;
+        uc_mem_read(uc, h + 41, &f, 1); uc_mem_read(uc, h + 24, &s24, 4); uc_mem_read(uc, h + 8, &s8, 4);
+        fprintf(stderr, "[gsh] h=%08x flag41=%x cur24=%08x base8=%08x %s\n", h, f & 0xff, s24, s8,
+                ((f & 0xff) && s24 != s8) ? "UPDATES" : "SKIPS"); g_bt_budget--;
+    } else if (rel == 0x12028) {     /* about to call state->Update; r0 = state, [r0] = vtable */
+        uint32_t st = rr(uc, UC_ARM_REG_R0), vt = 0; if (st) uc_mem_read(uc, st, &vt, 4);
+        fprintf(stderr, "[gsh] *** UPDATES state=%08x vtable_rel(BLT)=%x\n", st, g_blt_base ? vt - g_blt_base : vt);
+        g_bt_budget--;
+    }
+}
+
 /* CAppManager::Notify (libLightningBase 0x25748) + activity-flag store (0x25848) */
 static void lb_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     (void)size; (void)user;
@@ -160,6 +179,10 @@ void me_btrace_hook(uc_engine *u) {
                     (uint64_t)g_lb_base + 0x204a0, (uint64_t)g_lb_base + 0x204a0);
         uc_hook_add(u, &h, UC_HOOK_CODE, vidpb_cb, NULL,  /* CVideoPlayback::Start (Wall 2) */
                     (uint64_t)g_lb_base + 0x213bc, (uint64_t)g_lb_base + 0x213bc);
+        uc_hook_add(u, &h, UC_HOOK_CODE, gsh_cb, NULL,    /* CGameStateHandler::Update entry */
+                    (uint64_t)g_lb_base + 0x11fb4, (uint64_t)g_lb_base + 0x11fb4);
+        uc_hook_add(u, &h, UC_HOOK_CODE, gsh_cb, NULL,    /* the state->Update vtable call */
+                    (uint64_t)g_lb_base + 0x12028, (uint64_t)g_lb_base + 0x12028);
     }
     hook_blt_on(u);
 }
