@@ -193,7 +193,23 @@ int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime) {
     struct fxq *q = fxq_for(uaddr);
     pthread_mutex_lock(&q->m);
     uint32_t cur = 0; uc_mem_read(g_uc, uaddr, &cur, 4);
-    if (cur != val) { pthread_mutex_unlock(&q->m); return -11; /* EAGAIN */ }
+    if (cur != val) {                           /* EAGAIN: the value already changed, don't block */
+        pthread_mutex_unlock(&q->m);
+        /* Livelock backoff. uClibc's swp+futex mutex (the malloc lock) under our TRUE-PARALLEL
+           threading can livelock: two worker threads each swp the lock to 2, FUTEX_WAIT(val=2),
+           the OTHER's swp/release flips the value so each sees cur!=2 -> EAGAIN -> the guest re-spins
+           the swp instead of ever blocking, and neither wins. On a single-core device this can't
+           happen (one thread runs at a time). After a run of consecutive EAGAINs on the same
+           address (the livelock signature -- legitimate waits block or succeed quickly), yield the
+           CPU (releasing g_biglock) so the lock holder can finish its critical section and release.
+           This unblocked Didj boots that deadlocked with the audio decoder + module init both
+           mallocing at once (which then blocked the main thread in pthread_join -> stalled app). */
+        static __thread uint32_t last_addr; static __thread int streak;
+        if (uaddr == last_addr) { if (++streak >= 48) { streak = 0;
+            BIGLOCK_UNLOCK(); me_usleep(60); BIGLOCK_LOCK(); } }
+        else { last_addr = uaddr; streak = 0; }
+        return -11;
+    }
     BIGLOCK_UNLOCK();                           /* let others run while we block */
     int r = abstime ? pthread_cond_timedwait(&q->c, &q->m, abstime)
                     : pthread_cond_wait(&q->c, &q->m);   /* atomically releases q->m */
