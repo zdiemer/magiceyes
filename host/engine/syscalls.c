@@ -1565,7 +1565,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (input_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
         if (oss_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
         char hp[PATH_MAX]; resolve_io(p, 0, hp, sizeof hp);
-        if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
+        if (stat(hp, &s)) return LERR(errno);
+        if (s.st_ino == 0) s.st_ino = path_ino(hp);   /* Win: unique inode (ld.so dedups by it) */
+        fill_oabi_stat(a1, &s); return 0;
     }
     case 108: { /* fstat(fd, buf) */
         /* A directory handle (dirfd_make) is synthetic, not a host fd -- recognise it like the
@@ -1577,7 +1579,15 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         struct memfile *mf = memfd_get((int)a0);
         if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
                   ms.st_size = mf->len; fill_oabi_stat(a1, &ms); return 0; }
-        struct stat s; if (fstat((int)a0, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
+        struct stat s; if (fstat((int)a0, &s)) return LERR(errno);
+        /* Windows: MinGW's fstat returns st_ino==0 for every file, but the guest ld.so dedups
+           shared objects by (st_dev,st_ino) -- so every NEEDED lib looks like a duplicate of the
+           first and is skipped (uClibc/Didj: opens libc.so.0, fstat's it, then closes it without
+           mapping -> "can't resolve symbol __uClibc_main"). Synthesise a path-unique inode, like
+           the fstat64 path (case 197). (This is why glibc titles, which use fstat64, already
+           worked on Windows but uClibc, which uses fstat(108), did not.) */
+        if (s.st_ino == 0) s.st_ino = hostfd_ino((int)a0);
+        fill_oabi_stat(a1, &s); return 0;
     }
     case 195: case 196: case 197: { /* stat64 / lstat64 / fstat64 */
         struct stat s; int ok; char p[1024] = {0};

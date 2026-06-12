@@ -910,9 +910,9 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
           if (t0 == 0) { t0 = now; s0 = shm->frame_seq; }
           else if (now - t0 >= 500) {
               double fps = (double)(shm->frame_seq - s0) * 1000.0 / (double)(now - t0);
-              static const char *dev[] = { "GP2X", "GP2X Wiz", "GP2X Caanoo" };
+              static const char *dev[] = { "GP2X", "GP2X Wiz", "GP2X Caanoo", "Didj" };
               static const char *bk[]  = { "FB", "SDL", "GL" };
-              int di = shm->device  < 3 ? shm->device  : 0;
+              int di = shm->device  < 4 ? shm->device  : 0;
               int bi = shm->backend < 3 ? shm->backend : 0;
               const char *ind = g_rec ? "  |  [REC]" : (g_rep_on && !g_rep_done) ? "  |  [REPLAY]" : "";
               char title[200];
