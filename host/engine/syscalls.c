@@ -736,6 +736,10 @@ static const unsigned char TZ_UTC[] = {
     'U','T','C', 0 };
 /* Return a fake fd for a known Linux system path, or 0 if not one we fake. */
 static int sysfile_open(const char *p) {
+    /* Didj cartridge-detect sysfs: CButtonModule's LightningButtonTask reads this each poll and
+       asserts ("cart read failed") if the read fails. "0" = no cartridge inserted (base UI). */
+    if (!strcmp(p, "/sys/devices/platform/lf1000-nand/cartridge"))
+        return memfd_make("0\n");
     if (!strcmp(p, "/proc/sys/kernel/version"))
         return memfd_make("#1 PREEMPT Mon Jan 1 00:00:00 UTC 2008\n");
     if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))

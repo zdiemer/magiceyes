@@ -175,7 +175,10 @@ long input_ioctl(int fd, uint32_t cmd, uint32_t arg) {
     switch (nr) {
     case 0x01: { uint32_t v = 0x010001; wr(arg, &v, 4); return 0; }        /* EVIOCGVERSION */
     case 0x02: { uint16_t id[4] = { 0x0003, 0x1f00, 0x0001, 0x0100 }; wr(arg, id, 8); return 0; } /* EVIOCGID */
-    case 0x06: { const char *nm = "pollux-analog";                        /* EVIOCGNAME(len) */
+    case 0x06: { /* EVIOCGNAME(len): the device name. Didj's CButtonModule (libUtility
+                    GetKeyboardName) scans /dev/input/event* and requires a device named
+                    exactly "LF1000 Keyboard", else "no keyboard to use" -> BOOTFAIL. */
+                 const char *nm = (g_device == ME_DEV_DIDJ) ? "LF1000 Keyboard" : "pollux-analog";
                  uint32_t l = (uint32_t)strlen(nm) + 1; if (l > size) l = size; wr(arg, nm, l); return (long)l; }
     case 0x18: {  /* EVIOCGKEY(len): current key state bitmap */
         uint8_t z[96]; memset(z, 0, sizeof z); uint32_t l = size < sizeof z ? size : sizeof z;
