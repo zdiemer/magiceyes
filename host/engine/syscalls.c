@@ -419,6 +419,23 @@ static int sd_fake_node(const char *p, struct stat *s) {
     return 1;
 }
 
+/* The OSS audio nodes (/dev/dsp*, /dev/mixer*, /dev/sound/*) are intercepted at open() (dev_open
+   -> DEV_DSP/DEV_MIXER) but they don't exist on the host, so a stat() falls through and fails.
+   PortAudio's OSS backend (Didj AudioMPI) probes the devices by stat()ing them first and finds
+   none -> "Failed to initialize audio output". Report them as present character devices so the
+   probe proceeds to open() (which we serve) + the SNDCTL ioctls (dsp_ioctl). */
+static int oss_fake_node(const char *p, struct stat *s) {
+    int dsp = !strncmp(p, "/dev/dsp", 8) || !strcmp(p, "/dev/sound/dsp") || !strcmp(p, "/dev/audio");
+    int mix = !strncmp(p, "/dev/mixer", 10) || !strcmp(p, "/dev/sound/mixer");
+    if (!dsp && !mix) return 0;
+    memset(s, 0, sizeof *s);
+    s->st_mode = S_IFCHR | 0666;
+    s->st_rdev = (14 << 8) | (dsp ? 3 : 0);   /* OSS major 14: dsp=minor 3, mixer=minor 0 */
+    s->st_ino  = 0x6473 + (dsp ? 0 : 1);      /* 'ds' */
+    s->st_dev  = 1;
+    return 1;
+}
+
 void fill_oabi_stat(uint32_t gbuf, struct stat *hs) {
     /* `struct stat` for the plain stat/lstat/fstat syscalls (nr 106/107/108). Field OFFSETS are
        the same for OABI and EABI, but the total SIZE differs: the GP2X OABI glibc-2.3.6 struct is
@@ -705,6 +722,7 @@ void syscalls_reset(void) {
     for (int i = 0; i < MEMFD_MAX; i++)
         if (g_memf[i].used) { free(g_memf[i].data); g_memf[i].used = 0; g_memf[i].data = NULL; }
     mqueue_reset();
+    netsock_reset();
 }
 
 /* Minimal TZif (v1) for UTC — the guest's glibc opens /etc/localtime; a host without it (no
@@ -1177,6 +1195,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 6:    /* close */
         if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W || (int)a0 == FAKESOCK_FD) return 0;
         if (mq_is_fd((int)a0)) return 0;   /* mq descriptor: queue persists until mq_unlink */
+        if (sock_is_fake((int)a0)) { sock_close_fake((int)a0); return 0; }
         if (dirfd_get((int)a0)) { dirfd_close((int)a0); return 0; }
         { struct memfile *mf = memfd_get((int)a0);
           if (mf) { free(mf->data); mf->used = 0; mf->data = NULL; return 0; } }
@@ -1482,11 +1501,30 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 154:  return 0;                    /* sched_setparam */
     case 155:  if (a1) { uint32_t z = 0; uc_mem_write(g_uc, a1, &z, 4); } return 0;  /* sched_getparam */
     case 157:  return 0;                    /* sched_getscheduler -> SCHED_OTHER */
+    /* Direct socket syscalls (EABI; uClibc/Didj). No real networking: a Lightning task opens an
+       AF_UNIX listening socket for an IPC control channel (socket/bind/listen ok, accept parks),
+       and socketpair() backs an internal self-pipe with a real host pair. See netsock.c. */
+    case 281:  return sock_socket(a0, a1, a2);            /* socket */
+    case 282:  return 0;                                 /* bind */
+    case 283:  return sock_is_fake((int)a0) ? -111 : 0;  /* connect -> ECONNREFUSED on a fake sock */
+    case 284:  return 0;                                 /* listen */
+    case 285:  return sock_accept((int)a0, 0);           /* accept */
+    case 366:  return sock_accept((int)a0, a3);          /* accept4 */
+    case 286:  case 287:  return 0;                      /* getsockname / getpeername */
+    case 288:  return sock_socketpair(a0, a1, a2, a3);   /* socketpair */
+    case 289:  case 290:  case 296:  return (long)a2;    /* send/sendto/sendmsg: claim sent (a2=len) */
+    case 291:  case 292:  case 297:                      /* recv/recvfrom/recvmsg: nothing to read */
+        return sock_is_fake((int)a0) ? -11 /*EAGAIN*/ : 0;
+    case 293:  return 0;                                 /* shutdown */
+    case 294:  return 0;                                 /* setsockopt */
+    case 295:  if (a3 && a4) { uint32_t z = 0; uc_mem_write(g_uc, a3, &z, 4);
+                              uint32_t l = 4; uc_mem_write(g_uc, a4, &l, 4); } return 0;  /* getsockopt */
     case 106: { /* stat(path, buf) */
         char p[1024]; read_cstr(a0, p, sizeof p);
         struct stat s;
         if (sd_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
         if (input_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
+        if (oss_fake_node(p, &s)) { fill_oabi_stat(a1, &s); return 0; }
         char hp[PATH_MAX]; resolve_io(p, 0, hp, sizeof hp);
         if (stat(hp, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
@@ -1516,6 +1554,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         else { read_cstr(a0, p, sizeof p);
                if (sd_fake_node(p, &s)) { fill_stat64(a1, &s); return 0; }   /* SD present (firmware) */
                if (input_fake_node(p, &s)) { fill_stat64(a1, &s); return 0; } /* event0/js0 (SDL joy scan) */
+               if (oss_fake_node(p, &s)) { fill_stat64(a1, &s); return 0; }   /* /dev/dsp*,/dev/mixer (PortAudio) */
                int mf = sysfile_open(p);   /* a faked path: report it as a regular file */
                if (mf) { struct memfile *m = memfd_get(mf); struct stat ms; memset(&ms, 0, sizeof ms);
                          ms.st_mode = S_IFREG | 0644; ms.st_size = m->len; free(m->data); m->used = 0;

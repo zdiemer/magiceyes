@@ -290,6 +290,14 @@ long mq_timedreceive_sys(int fd, uint32_t gmsg, uint32_t maxlen, uint32_t gprio,
 long mq_getsetattr_sys(int fd, uint32_t gnew, uint32_t gold);
 void mqueue_reset(void);
 
+/* ---- netsock.c: minimal direct socket syscalls (EABI titles; Didj IPC) ---- */
+int  sock_is_fake(int fd);
+void sock_close_fake(int fd);
+long sock_socket(uint32_t domain, uint32_t type, uint32_t proto);
+long sock_accept(int fd, uint32_t flags);
+long sock_socketpair(uint32_t domain, uint32_t type, uint32_t proto, uint32_t gsv);
+void netsock_reset(void);
+
 /* ---- mem.c (guest mmap/brk allocator + lazy fault map) ---- */
 extern struct freereg g_mfree[256];
 extern int g_nmfree;
