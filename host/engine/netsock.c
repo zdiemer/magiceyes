@@ -11,7 +11,9 @@
  * back real host fds (read/write/close already route those to the host).
  */
 #include "engine.h"
+#ifndef _WIN32
 #include <sys/socket.h>
+#endif
 
 #define FAKESOCK_BASE 0x60000000
 #define FAKESOCK_N    64
@@ -49,14 +51,24 @@ long sock_accept(int fd, uint32_t flags) {
     return -4 /*EINTR*/;
 }
 
-/* nr 288 socketpair(domain, type, protocol, sv[2]): a real host pair so internal IPC works. */
+/* nr 288 socketpair(domain, type, protocol, sv[2]): a real host pair so internal IPC works. On
+   Windows (MinGW) there is no POSIX socketpair; back it with the engine's in-process pipe instead
+   (both ends are guest threads in our process, so a shared pipe is equivalent for a self-pipe). */
 long sock_socketpair(uint32_t domain, uint32_t type, uint32_t proto, uint32_t gsv) {
+    (void)proto;
+#ifndef _WIN32
     int sv[2];
     int hd = (domain == 1 /*AF_UNIX*/) ? 1 : (int)domain;
     if (socketpair(hd, (int)(type & 0xff), (int)proto, sv) != 0) return -(long)errno;
     uint32_t out[2] = { (uint32_t)sv[0], (uint32_t)sv[1] };
     uc_mem_write(g_uc, gsv, out, 8);
     return 0;
+#else
+    (void)domain; (void)type;
+    uint32_t out[2] = { PIPEFD_R, PIPEFD_W };   /* engine's in-process pipe (read end, write end) */
+    uc_mem_write(g_uc, gsv, out, 8);
+    return 0;
+#endif
 }
 
 void netsock_reset(void) { memset(g_fsock_used, 0, sizeof g_fsock_used); }

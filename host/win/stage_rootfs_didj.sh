@@ -80,5 +80,16 @@ else
     echo "[didj] (no Didj OS image at $DIDJ_OS_IMG -> uClibc base only; set DIDJ_OS_IMG for the runtime)"
 fi
 
+# Dereference symlinks to real files: the jffs2/firmware trees are full of symlinks
+# (libc.so.0 -> libuClibc-0.9.29.so, ...). The Linux engine follows them, but the native
+# Windows engine's fopen can't open a Linux symlink ("Invalid argument"), so the .exe fails to
+# load the interpreter/libs. Replacing each symlink with a copy of its target makes the rootfs
+# work on both. (Dangling links - e.g. kernel build dirs - are left alone.)
+find "$OUT" -type l 2>/dev/null | while read -r link; do
+    tgt="$(readlink -f "$link" 2>/dev/null)" || continue
+    [ -f "$tgt" ] && { rm -f "$link"; cp "$tgt" "$link"; }
+done
+echo "[didj] dereferenced symlinks (Windows-compatible rootfs)"
+
 echo "[didj] done. Run: ME_GP2X_ROOTFS_DIDJ=$OUT MAGICEYES_DEVICE=didj \\"
 echo "         bin/me_unicorn $OUT/Didj/Base/bin/RealAppManager"
