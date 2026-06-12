@@ -39,6 +39,8 @@ static int      g_blt_fd    = -1;     /* host fd of BLT.so (the base UI app) */
 static uint32_t g_blt_base  = 0;      /* runtime load base */
 static int      g_bt_budget = 1200;   /* tracer output cap */
 
+static uint32_t rr(uc_engine *uc, int reg) { uint32_t v = 0; uc_reg_read(uc, reg, &v); return v; }
+
 /* Wall-2 splash/video tracer: LightningSplashState::Update (BLT 0x2a884) shows the legal screen
  * for 3s then branches to startVideo (0x2a900) -> CVideoPlayback::Start (libLightningBase 0x213bc)
  * which plays the Theora intro; the splash advances to the menu when IsVideoPlaying()==false. */
@@ -65,8 +67,6 @@ static void vidpb_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
 static int trace_on(void)  { return getenv("ME_DIDJ_BTRACE") != NULL; }
 static int guard_on(void)  { return g_device == ME_DEV_DIDJ && !getenv("ME_DIDJ_NOINACTGUARD"); }
 static int track_on(void)  { return trace_on() || guard_on(); }
-
-static uint32_t rr(uc_engine *uc, int reg) { uint32_t v = 0; uc_reg_read(uc, reg, &v); return v; }
 
 /* UpdateInactivity entry (libLightningBase 0x29a78): r0 = CAppManager*. Until input is live, set
  * its activity flag (+0x5c) so the timer resets every poll and can't shut us down during boot. */
@@ -157,6 +157,8 @@ void me_btrace_hook(uc_engine *u) {
 static char g_libname[128][40]; static int g_libfd[128]; static int g_liblogged[128]; static int g_nlib = 0;
 void me_btrace_note_open(const char *guest_path, int fd) {
     if (fd < 0) return;
+    if (getenv("ME_DIDJ_OPENLOG")) { static int n = 0;
+        if (n++ < 200 && strstr(guest_path, ".so")) fprintf(stderr, "[opn] fd=%d %s\n", fd, guest_path); }
     if (getenv("ME_LIBMAP") && strstr(guest_path, ".so")) {
         const char *b = strrchr(guest_path, '/'); b = b ? b + 1 : guest_path;
         int idx = -1;
