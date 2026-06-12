@@ -35,7 +35,32 @@ static int      g_bt_fd     = -1;     /* host fd of libButton.so */
 static uint32_t g_bt_base   = 0;      /* runtime load base */
 static int      g_lb_fd     = -1;     /* host fd of libLightningBase.so */
 static uint32_t g_lb_base   = 0;      /* runtime load base */
+static int      g_blt_fd    = -1;     /* host fd of BLT.so (the base UI app) */
+static uint32_t g_blt_base  = 0;      /* runtime load base */
 static int      g_bt_budget = 1200;   /* tracer output cap */
+
+/* Wall-2 splash/video tracer: LightningSplashState::Update (BLT 0x2a884) shows the legal screen
+ * for 3s then branches to startVideo (0x2a900) -> CVideoPlayback::Start (libLightningBase 0x213bc)
+ * which plays the Theora intro; the splash advances to the menu when IsVideoPlaying()==false. */
+static void splash_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)size; (void)user;
+    if (g_bt_budget <= 0) return;
+    uint32_t rel = (uint32_t)addr - g_blt_base;
+    if (rel == 0x2a884) {                 /* Update entry: r0 = splash this; mSubState @ this+92 */
+        static int n = 0; if (n++ % 60) return;   /* rate-limit (called every frame) */
+        uint32_t self = rr(uc, UC_ARM_REG_R0), ss = 0; if (self) uc_mem_read(uc, self + 92, &ss, 4);
+        fprintf(stderr, "[splash] Update mSubState=%u\n", ss); g_bt_budget--;
+    } else if (rel == 0x2a900) {
+        fprintf(stderr, "[splash] *** startVideo branch reached (3s legal elapsed)\n"); g_bt_budget--;
+    }
+}
+static void vidpb_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
+    (void)uc; (void)size; (void)user;
+    uint32_t rel = (uint32_t)addr - g_lb_base;
+    fprintf(stderr, "[video] %s tid=%d\n",
+            rel == 0x213bc ? "CVideoPlayback::Start CALLED" : "CVideoPlayback::IsVideoPlaying",
+            g_self ? g_self->tid : -1);
+}
 
 static int trace_on(void)  { return getenv("ME_DIDJ_BTRACE") != NULL; }
 static int guard_on(void)  { return g_device == ME_DEV_DIDJ && !getenv("ME_DIDJ_NOINACTGUARD"); }
@@ -118,6 +143,12 @@ void me_btrace_hook(uc_engine *u) {
                     (uint64_t)g_lb_base + 0x267e0, (uint64_t)g_lb_base + 0x267e0);
         uc_hook_add(u, &h, UC_HOOK_CODE, shut_cb, NULL,   /* CPowerDownState::Enter: who transitions to shutdown */
                     (uint64_t)g_lb_base + 0x204a0, (uint64_t)g_lb_base + 0x204a0);
+        uc_hook_add(u, &h, UC_HOOK_CODE, vidpb_cb, NULL,  /* CVideoPlayback::Start (Wall 2) */
+                    (uint64_t)g_lb_base + 0x213bc, (uint64_t)g_lb_base + 0x213bc);
+    }
+    if (g_blt_base) {
+        uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x2a884, (uint64_t)g_blt_base + 0x2a884);
+        uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x2a900, (uint64_t)g_blt_base + 0x2a900);
     }
 }
 
@@ -136,6 +167,7 @@ void me_btrace_note_open(const char *guest_path, int fd) {
     if (!track_on()) return;
     if (g_bt_fd < 0 && strstr(guest_path, "libButton.so")) g_bt_fd = fd;
     else if (g_lb_fd < 0 && strstr(guest_path, "libLightningBase.so")) g_lb_fd = fd;
+    else if (g_blt_fd < 0 && strstr(guest_path, "BLT.so")) g_blt_fd = fd;  /* base UI app */
 }
 
 void me_btrace_note_mmap(int fd, uint32_t at, uint64_t off, uint32_t len) {
@@ -153,6 +185,10 @@ void me_btrace_note_mmap(int fd, uint32_t at, uint64_t off, uint32_t len) {
     } else if (!g_lb_base && g_lb_fd >= 0 && fd == g_lb_fd) {
         g_lb_base = at;
         if (trace_on()) fprintf(stderr, "[lb] libLightningBase base=%08x\n", at);
+        me_btrace_hook(g_uc);
+    } else if (!g_blt_base && g_blt_fd >= 0 && fd == g_blt_fd) {
+        g_blt_base = at;
+        if (trace_on()) fprintf(stderr, "[blt] BLT base=%08x\n", at);
         me_btrace_hook(g_uc);
     }
 }

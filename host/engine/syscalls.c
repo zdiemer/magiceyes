@@ -769,6 +769,15 @@ static int sysfile_open(const char *p) {
        needs host enumeration), just keeps the device awake. */
     if (!strcmp(p, "/sys/devices/platform/lf1000-usbgadget/vbus") || !strcmp(p, "/flags/vbus"))
         return memfd_make(getenv("ME_DIDJ_USB") ? "1\n" : "0\n");
+    /* Didj power state (libUtility GetCurrentPowerState fscanf's an int from here): 1 = external/AC,
+       2 = normal battery (both benign -- CAppManager::Notify CLEARS the low-power flag); 3/4 = low/
+       critical. If this file is ABSENT, fopen fails -> state 0 -> the flag is never cleared and a
+       stale low-power/shutdown condition persists -> CPowerDownState shuts the device down before the
+       splash reaches the menu. Report AC-powered ("1") so the device stays on (an emulator is, in
+       effect, on wall power). ME_DIDJ_POWER overrides the raw status value. */
+    if (!strcmp(p, "/sys/devices/platform/lf1000-power/status")) {
+        const char *v = getenv("ME_DIDJ_POWER"); return memfd_make(v ? v : "1\n");
+    }
     if (!strcmp(p, "/proc/sys/kernel/version"))
         return memfd_make("#1 PREEMPT Mon Jan 1 00:00:00 UTC 2008\n");
     if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))
