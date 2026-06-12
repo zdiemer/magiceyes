@@ -858,8 +858,19 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                   mf->pos += n; return n; }
         if (dev_type((int)a0) == DEV_I2C)  return i2c_read(a1, a2);  /* handset serial */
         if (dev_type((int)a0) == DEV_GPIO) return gpio_read(a1, a2); /* joystick buttons */
-        if (dev_type((int)a0) == DEV_INPUT_EV || dev_type((int)a0) == DEV_INPUT_JS)
-            return input_read((int)a0, a1, a2);                     /* evdev/js stick + buttons */
+        if (dev_type((int)a0) == DEV_INPUT_EV || dev_type((int)a0) == DEV_INPUT_JS) {
+            long r = input_read((int)a0, a1, a2);                   /* evdev/js stick + buttons */
+            if (r != -11 || dev_nonblock((int)a0)) return r;        /* got events / error / non-blocking EAGAIN */
+            /* Blocking evdev read (input_read returned -EAGAIN = no events): a real input device
+               blocks until an event. The Didj button task (LightningButtonTask) does a bare blocking
+               read and asserts "button read failed" on EAGAIN, so wait (releasing g_biglock) for the
+               next button state change. */
+            while (!g_shutdown && !g_exit) {
+                BIGLOCK_UNLOCK(); me_usleep(8000); BIGLOCK_LOCK();
+                if (input_pending((int)a0)) { r = input_read((int)a0, a1, a2); if (r != -11) return r; }
+            }
+            return -4 /*EINTR*/;
+        }
         if (dev_type((int)a0)) return 0;   /* other stub devices: EOF (never host-read a fake fd) */
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         long r = read((int)a0, tmp, a2);
