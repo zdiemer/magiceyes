@@ -48,10 +48,13 @@ static void splash_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     (void)size; (void)user;
     if (g_bt_budget <= 0) return;
     uint32_t rel = (uint32_t)addr - g_blt_base;
-    if (rel == 0x2a884) {                 /* Update entry: r0 = splash this; mSubState @ this+92 */
-        static int n = 0; if (n++ % 60) return;   /* rate-limit (called every frame) */
+    int tid = g_self ? g_self->tid : -1;
+    if (rel == 0x2a5d8) { fprintf(stderr, "[splash] Enter tid=%d\n", tid); g_bt_budget--; }
+    else if (rel == 0x293dc) { fprintf(stderr, "[splash] Exit tid=%d\n", tid); g_bt_budget--; }
+    else if (rel == 0x2a884) {            /* Update entry: r0 = splash this; mSubState @ this+92 */
+        static int n = 0; if (n++ % 30) return;   /* rate-limit (called every frame) */
         uint32_t self = rr(uc, UC_ARM_REG_R0), ss = 0; if (self) uc_mem_read(uc, self + 92, &ss, 4);
-        fprintf(stderr, "[splash] Update mSubState=%u\n", ss); g_bt_budget--;
+        fprintf(stderr, "[splash] Update mSubState=%u tid=%d\n", ss, tid); g_bt_budget--;
     } else if (rel == 0x2a900) {
         fprintf(stderr, "[splash] *** startVideo branch reached (3s legal elapsed)\n"); g_bt_budget--;
     }
@@ -126,6 +129,18 @@ static void lb_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     }
 }
 
+/* Install the BLT splash hooks on a uc. BLT.so dlopen's AFTER the guest threads exist, so the
+ * note_mmap path only reaches the loader thread's uc -- but the splash Update runs on the main
+ * thread's uc. So when BLT's base becomes known we install these on EVERY existing uc. */
+static void hook_blt_on(uc_engine *u) {
+    if (!g_blt_base || !trace_on()) return;
+    uc_hook h;
+    uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x2a5d8, (uint64_t)g_blt_base + 0x2a5d8);
+    uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x293dc, (uint64_t)g_blt_base + 0x293dc);
+    uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x2a884, (uint64_t)g_blt_base + 0x2a884);
+    uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x2a900, (uint64_t)g_blt_base + 0x2a900);
+}
+
 void me_btrace_hook(uc_engine *u) {
     uc_hook h;
     if (g_lb_base && guard_on())
@@ -146,10 +161,7 @@ void me_btrace_hook(uc_engine *u) {
         uc_hook_add(u, &h, UC_HOOK_CODE, vidpb_cb, NULL,  /* CVideoPlayback::Start (Wall 2) */
                     (uint64_t)g_lb_base + 0x213bc, (uint64_t)g_lb_base + 0x213bc);
     }
-    if (g_blt_base) {
-        uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x2a884, (uint64_t)g_blt_base + 0x2a884);
-        uc_hook_add(u, &h, UC_HOOK_CODE, splash_cb, NULL, (uint64_t)g_blt_base + 0x2a900, (uint64_t)g_blt_base + 0x2a900);
-    }
+    hook_blt_on(u);
 }
 
 /* ME_LIBMAP: log the load base of every distinct .so, to map a stalled PC to lib+offset. The
@@ -191,6 +203,6 @@ void me_btrace_note_mmap(int fd, uint32_t at, uint64_t off, uint32_t len) {
     } else if (!g_blt_base && g_blt_fd >= 0 && fd == g_blt_fd) {
         g_blt_base = at;
         if (trace_on()) fprintf(stderr, "[blt] BLT base=%08x\n", at);
-        me_btrace_hook(g_uc);
+        for (int i = 0; i < g_nth; i++) if (g_th[i].uc) hook_blt_on(g_th[i].uc);  /* all existing ucs */
     }
 }
