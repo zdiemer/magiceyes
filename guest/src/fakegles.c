@@ -271,6 +271,29 @@ static GLuint g_bound_tex = 0;
 static float  g_clear[4] = { 0, 0, 0, 1 };
 static unsigned long g_n_draw = 0, g_n_clear = 0, g_n_tex = 0, g_n_swap = 0;  /* diag counters */
 
+/* ---- Vertex buffer objects + GLES1.1 fixed-point entry points (LeapFrog Didj UI uses the
+   `x`-suffixed funcs + VBOs + glDrawElements that float-only Caanoo titles don't). ---- */
+#define GL_ARRAY_BUFFER          0x8892
+#define GL_ELEMENT_ARRAY_BUFFER  0x8893
+#define GL_NO_ERROR              0
+#define GL_MAX_TEXTURE_SIZE      0x0D33
+typedef long GLsizeiptr; typedef long GLintptr;
+#define MAXBUF 1024
+static struct { int used; uint8_t *data; uint32_t size; } g_buf[MAXBUF];
+static GLuint g_next_buf = 1, g_bound_arr = 0, g_bound_elem = 0;
+/* A bound GL_ARRAY_BUFFER turns gl*Pointer's `ptr` into an offset into the buffer; resolve it to
+   the real (guest) address inside our stored copy so the existing client-array draw path works. */
+static const void *vbo_resolve(const void *p) {
+    if (g_bound_arr && g_bound_arr < MAXBUF && g_buf[g_bound_arr].data)
+        return g_buf[g_bound_arr].data + (uintptr_t)p;
+    return p;
+}
+static int gl_type_bytes(GLenum t) {
+    switch (t) { case GL_UNSIGNED_BYTE: case GL_BYTE: return 1;
+                 case GL_UNSIGNED_SHORT: case GL_SHORT: return 2;
+                 default: return 4; }  /* GL_FLOAT / GL_FIXED */
+}
+
 /* ----------------------------------------------------------- matrix math */
 static void m_identity(float *m) {
     memset(m, 0, 16 * sizeof(float));
@@ -378,13 +401,13 @@ void glDisableClientState(GLenum a) {
     else if (a==GL_TEXTURE_COORD_ARRAY) g_at.enabled=0;
 }
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p) {
-    g_av.size=size; g_av.type=type; g_av.stride=stride; g_av.ptr=p;
+    g_av.size=size; g_av.type=type; g_av.stride=stride; g_av.ptr=vbo_resolve(p);
 }
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p) {
-    g_ac.size=size; g_ac.type=type; g_ac.stride=stride; g_ac.ptr=p;
+    g_ac.size=size; g_ac.type=type; g_ac.stride=stride; g_ac.ptr=vbo_resolve(p);
 }
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p) {
-    g_at.size=size; g_at.type=type; g_at.stride=stride; g_at.ptr=p;
+    g_at.size=size; g_at.type=type; g_at.stride=stride; g_at.ptr=vbo_resolve(p);
 }
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
     (void)target; if (pname==GL_TEXTURE_ENV_MODE) g_texenv=(GLenum)param;
@@ -837,6 +860,95 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     free(v);
 }
 
+/* glDrawElements: de-index into tightly-packed temp arrays, then reuse the glDrawArrays path
+   (the engine-side rasterizer is array-based). Indices come from a bound GL_ELEMENT_ARRAY_BUFFER
+   (offset) or a client pointer. Used heavily by the Didj UI's indexed quad meshes. */
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
+    if (count <= 0 || !g_av.enabled) return;
+    const uint8_t *idx = (g_bound_elem && g_bound_elem < MAXBUF && g_buf[g_bound_elem].data)
+                       ? g_buf[g_bound_elem].data + (uintptr_t)indices
+                       : (const uint8_t *)indices;
+    if (!idx) return;
+    /* gather each enabled array's indexed elements into a packed temp buffer */
+    Array sv = g_av, sc = g_ac, st = g_at;   /* save (restored after the draw) */
+    struct { Array *a; uint8_t *tmp; int es; } g[3] = {
+        { &g_av, NULL, 0 }, { &g_ac, NULL, 0 }, { &g_at, NULL, 0 } };
+    Array src[3] = { sv, sc, st };
+    for (int k = 0; k < 3; k++) {
+        if (!src[k].enabled || !src[k].ptr) continue;
+        int es = src[k].size * gl_type_bytes(src[k].type);
+        int stride = src[k].stride ? src[k].stride : es;
+        uint8_t *tmp = (uint8_t *)malloc((size_t)count * es);
+        if (!tmp) continue;
+        for (int i = 0; i < count; i++) {
+            uint32_t e = (type == GL_UNSIGNED_BYTE) ? idx[i]
+                       : (type == GL_UNSIGNED_SHORT) ? ((const uint16_t *)idx)[i]
+                       : ((const uint32_t *)idx)[i];
+            memcpy(tmp + (size_t)i * es, (const uint8_t *)src[k].ptr + (size_t)e * stride, es);
+        }
+        g[k].tmp = tmp; g[k].es = es;
+        g[k].a->ptr = tmp; g[k].a->stride = es;
+    }
+    glDrawArrays(mode, 0, count);
+    g_av = sv; g_ac = sc; g_at = st;
+    for (int k = 0; k < 3; k++) free(g[k].tmp);
+}
+
+/* ---- GLES1.1 fixed-point variants + matrix stack + query stubs (Didj UI) ---- */
+#define X2F(v) ((v) / 65536.0f)   /* GLfixed 16.16 -> float */
+void glTranslatex(GLfixed x, GLfixed y, GLfixed z) { glTranslatef(X2F(x), X2F(y), X2F(z)); }
+void glScalex(GLfixed x, GLfixed y, GLfixed z)     { glScalef(X2F(x), X2F(y), X2F(z)); }
+void glRotatex(GLfixed a, GLfixed x, GLfixed y, GLfixed z) { glRotatef(X2F(a), X2F(x), X2F(y), X2F(z)); }
+void glClearColorx(GLfixed r, GLfixed g, GLfixed b, GLfixed a) { glClearColor(X2F(r),X2F(g),X2F(b),X2F(a)); }
+void glAlphaFuncx(GLenum f, GLfixed ref) { glAlphaFunc(f, X2F(ref)); }
+void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) {
+    g_cur_color[0]=r/255.f; g_cur_color[1]=g/255.f; g_cur_color[2]=b/255.f; g_cur_color[3]=a/255.f;
+}
+void glLineWidthx(GLfixed w) { (void)w; }
+void glPointSizex(GLfixed s) { (void)s; }
+void glDepthFunc(GLenum f) { (void)f; }
+void glTexEnvx(GLenum t, GLenum p, GLfixed v) { (void)t; if (p==GL_TEXTURE_ENV_MODE) g_texenv=(GLenum)v; }
+void glTexParameterx(GLenum t, GLenum p, GLfixed v) { glTexParameteri(t, p, (GLint)v); }
+GLenum glGetError(void) { return GL_NO_ERROR; }
+void glGetIntegerv(GLenum pname, GLint *p) {
+    if (!p) return;
+    *p = (pname == GL_MAX_TEXTURE_SIZE) ? 2048 : 0;
+}
+static float g_mv_stk[16][16], g_proj_stk[16][16]; static int g_mv_sp = 0, g_proj_sp = 0;
+void glPushMatrix(void) {
+    if (g_mmode == GL_PROJECTION) { if (g_proj_sp < 16) memcpy(g_proj_stk[g_proj_sp++], g_proj, 64); }
+    else                         { if (g_mv_sp   < 16) memcpy(g_mv_stk[g_mv_sp++],   g_mv,   64); }
+}
+void glPopMatrix(void) {
+    if (g_mmode == GL_PROJECTION) { if (g_proj_sp > 0) memcpy(g_proj, g_proj_stk[--g_proj_sp], 64); }
+    else                         { if (g_mv_sp   > 0) memcpy(g_mv,   g_mv_stk[--g_mv_sp],   64); }
+}
+
+/* ---- vertex buffer objects ---- */
+void glGenBuffers(GLsizei n, GLuint *b) {
+    for (int i = 0; i < n; i++) { GLuint id = g_next_buf++;
+        if (id < MAXBUF) { memset(&g_buf[id], 0, sizeof g_buf[id]); g_buf[id].used = 1; } b[i] = id; }
+}
+void glDeleteBuffers(GLsizei n, const GLuint *b) {
+    for (int i = 0; i < n; i++) { GLuint id = b[i];
+        if (id && id < MAXBUF && g_buf[id].used) { free(g_buf[id].data); memset(&g_buf[id], 0, sizeof g_buf[id]); } }
+}
+void glBindBuffer(GLenum target, GLuint b) {
+    if (target == GL_ARRAY_BUFFER) g_bound_arr = b;
+    else if (target == GL_ELEMENT_ARRAY_BUFFER) g_bound_elem = b;
+}
+void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage) {
+    (void)usage; GLuint id = (target == GL_ELEMENT_ARRAY_BUFFER) ? g_bound_elem : g_bound_arr;
+    if (!id || id >= MAXBUF || size < 0) return;
+    free(g_buf[id].data); g_buf[id].data = (uint8_t *)malloc(size ? size : 1); g_buf[id].size = (uint32_t)size;
+    if (data && size) memcpy(g_buf[id].data, data, size);
+}
+void glBufferSubData(GLenum target, GLintptr off, GLsizeiptr size, const GLvoid *data) {
+    GLuint id = (target == GL_ELEMENT_ARRAY_BUFFER) ? g_bound_elem : g_bound_arr;
+    if (!id || id >= MAXBUF || !g_buf[id].data || off < 0 || size < 0) return;
+    if ((uint32_t)(off + size) <= g_buf[id].size && data) memcpy(g_buf[id].data + off, data, size);
+}
+
 /* ----------------------------------------------------------------- EGL */
 /* One display/config/context/surface; we render to the shm fb regardless. */
 static int g_egl_dpy, g_egl_cfg, g_egl_ctx, g_egl_surf;  /* addresses used as opaque handles */
@@ -848,6 +960,14 @@ static unsigned long g_last_swap_ms = 0;
 void *OS_CreateWindow() { ensure_cbuf(); return (void *)&g_egl_surf; }
 
 EGLDisplay eglGetDisplay(EGLNativeDisplayType d) { (void)d; return (EGLDisplay)&g_egl_dpy; }
+EGLint eglGetError(void) { return 0x3000 /*EGL_SUCCESS*/; }
+const char *eglQueryString(EGLDisplay d, EGLint name) {
+    (void)d;
+    switch (name) { case 0x3053 /*EGL_VENDOR*/:  return "magiceyes";
+                    case 0x3054 /*EGL_VERSION*/: return "1.1";
+                    case 0x3055 /*EGL_EXTENSIONS*/: return "";
+                    default: return ""; }
+}
 EGLBoolean eglInitialize(EGLDisplay d, EGLint *major, EGLint *minor) {
     (void)d; shm_init(); if (major)*major=1; if (minor)*minor=1;
     GLOG("eglInitialize\n");

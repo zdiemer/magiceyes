@@ -68,6 +68,14 @@ if [ -f "$DIDJ_OS_IMG" ]; then
         echo "[didj] WARN: could not loop-mount $DIDJ_OS_IMG (need root); skipping runtime overlay"
     fi
     rmdir "$MNT" 2>/dev/null || true
+
+    # Shadow the real libopengles_lite.so (which drives the LF1000 GA3D 3D GPU we don't emulate)
+    # with our software GLES1.1/EGL shim that forwards draws to the engine's GL offload.
+    if command -v "${GCC:-arm-linux-gnueabi-gcc}" >/dev/null 2>&1; then
+        RFS="$OUT" "$(dirname "$0")/build_gles_didj.sh" || echo "[didj] WARN: GLES shim build failed"
+    else
+        echo "[didj] (no ARM cross-gcc -> kept the real libopengles_lite.so; GA3D titles won't render)"
+    fi
 else
     echo "[didj] (no Didj OS image at $DIDJ_OS_IMG -> uClibc base only; set DIDJ_OS_IMG for the runtime)"
 fi
