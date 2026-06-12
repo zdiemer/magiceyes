@@ -281,6 +281,15 @@ void fill_stat64(uint32_t gbuf, struct stat *hs);
 long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                   uint32_t a3, uint32_t a4, uint32_t a5);
 
+/* ---- mqueue.c: in-engine POSIX message queues (Didj Brio EventManager) ---- */
+int  mq_is_fd(int fd);
+long mq_open_sys(uint32_t gname, uint32_t oflag, uint32_t mode, uint32_t gattr);
+long mq_unlink_sys(uint32_t gname);
+long mq_timedsend_sys(int fd, uint32_t gmsg, uint32_t len, uint32_t prio, uint32_t gtimeout);
+long mq_timedreceive_sys(int fd, uint32_t gmsg, uint32_t maxlen, uint32_t gprio, uint32_t gtimeout);
+long mq_getsetattr_sys(int fd, uint32_t gnew, uint32_t gold);
+void mqueue_reset(void);
+
 /* ---- mem.c (guest mmap/brk allocator + lazy fault map) ---- */
 extern struct freereg g_mfree[256];
 extern int g_nmfree;

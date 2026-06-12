@@ -704,6 +704,7 @@ void syscalls_reset(void) {
     g_nhostfd = 0;
     for (int i = 0; i < MEMFD_MAX; i++)
         if (g_memf[i].used) { free(g_memf[i].data); g_memf[i].used = 0; g_memf[i].data = NULL; }
+    mqueue_reset();
 }
 
 /* Minimal TZif (v1) for UTC — the guest's glibc opens /etc/localtime; a host without it (no
@@ -1175,6 +1176,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 6:    /* close */
         if ((int)a0 == PIPEFD_R || (int)a0 == PIPEFD_W || (int)a0 == FAKESOCK_FD) return 0;
+        if (mq_is_fd((int)a0)) return 0;   /* mq descriptor: queue persists until mq_unlink */
         if (dirfd_get((int)a0)) { dirfd_close((int)a0); return 0; }
         { struct memfile *mf = memfd_get((int)a0);
           if (mf) { free(mf->data); mf->used = 0; mf->data = NULL; return 0; } }
@@ -1465,6 +1467,21 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (a1) uc_mem_write(g_uc, a1, rl, 8); return 0;
     }
     case 369:  return 0;  /* prlimit64 */
+    /* POSIX message queues (Didj Brio EventManager). In-engine impl (mqueue.c). */
+    case 274:  return mq_open_sys(a0, a1, a2, a3);                   /* mq_open(name,oflag,mode,attr) */
+    case 275:  return mq_unlink_sys(a0);                            /* mq_unlink(name) */
+    case 276:  return mq_timedsend_sys((int)a0, a1, a2, a3, a4);     /* mq_timedsend */
+    case 277:  return mq_timedreceive_sys((int)a0, a1, a2, a3, a4);  /* mq_timedreceive */
+    case 278:  return 0;                                            /* mq_notify: events go via send/recv */
+    case 279:  return mq_getsetattr_sys((int)a0, a1, a2);            /* mq_getsetattr */
+    /* Scheduling: we don't honour real-time policies, but pthread_create with sched attrs (Didj
+       Brio tasks) needs these to succeed or it fails with EINVAL. Report POSIX-standard priority
+       ranges and accept set/get as no-ops. policy: 0=SCHED_OTHER, 1=FIFO, 2=RR. */
+    case 159:  return (a0 == 0) ? 0 : 99;   /* sched_get_priority_max */
+    case 160:  return (a0 == 0) ? 0 : 1;    /* sched_get_priority_min */
+    case 154:  return 0;                    /* sched_setparam */
+    case 155:  if (a1) { uint32_t z = 0; uc_mem_write(g_uc, a1, &z, 4); } return 0;  /* sched_getparam */
+    case 157:  return 0;                    /* sched_getscheduler -> SCHED_OTHER */
     case 106: { /* stat(path, buf) */
         char p[1024]; read_cstr(a0, p, sizeof p);
         struct stat s;
