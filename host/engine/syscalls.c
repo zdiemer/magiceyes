@@ -46,6 +46,26 @@ void rewrite_guest_path(const char *in, char *out, size_t cap) {
    device libs + our fake-SDL shim shadowing libSDL (host/win/stage_rootfs.sh). Game assets
    are opened relative to the game's own cwd, so they don't go through here. */
 static char g_rootfs[PATH_MAX]; static int g_rootfs_ok = -1;
+/* Didj cartridge: host dir holding the extracted cartridge image (so /Cart/<3LD>/App.so resolves).
+   Set from ME_DIDJ_CART (or the loader); when non-empty the cartridge-detect sysfs reports present
+   and the base UI loads the game instead of idle-shutting-down. */
+char g_cart_dir[PATH_MAX];
+void me_cart_set(const char *dir) {
+    if (dir && dir[0]) snprintf(g_cart_dir, sizeof g_cart_dir, "%s", dir);
+    else g_cart_dir[0] = 0;
+}
+/* Map /Cart/... -> the extracted cartridge dir (mirrors me_mount_resolve for /mnt/sd). 1 if mapped. */
+static int me_cart_resolve(const char *guest, char *out, size_t cap) {
+    if (!g_cart_dir[0]) return 0;
+    if (strncmp(guest, "/Cart", 5) || (guest[5] != 0 && guest[5] != '/')) return 0;
+    const char *rest = guest + 5;
+    char tail[PATH_MAX]; snprintf(tail, sizeof tail, "%s", rest);
+#ifdef _WIN32
+    for (char *p = tail; *p; p++) if (*p == '/') *p = '\\';
+#endif
+    snprintf(out, cap, "%s%s", g_cart_dir, tail);
+    return 1;
+}
 /* Firmware boot pins the active rootfs to a known device dir, so me_rootfs_select() won't
    re-pick by PT_INTERP (Wiz/F100/F200 all use ld-linux.so.2 and can't be told apart by it).
    The pin persists across reloads (syscalls_reset doesn't touch it) so a game chain-loaded
@@ -103,6 +123,7 @@ static void rootfs_build_cands(void) {
 }
 void me_rootfs_init(void) {
     if (g_rootfs_ok >= 0) return;
+    if (!g_cart_dir[0]) { const char *c = getenv("ME_DIDJ_CART"); if (c && c[0]) me_cart_set(c); }
     rootfs_build_cands();
     g_rootfs_ok = 0;
     /* default active rootfs = first candidate providing any dynamic linker (glibc or uClibc) */
@@ -249,6 +270,7 @@ static void resolve_path(const char *guest, char *out, size_t cap) {
             norm[i] = (guest[i] == '\\') ? '/' : guest[i];
         norm[i] = 0; guest = norm;
     }
+    if (me_cart_resolve(guest, out, cap)) return;   /* Didj /Cart -> extracted cartridge */
     if (me_mount_resolve(guest, out, cap)) return;
     if (me_rootfs_resolve(guest, out, cap)) return;
     rewrite_guest_path(guest, out, cap);
@@ -737,9 +759,10 @@ static const unsigned char TZ_UTC[] = {
 /* Return a fake fd for a known Linux system path, or 0 if not one we fake. */
 static int sysfile_open(const char *p) {
     /* Didj cartridge-detect sysfs: CButtonModule's LightningButtonTask reads this each poll and
-       asserts ("cart read failed") if the read fails. "0" = no cartridge inserted (base UI). */
+       asserts ("cart read failed") if the read fails. "1" = a cartridge is inserted (the base UI
+       then mounts /Cart and loads the game), "0" = none (idle base UI). */
     if (!strcmp(p, "/sys/devices/platform/lf1000-nand/cartridge"))
-        return memfd_make("0\n");
+        return memfd_make(g_cart_dir[0] ? "1\n" : "0\n");
     if (!strcmp(p, "/proc/sys/kernel/version"))
         return memfd_make("#1 PREEMPT Mon Jan 1 00:00:00 UTC 2008\n");
     if (!strcmp(p, "/proc/sys/kernel/osrelease") || !strcmp(p, "/proc/version"))

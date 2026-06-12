@@ -330,6 +330,11 @@ static uint32_t engine_load_game(const char *path) {
         g_shm->backend = 0;   /* the shim/engine sets the real backend once it presents a frame */
     }
     char *av[1 + 8]; int ac = 0; av[ac++] = (char *)path;   /* + launcher-script args (BermudaSyndrome) */
+    /* Didj: pass a game's App.so (relative to the AppManager's ProgramFiles path) as argv[1] so
+       RealAppManager PushApp's it directly instead of the BLT base-UI game picker -- i.e. boot
+       straight into a cartridge game. */
+    const char *didj_app = getenv("ME_DIDJ_APP");
+    if (didj_app && didj_app[0] && g_device == ME_DEV_DIDJ && ac < 1 + 8) av[ac++] = (char *)didj_app;
     for (int i = 0; i < g_launch_nargs && ac < 1 + 8; i++) av[ac++] = g_launch_args[i];
     uint32_t sp = setup_stack(ac, av);
     gwrite(UC_ARM_REG_SP, sp);

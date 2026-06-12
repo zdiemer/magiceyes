@@ -133,6 +133,8 @@ void me_rootfs_init(void);   /* pick the rootfs (ME_GP2X_ROOTFS or a default); i
 int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* 1 = host path in out */
 int  me_rootfs_select(const char *interp);  /* pick the rootfs holding this PT_INTERP (so.2 vs .3) */
 void me_rootfs_set(const char *dir);        /* firmware boot: pin a specific rootfs; NULL = unpin */
+extern char g_cart_dir[PATH_MAX];           /* Didj: extracted-cartridge host dir (/Cart maps here) */
+void me_cart_set(const char *dir);          /* set the active Didj cartridge dir (NULL = none) */
 
 /* ---- firmware.c: locate / install a device firmware ---- */
 int  me_writable_root(char *out, size_t cap);  /* configured Firmware dir (me_paths, portable default); 1=ok */
