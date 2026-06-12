@@ -813,7 +813,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         uc_mem_read(g_uc, a1, tmp, a2);
         if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
-        if (dev_type((int)a0) == DEV_DSP) { free(tmp); long r = dsp_write(a1, a2);
+        if (dev_type((int)a0) == DEV_DSP) { free(tmp);
+            int nb = dev_nonblock((int)a0);
+            long r = dsp_write(a1, a2, nb);
+            if (r == -11) return r;        /* EAGAIN on a full non-blocking ring: don't pace */
             uint32_t us = dsp_pace_us();   /* pace like a blocking OSS write (frees the mixer
                                               mutex + CPU; else the audio thread free-runs) */
             if (us) { if (us > 100000) us = 100000;
@@ -1087,6 +1090,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 36:   syscalls_flush_all(); return 0;   /* sync: flush every host file we track */
     case 34:   return 0;        /* nice */
     case 55:                    /* fcntl  (F_GETFL/F_SETFL/F_SETFD on device/normal fds) */
+        /* Record O_NONBLOCK on a device fd: PortAudio's OSS backend (Didj) sets it on /dev/dsp
+           and primes the output buffer by writing until EAGAIN; honouring it in dsp_write ends
+           the prime loop (else the audio thread spins forever and its parent deadlocks). */
+        if (a1 == 4 /*F_SETFL*/ && dev_type((int)a0))
+            dev_set_nonblock((int)a0, (a2 & 0x800u /*O_NONBLOCK*/) ? 1 : 0);
+        return 0;
     case 221:  return 0;        /* fcntl64 — accept (we don't honour O_NONBLOCK; harmless here) */
     case 141:  return dir_getdents((int)a0, a1, a2, 0);  /* getdents   (linux_dirent)   */
     case 217:  return dir_getdents((int)a0, a1, a2, 1);  /* getdents64 (linux_dirent64) */
@@ -1358,14 +1367,22 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                 abst.tv_sec = (time_t)(t / 1000000000LL); abst.tv_nsec = (long)(t % 1000000000LL);
                 have = 1;
             }
-            if (getenv("ME_FUTEXLOG")) { static int n=0; if (n++<40) {
-                uint32_t m[5]={0}; uc_mem_read(g_uc, a0, m, 20);   /* mutex: __lock,__count,__owner,+12,+16 */
-                fprintf(stderr,"FUTEX wait op=%d addr=%08x val=%u tmo=%d | __lock=%u __count=%u __owner=%u w12=%u w16=%u | tid=%d pc=%08x\n",
+            { const char *fw = getenv("ME_FUTEXWATCH");
+              uint32_t wa = fw ? (uint32_t)strtoul(fw, NULL, 16) : 0;
+              static int n=0;
+              if ((getenv("ME_FUTEXLOG") && n++<40) || (wa && a0 == wa)) {
+                uint32_t m[5]={0}; uc_mem_read(g_uc, a0, m, 20);
+                fprintf(stderr,"FUTEX wait op=%d addr=%08x val=%u tmo=%d | w0=%u w4=%u w8=%u w12=%u w16=%u | tid=%d pc=%08x\n",
                         op,a0,a2,have,m[0],m[1],m[2],m[3],m[4],g_self?g_self->tid:-1,g_self?g_self->last_pc:0);} }
             return futex_wait(a0, a2, have ? &abst : NULL);          /* FUTEX_WAIT[_BITSET] */
         }
-        if (op == 1 || op == 10) { if (getenv("ME_FUTEXLOG")) { static int w=0; if(w++<40)
-                fprintf(stderr,"FUTEX wake addr=%08x n=%d\n", a0, (int)a2); }
+        if (op == 1 || op == 10) {
+            const char *fw = getenv("ME_FUTEXWATCH");
+            uint32_t wa = fw ? (uint32_t)strtoul(fw, NULL, 16) : 0;
+            static int w=0;
+            if ((getenv("ME_FUTEXLOG") && w++<40) || (wa && a0 == wa))
+                fprintf(stderr,"FUTEX wake addr=%08x n=%d tid=%d pc=%08x\n", a0, (int)a2,
+                        g_self?g_self->tid:-1, g_self?g_self->last_pc:0);
             return futex_wake(a0, (int)a2); }                        /* FUTEX_WAKE[_BITSET] */
         /* REQUEUE(3)/CMP_REQUEUE(4): glibc pthread_cond_broadcast moves cond waiters to the mutex
            futex instead of waking them all (anti-thundering-herd). We don't model a per-futex wait

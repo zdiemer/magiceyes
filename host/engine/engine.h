@@ -180,7 +180,9 @@ void gp2x_cacheflush(uint32_t guest);   /* cacheflush(r3=fb base) -> present tha
 double host_now(void);
 void aud_drain(void);
 uint32_t aud_free(void);
-long dsp_write(uint32_t gbuf, uint32_t n);
+long dsp_write(uint32_t gbuf, uint32_t n, int nonblock);
+void dev_set_nonblock(int fd, int on);
+int  dev_nonblock(int fd);
 uint32_t dsp_pace_us(void);
 long dsp_ioctl(uint32_t cmd, uint32_t arg);
 long fb_ioctl(int fd, uint32_t cmd, uint32_t arg);   /* FBIOGET_*SCREENINFO / PAN_DISPLAY */

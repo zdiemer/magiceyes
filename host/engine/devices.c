@@ -4,6 +4,10 @@
 
 int g_devtype[64], g_devn = 0;
 int g_fbnum[64];   /* per-slot framebuffer index (0=/dev/fb0, 1=/dev/fb1) for DEV_FB fds */
+int g_devnonblock[64];   /* per-slot O_NONBLOCK (fcntl F_SETFL); honoured by /dev/dsp writes */
+/* Mark/query a device fd as non-blocking (fcntl F_SETFL O_NONBLOCK). */
+void dev_set_nonblock(int fd, int on) { int i = fd - DEVFD_BASE; if (i >= 0 && i < 64) g_devnonblock[i] = on; }
+int  dev_nonblock(int fd) { int i = fd - DEVFD_BASE; return (i >= 0 && i < 64) ? g_devnonblock[i] : 0; }
 int dev_open(const char *path) {
     int t, fbno = 0;
     if (!strncmp(path, "/dev/fb", 7))       { t = DEV_FB; fbno = (path[7] == '1') ? 1 : 0; }
@@ -36,7 +40,7 @@ int dev_open(const char *path) {
     }
     int i; for (i = 0; i < 64; i++) if (g_devtype[i] == 0) break;  /* reuse freed slots */
     if (i == 64) return -1;
-    g_devtype[i] = t; g_fbnum[i] = fbno; if (i + 1 > g_devn) g_devn = i + 1;
+    g_devtype[i] = t; g_fbnum[i] = fbno; g_devnonblock[i] = 0; if (i + 1 > g_devn) g_devn = i + 1;
     if (t == DEV_INPUT_EV || t == DEV_INPUT_JS) input_open(DEVFD_BASE + i, t);
     if (g_trace) fprintf(stderr, "  DEV open %s -> fd=%d type=%d\n", path, DEVFD_BASE + i, t);
     return DEVFD_BASE + i;
@@ -595,13 +599,20 @@ uint32_t aud_free(void) {
    slowed to real time, else it free-runs (~1000x) spinning on a full ring while holding
    its mixer mutex -> starves other threads waiting on that lock. */
 int g_prod_on = 0; double g_prod_t0 = 0; uint64_t g_prod_bytes = 0;
-long dsp_write(uint32_t gbuf, uint32_t n) {
+long dsp_write(uint32_t gbuf, uint32_t n, int nonblock) {
     if (!g_shm) return n;
     aud_drain();                                   /* advance a_read by wall clock */
     if (n > GP2XSHM_ARING) n = GP2XSHM_ARING;
     uint32_t used = g_shm->a_write - g_shm->a_read;
     uint32_t freeb = used < GP2XSHM_ARING ? GP2XSHM_ARING - used : 0;
-    if (n > freeb) {                               /* consumer stalled: drop oldest, never block */
+    if (nonblock) {
+        /* A non-blocking OSS fd (PortAudio/Didj sets O_NONBLOCK then primes the output buffer by
+           writing until EAGAIN): never drop, never block. Write only what fits and report it; a
+           full ring returns EAGAIN so the producer's prime loop terminates (else it spins forever
+           and the thread that waits on it deadlocks). */
+        if (freeb == 0) return -11 /*EAGAIN*/;
+        if (n > freeb) n = freeb;
+    } else if (n > freeb) {                        /* blocking (GP2X): consumer stalled -> drop oldest */
         uint32_t frame = g_aud_ch * (g_aud_bits / 8); if (frame < 1) frame = 1;
         uint32_t drop = ((n - freeb + frame - 1) / frame) * frame;
         if (drop > used) drop = used;
