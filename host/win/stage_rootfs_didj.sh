@@ -80,6 +80,29 @@ else
     echo "[didj] (no Didj OS image at $DIDJ_OS_IMG -> uClibc base only; set DIDJ_OS_IMG for the runtime)"
 fi
 
+# Seed a default player profile. The base UI (BLT) calls BaseUtils::AreAllPlayerProfilesEmpty,
+# which reads /Didj/Data/{0,1,2}/profile.dsc and returns "all empty" unless at least one has a
+# non-empty JSON "Name" (CProfileDscFile::GetName -> CFileIO::GetStr("Name") on the jsoncpp .dsc).
+# Empty profiles -> the device drops into the sign-in/onboarding flow and idle-shuts-down. A
+# one-player profile clears the gate so boot reaches the LeapFrog splash + game picker. (The real
+# device creates these via LeapFrog Connect; we stage a default so titles are playable offline.)
+if [ -d "$OUT/Didj/Base" ]; then
+    for n in 0 1 2; do mkdir -p "$OUT/Didj/Data/$n"; done
+    if [ ! -s "$OUT/Didj/Data/0/profile.dsc" ]; then
+        cat > "$OUT/Didj/Data/0/profile.dsc" <<'JSON'
+{
+   "Version" : 1,
+   "Name" : "Player",
+   "Age" : 8,
+   "Grade" : 3,
+   "Points" : 0,
+   "Avatar" : "Avatar1"
+}
+JSON
+        echo "[didj] seeded default player profile -> Didj/Data/0/profile.dsc"
+    fi
+fi
+
 # Dereference symlinks to real files: the jffs2/firmware trees are full of symlinks
 # (libc.so.0 -> libuClibc-0.9.29.so, ...). The Linux engine follows them, but the native
 # Windows engine's fopen can't open a Linux symlink ("Invalid argument"), so the .exe fails to

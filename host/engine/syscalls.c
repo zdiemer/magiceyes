@@ -787,6 +787,36 @@ static int sysfile_open(const char *p) {
     return 0;
 }
 
+/* ---- guest monotonic clock (Didj inactivity / boot pacing) ----
+ * The Brio inactivity-shutdown timer (CAppManager::UpdateInactivity) accumulates
+ * CKernelMPI::GetElapsedTimeAsMSecs() deltas, which we serve from the host wall-clock
+ * (gettimeofday). Our emulated Didj boot is several times slower than real hardware (~15-30s
+ * vs ~5s to render the first menu), so on the raw wall-clock the guest perceives 15-30s of
+ * "inactivity" during boot and shuts itself down BEFORE the home menu appears -- before the
+ * button task is even alive to register a key-press. So for Didj we hand the guest a virtual
+ * monotonic clock that advances by at MOST one frame's worth per sample: when the emulator
+ * stalls between two time reads (a slow boot frame / fault storm), the guest clock ticks one
+ * step, not the real seconds that elapsed. At steady state (frequent reads, small real deltas)
+ * it tracks host time exactly, so menu/in-game animation + audio pacing are unchanged. This is
+ * the GP2X TCOUNT model (guest time == game-sim dt, not host wall-clock). ME_DIDJ_CLOCKSTEP=us
+ * overrides the cap; ME_DIDJ_CLOCKSTEP=0 disables (raw wall-clock). */
+static void guest_timeofday(struct timeval *out) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    long long real = (long long)tv.tv_sec * 1000000LL + tv.tv_usec;
+    static long long vclock = 0, last_real = 0; static int init = 0;
+    long long cap = 50000;   /* ~one 20fps frame; only binds when reads are sparse (slow boot) */
+    if (g_device == ME_DEV_DIDJ) {
+        const char *e = getenv("ME_DIDJ_CLOCKSTEP"); if (e) cap = atoll(e);
+    } else cap = 0;          /* other devices: untouched host wall-clock */
+    if (cap > 0) {
+        if (!init) { init = 1; last_real = real; vclock = real; }
+        else { long long d = real - last_real; last_real = real;
+               if (d < 0) d = 0; if (d > cap) d = cap; vclock += d; }
+        real = vclock;
+    }
+    out->tv_sec = (time_t)(real / 1000000LL); out->tv_usec = (long)(real % 1000000LL);
+}
+
 long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
     (void)a5;
@@ -1282,7 +1312,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 263:   /* clock_gettime(clk, ts) */
     case 266: { /* clock_gettime64 */
-        struct timeval tv; gettimeofday(&tv, NULL);
+        struct timeval tv; guest_timeofday(&tv);
         uint32_t ts[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec * 1000 };
         if (a1) uc_mem_write(g_uc, a1, ts, 8);
         return 0;
@@ -1537,8 +1567,10 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return 0;
     }
     case 78: {  /* gettimeofday(tv, tz): real wall-clock — games drive loading/animation
-                   timing off this; returning 0 froze the elapsed-time delta (stuck screens). */
-        if (a0) { struct timeval tv; gettimeofday(&tv, NULL);
+                   timing off this; returning 0 froze the elapsed-time delta (stuck screens).
+                   guest_timeofday paces it for Didj (see above) so a slow boot doesn't trip the
+                   Brio inactivity-shutdown before the menu renders. */
+        if (a0) { struct timeval tv; guest_timeofday(&tv);
                   uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec };
                   uc_mem_write(g_uc, a0, t, 8); }
         return 0;

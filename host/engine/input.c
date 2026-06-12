@@ -41,6 +41,50 @@ static const struct btn BTN[] = {
 };
 #define NBTN ((int)(sizeof BTN / sizeof BTN[0]))
 
+/* ---- Didj (LF1000) keypad: a KEYBOARD, not a joystick ----
+ * The Didj has no analog stick and no js node. libButton's LightningButtonTask reads
+ * /dev/input/event0 as an evdev KEYBOARD and dispatches on the Linux KEY code via a jump
+ * table (codes 19..108). Reverse-engineered from libButton.so: the dpad arrives as
+ * KEY_UP/DOWN/LEFT/RIGHT and the face/system buttons as letter keys (KEY_A=30 -> Brio A
+ * confirm, KEY_B=48 -> Brio B back, KEY_H/L/X/M/P for hint/shoulders/menu). So for Didj we
+ * emit EV_KEY with these codes (never EV_ABS) and advertise a keyboard, not a stick. */
+#define KEY_A 30
+#define KEY_B 48
+#define KEY_H 35
+#define KEY_L 38
+#define KEY_X 45
+#define KEY_M 50
+#define KEY_P 25
+#define KEY_S 19   /* code 19: libButton's "value" key (volume/brightness slider) */
+#define KEY_UP    103
+#define KEY_LEFT  105
+#define KEY_RIGHT 106
+#define KEY_DOWN  108
+static const struct btn DIDJ_BTN[] = {
+    { GP2X_A,      KEY_A },  /* Brio A -- confirm/select */
+    { GP2X_B,      KEY_B },  /* Brio B -- back/cancel */
+    { GP2X_X,      KEY_X },
+    { GP2X_Y,      KEY_H },  /* hint */
+    { GP2X_L,      KEY_L },  /* left shoulder */
+    { GP2X_R,      KEY_P },  /* right shoulder */
+    { GP2X_START,  KEY_M },  /* menu/pause */
+    { GP2X_SELECT, KEY_S },
+};
+#define NDIDJ ((int)(sizeof DIDJ_BTN / sizeof DIDJ_BTN[0]))
+/* the four dpad cardinals, in (shmbit-derived) -> KEY-code order */
+static const int DIDJ_DPAD[4] = { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT };
+
+/* resolve the shm 8-way direction into a 4-bit cardinal mask (up,down,left,right). */
+static int didj_dpad(uint32_t b) {
+    int up = (b >> GP2X_UP & 1) | (b >> GP2X_UPLEFT & 1) | (b >> GP2X_UPRIGHT & 1);
+    int dn = (b >> GP2X_DOWN & 1) | (b >> GP2X_DOWNLEFT & 1) | (b >> GP2X_DOWNRIGHT & 1);
+    int lf = (b >> GP2X_LEFT & 1) | (b >> GP2X_UPLEFT & 1) | (b >> GP2X_DOWNLEFT & 1);
+    int rt = (b >> GP2X_RIGHT & 1) | (b >> GP2X_UPRIGHT & 1) | (b >> GP2X_DOWNRIGHT & 1);
+    return (up ? 1 : 0) | (dn ? 2 : 0) | (lf ? 4 : 0) | (rt ? 8 : 0);
+}
+
+static int is_didj(void) { return g_device == ME_DEV_DIDJ; }
+
 /* per-open state: the last input snapshot we reported, so a read emits only what changed */
 struct inpst { int used, type; uint32_t last_btns; int last_ax, last_ay; int js_synced; };
 static struct inpst g_inp[64];
@@ -117,6 +161,21 @@ long input_read(int fd, uint32_t gbuf, uint32_t n) {
     int isjs = (g_inp[s].type == DEV_INPUT_JS);
     int esz = isjs ? 8 : 16;
 
+    if (is_didj() && !isjs) {                /* Didj: keyboard evdev -- KEY codes, dpad as keys */
+        uint32_t changed = btns ^ g_inp[s].last_btns;
+        for (int i = 0; i < NDIDJ && off + 16 <= n && off + 32 <= sizeof buf; i++)
+            if (changed >> DIDJ_BTN[i].shmbit & 1)
+                off += ev_pack(buf + off, EV_KEY, DIDJ_BTN[i].code, (btns >> DIDJ_BTN[i].shmbit) & 1);
+        int dpad = didj_dpad(btns), odpad = didj_dpad(g_inp[s].last_btns), dchg = dpad ^ odpad;
+        for (int i = 0; i < 4 && off + 16 <= n && off + 32 <= sizeof buf; i++)
+            if (dchg >> i & 1)
+                off += ev_pack(buf + off, EV_KEY, DIDJ_DPAD[i], (dpad >> i) & 1);
+        if (off && off + 16 <= n) off += ev_pack(buf + off, EV_SYN, SYN_REPORT, 0);
+        g_inp[s].last_btns = btns; g_inp[s].last_ax = ax; g_inp[s].last_ay = ay;
+        if (!off) return -11;                /* O_NONBLOCK: EAGAIN */
+        uc_mem_write(g_uc, gbuf, buf, off); return (long)off;
+    }
+
     if (isjs && !g_inp[s].js_synced) {       /* js: kernel emits the initial state with JS_EVENT_INIT */
         g_inp[s].js_synced = 1;
         for (int i = 0; i < NBTN && off + esz <= n && off + esz <= sizeof buf; i++)
@@ -181,15 +240,25 @@ long input_ioctl(int fd, uint32_t cmd, uint32_t arg) {
                  const char *nm = (g_device == ME_DEV_DIDJ) ? "LF1000 Keyboard" : "pollux-analog";
                  uint32_t l = (uint32_t)strlen(nm) + 1; if (l > size) l = size; wr(arg, nm, l); return (long)l; }
     case 0x18: {  /* EVIOCGKEY(len): current key state bitmap */
-        uint8_t z[96]; memset(z, 0, sizeof z); uint32_t l = size < sizeof z ? size : sizeof z;
-        wr(arg, z, l); for (int i = 0; i < NBTN; i++) if (btns >> BTN[i].shmbit & 1) set_bit(arg, l, BTN[i].code);
+        uint8_t z[96]; memset(z, 0, sizeof z); uint32_t l = size < sizeof z ? size : sizeof z; wr(arg, z, l);
+        if (is_didj()) {
+            for (int i = 0; i < NDIDJ; i++) if (btns >> DIDJ_BTN[i].shmbit & 1) set_bit(arg, l, DIDJ_BTN[i].code);
+            int dp = didj_dpad(btns); for (int i = 0; i < 4; i++) if (dp >> i & 1) set_bit(arg, l, DIDJ_DPAD[i]);
+        } else for (int i = 0; i < NBTN; i++) if (btns >> BTN[i].shmbit & 1) set_bit(arg, l, BTN[i].code);
         return (long)l; }
     case 0x20: { uint8_t z[4] = {0}; uint32_t l = size < 4 ? size : 4; wr(arg, z, l);   /* EVIOCGBIT(0): ev types */
-                 set_bit(arg, l, EV_SYN); set_bit(arg, l, EV_KEY); set_bit(arg, l, EV_ABS); return (long)l; }
+                 set_bit(arg, l, EV_SYN); set_bit(arg, l, EV_KEY);
+                 if (!is_didj()) set_bit(arg, l, EV_ABS);   /* Didj is a pure keyboard -- no ABS */
+                 return (long)l; }
     case 0x21: { uint8_t z[96]; memset(z, 0, sizeof z); uint32_t l = size < sizeof z ? size : sizeof z;  /* EVIOCGBIT(EV_KEY) */
-                 wr(arg, z, l); for (int i = 0; i < NBTN; i++) set_bit(arg, l, BTN[i].code); return (long)l; }
+                 wr(arg, z, l);
+                 if (is_didj()) { for (int i = 0; i < NDIDJ; i++) set_bit(arg, l, DIDJ_BTN[i].code);
+                                  for (int i = 0; i < 4; i++) set_bit(arg, l, DIDJ_DPAD[i]); }
+                 else for (int i = 0; i < NBTN; i++) set_bit(arg, l, BTN[i].code);
+                 return (long)l; }
     case 0x23: { uint8_t z[8] = {0}; uint32_t l = size < 8 ? size : 8; wr(arg, z, l);   /* EVIOCGBIT(EV_ABS) */
-                 set_bit(arg, l, ABS_X); set_bit(arg, l, ABS_Y); return (long)l; }
+                 if (!is_didj()) { set_bit(arg, l, ABS_X); set_bit(arg, l, ABS_Y); }   /* Didj: no axes */
+                 return (long)l; }
     case 0x40: case 0x41: {  /* EVIOCGABS(ABS_X/ABS_Y): input_absinfo {value,min,max,fuzz,flat,res} */
         int32_t ai[6] = { nr == 0x40 ? ax : ay, -AXIS_MAX, AXIS_MAX, 0, 0, 0 }; wr(arg, ai, 24); return 0; }
     default:
