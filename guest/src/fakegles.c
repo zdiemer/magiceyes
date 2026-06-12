@@ -904,6 +904,10 @@ void glAlphaFuncx(GLenum f, GLfixed ref) { glAlphaFunc(f, X2F(ref)); }
 void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) {
     g_cur_color[0]=r/255.f; g_cur_color[1]=g/255.f; g_cur_color[2]=b/255.f; g_cur_color[3]=a/255.f;
 }
+void glColor4x(GLfixed r, GLfixed g, GLfixed b, GLfixed a) {
+    g_cur_color[0]=X2F(r); g_cur_color[1]=X2F(g); g_cur_color[2]=X2F(b); g_cur_color[3]=X2F(a);
+}
+void glHint(GLenum target, GLenum mode) { (void)target; (void)mode; }   /* quality hint: no-op */
 void glLineWidthx(GLfixed w) { (void)w; }
 void glPointSizex(GLfixed s) { (void)s; }
 void glDepthFunc(GLenum f) { (void)f; }
