@@ -723,6 +723,7 @@ void syscalls_reset(void) {
         if (g_memf[i].used) { free(g_memf[i].data); g_memf[i].used = 0; g_memf[i].data = NULL; }
     mqueue_reset();
     netsock_reset();
+    lf1000_reset();
 }
 
 /* Minimal TZif (v1) for UTC — the guest's glibc opens /etc/localtime; a host without it (no
@@ -878,13 +879,17 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint32_t m[6]; uc_mem_read(g_uc, a0, m, sizeof m);
         int fd = (m[4] == 0xffffffffu) ? -1 : (int)m[4], t = dev_type(fd);
         if (t == DEV_SHMFB) return shmfb_mmap(m[1]);
-        if (t) return dev_mmap(t, m[0], m[1], m[3], m[5]);
+        if (t) { long r = dev_mmap(t, m[0], m[1], m[3], m[5]);
+                 if (t == DEV_LF1000_LAYER && r > 0) lf1000_track_mmap(fd, (uint32_t)r, m[1]);
+                 return r; }
         return do_mmap(m[0], m[1], m[3], fd, m[5]);
     }
     case 192: { /* mmap2: a4=fd, a5=pgoff (4096 units) */
         int fd = (a4 == 0xffffffffu) ? -1 : (int)a4, t = dev_type(fd);
         if (t == DEV_SHMFB) return shmfb_mmap(a1);
-        if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
+        if (t) { long r = dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
+                 if (t == DEV_LF1000_LAYER && r > 0) lf1000_track_mmap(fd, (uint32_t)r, a1);
+                 return r; }
         long r = do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
         if (fd >= 0 && getenv("ME_MMAPLOG")) { /* file-backed map: print base+len+fd(+path) for the lib layout */
             char lp[256] = "?";
@@ -1128,6 +1133,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (t == DEV_GPIO) return gpio_ioctl(a1, a2);   /* GPH SDL_OpenGPIO button-query ioctls */
         if (t == DEV_INPUT_EV || t == DEV_INPUT_JS) return input_ioctl((int)a0, a1, a2);
         if (t == DEV_I2C) return i2c_ioctl(a1, a2);
+        if (t == DEV_LF1000_DPC || t == DEV_LF1000_MLC || t == DEV_LF1000_LAYER || t == DEV_LF1000_GA3D)
+            return lf1000_ioctl((int)a0, a1, a2);
         return 0;
     }
     case 0xf0005: { /* __ARM_NR_set_tls -> kuser TLS slot */

@@ -143,7 +143,8 @@ int  me_firmware_boot_request(const char *device);  /* GUI: pin rootfs + reload 
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER,
-       DEV_INPUT_EV, DEV_INPUT_JS };   /* Linux input subsystem: /dev/input/event* and /dev/input/js* */
+       DEV_INPUT_EV, DEV_INPUT_JS,    /* Linux input subsystem: /dev/input/event* and /dev/input/js* */
+       DEV_LF1000_DPC, DEV_LF1000_MLC, DEV_LF1000_LAYER, DEV_LF1000_GA3D };  /* LF1000 (Didj) display driver */
 #define DEVFD_BASE 0x10000000   /* far above real host fds (avoid aliasing) */
 struct memmap { uint32_t phys, guest, len; };
 
@@ -199,6 +200,15 @@ long input_ioctl(int fd, uint32_t cmd, uint32_t arg);/* EVIOCG / JSIOCG capabili
 int  input_pending(int fd);                          /* poll()/select(): is an input event ready? */
 long i2c_read(uint32_t gbuf, uint32_t n);            /* /dev/i2c-0 handset serial (read) */
 long i2c_ioctl(uint32_t cmd, uint32_t arg);          /* /dev/i2c-0 I2C_RDWR serial */
+/* lf1000_devices.c: LF1000 (Didj) display driver nodes — /dev/{dpc,mlc,layer0..2,ga3d}. The
+   DisplayMPI driver opens these, ioctls GetScreenSize/SetAddress/etc., mmaps a layer framebuffer,
+   and flips via an address/dirty ioctl. We back the layer fb with guest memory + present to shm. */
+int  lf1000_classify(const char *path);              /* -> DEV_LF1000_* or 0 */
+void lf1000_open(int fd, int type, const char *path);/* record per-fd node (layer index) */
+void lf1000_close(int fd);
+long lf1000_ioctl(int fd, uint32_t cmd, uint32_t arg);
+void lf1000_track_mmap(int fd, uint32_t guest, uint32_t len);  /* a layer's mmap'd fb */
+void lf1000_reset(void);
 void gp2x_mmio_palette(uint32_t off, uint32_t val);  /* MLC palette port capture (MMSP2 page) */
 void gp2x_blitter_write(uint32_t off, uint32_t val, int size);   /* MESG 2D blitter (0xe0020000) */
 void blitter_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,

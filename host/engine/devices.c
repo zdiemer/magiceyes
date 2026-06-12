@@ -32,6 +32,7 @@ int dev_open(const char *path) {
     else if (!strcmp(path, "/dev/mmuhack"))   t = DEV_OTHER;
     else if (!strcmp(path, "/dev/shm/gp2x_fb")) t = DEV_SHMFB; /* fake-SDL shim's framebuffer shm */
     else if ((t = input_classify(path))) { /* /dev/input/event*, /dev/input/js*: Linux input subsystem */ }
+    else if ((t = lf1000_classify(path))) { /* LF1000 (Didj) display: /dev/{dpc,mlc,layer*,ga3d} */ }
     else {
         /* A /dev node we don't model: record it (so the harness/agent learns which device a new
            title wants) but don't change behaviour -- fall through to the normal open() path. */
@@ -42,10 +43,12 @@ int dev_open(const char *path) {
     if (i == 64) return -1;
     g_devtype[i] = t; g_fbnum[i] = fbno; g_devnonblock[i] = 0; if (i + 1 > g_devn) g_devn = i + 1;
     if (t == DEV_INPUT_EV || t == DEV_INPUT_JS) input_open(DEVFD_BASE + i, t);
+    if (t == DEV_LF1000_DPC || t == DEV_LF1000_MLC || t == DEV_LF1000_LAYER || t == DEV_LF1000_GA3D)
+        lf1000_open(DEVFD_BASE + i, t, path);
     if (g_trace) fprintf(stderr, "  DEV open %s -> fd=%d type=%d\n", path, DEVFD_BASE + i, t);
     return DEVFD_BASE + i;
 }
-void dev_close(int fd) { int i = fd - DEVFD_BASE; if (i >= 0 && i < 64) g_devtype[i] = 0; }
+void dev_close(int fd) { int i = fd - DEVFD_BASE; if (i >= 0 && i < 64) g_devtype[i] = 0; lf1000_close(fd); }
 int dev_type(int fd) {
     int i = fd - DEVFD_BASE;
     return (i >= 0 && i < g_devn) ? g_devtype[i] : 0;
