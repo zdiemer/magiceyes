@@ -204,7 +204,15 @@ int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime) {
 int futex_wake(uint32_t uaddr, int n) {
     struct fxq *q = fxq_for(uaddr);
     pthread_mutex_lock(&q->m);
-    if (n <= 1) pthread_cond_signal(&q->c); else pthread_cond_broadcast(&q->c);
+    /* ALWAYS broadcast, even for n==1. The wait queues are HASHED (NFXQ buckets), so several
+       distinct futex addresses share one condvar. A cond_signal could wake a waiter on a DIFFERENT
+       address (same bucket); it re-checks its own *uaddr, mismatches, and re-waits -- consuming the
+       signal and leaving the intended waiter blocked forever (a lost wakeup). This bit the uClibc
+       malloc lock: a mutex unlock's FUTEX_WAKE(n=1) sometimes failed to wake the real waiter, so two
+       threads mallocing concurrently (audio decoder + module/button init) deadlocked ~50% of Didj
+       boots. Broadcast wakes all waiters in the bucket; the wrong ones re-block, the right one
+       proceeds. Spurious wakeups are permitted by the futex contract. */
+    pthread_cond_broadcast(&q->c);
     pthread_mutex_unlock(&q->m);
     return n;
 }

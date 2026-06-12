@@ -121,13 +121,30 @@ void me_btrace_hook(uc_engine *u) {
     }
 }
 
+/* ME_LIBMAP: log the load base of every distinct .so, to map a stalled PC to lib+offset. The
+ * dynamic loader re-opens libc/libgcc 100+ times, so dedup by basename + keep a fresh fd->name. */
+static char g_libname[128][40]; static int g_libfd[128]; static int g_liblogged[128]; static int g_nlib = 0;
 void me_btrace_note_open(const char *guest_path, int fd) {
-    if (fd < 0 || !track_on()) return;
+    if (fd < 0) return;
+    if (getenv("ME_LIBMAP") && strstr(guest_path, ".so")) {
+        const char *b = strrchr(guest_path, '/'); b = b ? b + 1 : guest_path;
+        int idx = -1;
+        for (int i = 0; i < g_nlib; i++) if (!strcmp(g_libname[i], b)) { idx = i; break; }
+        if (idx < 0 && g_nlib < 128) { idx = g_nlib++; snprintf(g_libname[idx], sizeof g_libname[0], "%s", b); }
+        if (idx >= 0 && !g_liblogged[idx]) g_libfd[idx] = fd;   /* track until its base is logged */
+    }
+    if (!track_on()) return;
     if (g_bt_fd < 0 && strstr(guest_path, "libButton.so")) g_bt_fd = fd;
     else if (g_lb_fd < 0 && strstr(guest_path, "libLightningBase.so")) g_lb_fd = fd;
 }
 
 void me_btrace_note_mmap(int fd, uint32_t at, uint64_t off, uint32_t len) {
+    if (getenv("ME_LIBMAP") && off == 0 && len >= 0x40000)   /* big TEXT mmap = a real lib load; NO dedup */
+        fprintf(stderr, "[bigmap] base=%08x len=%06x end=%08x fd=%d\n", at, len, at + len, fd);
+    if (getenv("ME_LIBMAP") && off == 0 && len >= 0x1000)
+        for (int i = 0; i < g_nlib; i++) if (!g_liblogged[i] && g_libfd[i] == fd) {
+            fprintf(stderr, "[libmap] %-28s base=%08x len=%06x end=%08x\n", g_libname[i], at, len, at + len);
+            g_liblogged[i] = 1; break; }
     if (off != 0 || len < 0x5000 || !track_on()) return;
     if (!g_bt_base && g_bt_fd >= 0 && fd == g_bt_fd) {
         g_bt_base = at;

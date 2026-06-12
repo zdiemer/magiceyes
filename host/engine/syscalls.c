@@ -1277,7 +1277,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
               int dfd = dirfd_make(orig_d ? hp : NULL, ov_d ? ov : NULL);
               if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a2), a3);
-        if (r >= 0) { hostfd_track((int)r, path_ino(hp)); return r; }
+        if (r >= 0) { hostfd_track((int)r, path_ino(hp)); me_btrace_note_open(p, (int)r); return r; }
         return LERR(errno);
     }
     case 6:    /* close */
