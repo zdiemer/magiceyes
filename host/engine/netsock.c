@@ -47,7 +47,32 @@ long sock_accept(int fd, uint32_t flags) {
     int i = fd - FAKESOCK_BASE;
     int nb = (i >= 0 && i < FAKESOCK_N && g_fsock_nonblock[i]) || (flags & SOCK_NONBLOCK_BIT);
     if (nb) return -11 /*EAGAIN*/;
-    while (!g_shutdown && !g_exit) { BIGLOCK_UNLOCK(); me_usleep(100000); BIGLOCK_LOCK(); }
+    /* Park until a connection (never, in our single-process model), shutdown, or CANCELLATION.
+       Didj's CKernelMPI task teardown is pthread_cancel + pthread_join: the USB/Power module tasks
+       sit here forever waiting for a control connection, and DeinitModule cancels then joins them
+       during boot. This uClibc uses DEFERRED cancellation -- pthread_cancel only signals for the
+       (rare) async type; normally it just sets a CANCELED bit in the thread descriptor via
+       __kuser_cmpxchg (no syscall we can observe) and the cancellation point checks it AFTER the
+       raw syscall returns. Since our accept never returns, that check never runs and the joiner
+       deadlocks -- which stalled the entire Didj boot before the app loop ever started.
+       So poll the SAME cancel-state word pthread_testcancel reads: pthread_self()==TP-1152 and the
+       state is at TP-1064 (descriptor+88); cancellation is pending+enabled when (state & ~6)==8.
+       When set, return EINTR so libpthread's accept wrapper runs the cancellation and exits the
+       task -> the join completes. (deliver_pending_signal handles the async-signal path too.) */
+    /* ME_DIDJ_CANCEL (experimental, off by default): polling the deferred-cancel flag here and
+       returning EINTR does unblock the cancel, but forcing it AT the accept point makes the task
+       abort (SIGABRT) and orphan a mutex (the clean cancellation point is the task's later
+       TaskSleep/nanosleep, where it holds no lock). Left gated for continued work; see
+       didj-lf1000-support. */
+    int cancel_at_accept = getenv("ME_DIDJ_CANCEL") != NULL;
+    while (!g_shutdown && !g_exit) {
+        if (deliver_pending_signal()) return 0;   /* async cancellation signal (correct, harmless) */
+        if (cancel_at_accept && g_device == ME_DEV_DIDJ && g_self && g_self->tls) {
+            uint32_t st = 0; uc_mem_read(g_uc, g_self->tls - 1064, &st, 4);
+            if ((st & ~6u) == 8) return -4 /*EINTR: cancellation pending*/;
+        }
+        COOP_BLOCK_UNLOCK(); me_usleep(100000); COOP_BLOCK_LOCK();
+    }
     return -4 /*EINTR*/;
 }
 

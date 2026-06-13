@@ -109,11 +109,11 @@ long mq_timedsend_sys(int fd, uint32_t gmsg, uint32_t len, uint32_t prio, uint32
     pthread_mutex_lock(&q->m);
     while (q->count >= q->maxmsg) {
         if (q->nonblock) { pthread_mutex_unlock(&q->m); return -11 /*EAGAIN*/; }
-        BIGLOCK_UNLOCK();
+        COOP_BLOCK_UNLOCK();
         int r = have_to ? pthread_cond_timedwait(&q->not_full, &q->m, &ts)
                         : pthread_cond_wait(&q->not_full, &q->m);
         pthread_mutex_unlock(&q->m);
-        BIGLOCK_LOCK();                  /* biglock before q->m: consistent order */
+        COOP_BLOCK_LOCK();               /* token+biglock before q->m: consistent order */
         pthread_mutex_lock(&q->m);
         if (r == ETIMEDOUT && q->count >= q->maxmsg) { pthread_mutex_unlock(&q->m); return -110 /*ETIMEDOUT*/; }
     }
@@ -142,11 +142,11 @@ long mq_timedreceive_sys(int fd, uint32_t gmsg, uint32_t maxlen, uint32_t gprio,
     pthread_mutex_lock(&q->m);
     while (q->count == 0) {
         if (q->nonblock) { pthread_mutex_unlock(&q->m); return -11 /*EAGAIN*/; }
-        BIGLOCK_UNLOCK();
+        COOP_BLOCK_UNLOCK();
         int r = have_to ? pthread_cond_timedwait(&q->not_empty, &q->m, &ts)
                         : pthread_cond_wait(&q->not_empty, &q->m);
         pthread_mutex_unlock(&q->m);
-        BIGLOCK_LOCK();
+        COOP_BLOCK_LOCK();
         pthread_mutex_lock(&q->m);
         if (r == ETIMEDOUT && q->count == 0) { pthread_mutex_unlock(&q->m); return -110 /*ETIMEDOUT*/; }
     }

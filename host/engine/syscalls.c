@@ -890,7 +890,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             uint32_t us = dsp_pace_us();   /* pace like a blocking OSS write (frees the mixer
                                               mutex + CPU; else the audio thread free-runs) */
             if (us) { if (us > 100000) us = 100000;
-                      BIGLOCK_UNLOCK(); usleep(us); BIGLOCK_LOCK(); }
+                      COOP_BLOCK_UNLOCK(); usleep(us); COOP_BLOCK_LOCK(); }
             return r; }
         if (dev_type((int)a0)) { free(tmp); return a2; }  /* other devices: accept + discard */
         /* route guest stdout/stderr through the C streams so they follow ME_LOGFILE's freopen
@@ -931,7 +931,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                read and asserts "button read failed" on EAGAIN, so wait (releasing g_biglock) for the
                next button state change. */
             while (!g_shutdown && !g_exit) {
-                BIGLOCK_UNLOCK(); me_usleep(8000); BIGLOCK_LOCK();
+                COOP_BLOCK_UNLOCK(); me_usleep(8000); COOP_BLOCK_LOCK();
                 if (input_pending((int)a0)) { r = input_read((int)a0, a1, a2); if (r != -11) return r; }
             }
             return -4 /*EINTR*/;
@@ -1267,9 +1267,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            back it off with a real sleep so it doesn't spin hot. */
         if (e2 == ENOENT && ++g_self->enoent_streak > 3) {
             g_self->enoent_streak = 0;
-            BIGLOCK_UNLOCK();
+            COOP_BLOCK_UNLOCK();
             usleep(50000);
-            BIGLOCK_LOCK();
+            COOP_BLOCK_LOCK();
         }
         return LERR(e2);
     }
@@ -1406,7 +1406,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                    dur = (double)tv[0] + (double)tv[1] * 1e-6; }
         if (dur > 0.1) dur = 0.1;
         if (dur <= 0) dur = 0.001;          /* zero-timeout poll: a 1ms yield avoids pinning a core */
-        BIGLOCK_UNLOCK(); me_usleep((unsigned)(dur * 1e6)); BIGLOCK_LOCK();
+        COOP_BLOCK_UNLOCK(); me_usleep((unsigned)(dur * 1e6)); COOP_BLOCK_LOCK();
         return 0;
     }
     case 168: { /* poll(fds, nfds, timeout): pipe check, else a real (lock-free) sleep */
@@ -1427,9 +1427,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         int tmo = (int)a2;
         if (tmo == 0) return 0;            /* non-blocking */
         double dur = (tmo < 0 || tmo > 100) ? 0.1 : (double)tmo / 1000.0;
-        BIGLOCK_UNLOCK();
+        COOP_BLOCK_UNLOCK();
         me_usleep((unsigned)(dur * 1e6));
-        BIGLOCK_LOCK();
+        COOP_BLOCK_LOCK();
         return 0;
     }
     case 240: { /* futex(uaddr, op, val, timeout, ...) — mask off PRIVATE_FLAG(0x80)+CLOCK_REALTIME(0x100) */
@@ -1555,7 +1555,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return c->tid;     /* parent gets the new tid */
     }
     case 158:   /* sched_yield */
-        BIGLOCK_UNLOCK(); sched_yield(); BIGLOCK_LOCK();
+        COOP_BLOCK_UNLOCK(); sched_yield(); COOP_BLOCK_LOCK();
         return 0;
     case 29:    /* pause */
     case 72:    /* sigsuspend (old) */
@@ -1574,9 +1574,9 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint32_t ts[2] = {0, 0}; if (a0) uc_mem_read(g_uc, a0, ts, 8);
         double dur = (double)ts[0] + (double)ts[1] * 1e-9;
         if (dur > 0.1) dur = 0.1;
-        if (dur > 0) { BIGLOCK_UNLOCK();
+        if (dur > 0) { COOP_BLOCK_UNLOCK();
                        me_usleep((unsigned)(dur * 1e6));
-                       BIGLOCK_LOCK(); }
+                       COOP_BLOCK_LOCK(); }
         return 0;
     }
     case 78: {  /* gettimeofday(tv, tz): real wall-clock — games drive loading/animation

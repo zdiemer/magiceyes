@@ -49,8 +49,10 @@ static void splash_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     if (g_bt_budget <= 0) return;
     uint32_t rel = (uint32_t)addr - g_blt_base;
     int tid = g_self ? g_self->tid : -1;
-    if (rel == 0x2a5d8) { fprintf(stderr, "[splash] Enter tid=%d\n", tid); g_bt_budget--; }
-    else if (rel == 0x293dc) { fprintf(stderr, "[splash] Exit tid=%d\n", tid); g_bt_budget--; }
+    if (rel == 0x2a5d8) { fprintf(stderr, "[splash] Enter tid=%d this=%08x lr=%08x(blt %05x)\n", tid,
+        rr(uc, UC_ARM_REG_R0), rr(uc, UC_ARM_REG_LR), rr(uc, UC_ARM_REG_LR) - g_blt_base); g_bt_budget--; }
+    else if (rel == 0x293dc) { fprintf(stderr, "[splash] Exit tid=%d lr=%08x(blt %05x)\n", tid,
+        rr(uc, UC_ARM_REG_LR), rr(uc, UC_ARM_REG_LR) - g_blt_base); g_bt_budget--; }
     else if (rel == 0x2a884) {            /* Update entry: r0 = splash this; mSubState @ this+92 */
         static int n = 0; if (n++ % 30) return;   /* rate-limit (called every frame) */
         uint32_t self = rr(uc, UC_ARM_REG_R0), ss = 0; if (self) uc_mem_read(uc, self + 92, &ss, 4);
@@ -76,6 +78,11 @@ static int track_on(void)  { return trace_on() || guard_on(); }
 static void inactguard_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     (void)addr; (void)size; (void)user;
     static int n = 0;
+    /* ME_DIDJ_LOOPRATE: UpdateInactivity is called once per CAppManager::Run iteration, so its
+       call count is the app-loop rate -- the metric for whether cooperative scheduling unthrottled
+       the loop. Print a running total every 200 calls (cheap; no host clock needed). */
+    if (getenv("ME_DIDJ_LOOPRATE")) { static unsigned long c = 0; if (++c % 200 == 0)
+        fprintf(stderr, "[looprate] CAppManager::Run iterations=%lu\n", c); }
     if (g_input_active) return;                 /* real input now drives the timer */
     uint32_t self = rr(uc, UC_ARM_REG_R0);
     if (self) { uint8_t one = 1; uc_mem_write(uc, self + 0x5c, &one, 1); }
@@ -122,11 +129,23 @@ static void gsh_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     if (g_bt_budget <= 0) return;
     uint32_t rel = (uint32_t)addr - g_lb_base;
     if (rel == 0x11fb4) {
-        static int n = 0; if (n++ % 20) return;
+        if (getenv("ME_DIDJ_LOOPRATE")) { static unsigned long c = 0; if (++c % 200 == 0)
+            fprintf(stderr, "[looprate] CGameStateHandler::Update calls=%lu\n", c); }
+        /* ME_DIDJ_GSHALL: log EVERY handler instance pumped (no dedup) to expose A (splash) vs B
+           (empty). Otherwise dedup the first few distinct handler pointers. */
         uint32_t h = rr(uc, UC_ARM_REG_R0), f = 0, s24 = 0, s8 = 0;
         uc_mem_read(uc, h + 41, &f, 1); uc_mem_read(uc, h + 24, &s24, 4); uc_mem_read(uc, h + 8, &s8, 4);
-        fprintf(stderr, "[gsh] h=%08x flag41=%x cur24=%08x base8=%08x %s\n", h, f & 0xff, s24, s8,
-                ((f & 0xff) && s24 != s8) ? "UPDATES" : "SKIPS"); g_bt_budget--;
+        static uint32_t seen[16]; static int nseen = 0; int known = 0;
+        for (int i = 0; i < nseen; i++) if (seen[i] == h) { known = 1; break; }
+        if (!getenv("ME_DIDJ_GSHALL")) { if (known) return; if (nseen < 16) seen[nseen++] = h; }
+        fprintf(stderr, "[gsh] h=%08x flag41=%x cur24=%08x base8=%08x depth=%d %s\n", h, f & 0xff, s24, s8,
+                (int)((s24 - s8) / 4), ((f & 0xff) && s24 != s8) ? "UPDATES" : "SKIPS"); g_bt_budget--;
+    } else if (rel == 0x11e90) {     /* DoRequest: handler this = r0; pending state @+48, transition @+44 */
+        uint32_t h = rr(uc, UC_ARM_REG_R0), pend = 0, tr = 0, s24 = 0, s8 = 0;
+        uc_mem_read(uc, h + 48, &pend, 4); uc_mem_read(uc, h + 44, &tr, 4);
+        uc_mem_read(uc, h + 24, &s24, 4); uc_mem_read(uc, h + 8, &s8, 4);
+        fprintf(stderr, "[gsh] DoRequest h=%08x pending=%08x trans=%u depth=%d\n", h, pend, tr,
+                (int)((s24 - s8) / 4)); g_bt_budget--;
     } else if (rel == 0x12028) {     /* about to call state->Update; r0 = state, [r0] = vtable */
         uint32_t st = rr(uc, UC_ARM_REG_R0), vt = 0; if (st) uc_mem_read(uc, st, &vt, 4);
         fprintf(stderr, "[gsh] *** UPDATES state=%08x vtable_rel(BLT)=%x\n", st, g_blt_base ? vt - g_blt_base : vt);
@@ -179,6 +198,8 @@ void me_btrace_hook(uc_engine *u) {
                     (uint64_t)g_lb_base + 0x204a0, (uint64_t)g_lb_base + 0x204a0);
         uc_hook_add(u, &h, UC_HOOK_CODE, vidpb_cb, NULL,  /* CVideoPlayback::Start (Wall 2) */
                     (uint64_t)g_lb_base + 0x213bc, (uint64_t)g_lb_base + 0x213bc);
+        uc_hook_add(u, &h, UC_HOOK_CODE, gsh_cb, NULL,    /* CGameStateHandler::DoRequest (push/pop) */
+                    (uint64_t)g_lb_base + 0x11e90, (uint64_t)g_lb_base + 0x11e90);
         uc_hook_add(u, &h, UC_HOOK_CODE, gsh_cb, NULL,    /* CGameStateHandler::Update entry */
                     (uint64_t)g_lb_base + 0x11fb4, (uint64_t)g_lb_base + 0x11fb4);
         uc_hook_add(u, &h, UC_HOOK_CODE, gsh_cb, NULL,    /* the state->Update vtable call */

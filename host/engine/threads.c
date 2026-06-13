@@ -121,6 +121,7 @@ void uc_hook_std(uc_engine *u) {
     if (g_pchook) uc_hook_add(u, &h, UC_HOOK_CODE, pchook_cb, NULL, g_pchook, g_pchook);
     if (!g_looppc_on) { const char *e = getenv("ME_LOOPPC"); if (e) { g_looppc_on = 1; g_looppc_from = strtoul(e, NULL, 0); } }
     if (g_looppc_on) uc_hook_add(u, &h, UC_HOOK_BLOCK, looppc_cb, NULL, 1, 0);
+    if (g_coop) uc_hook_add(u, &h, UC_HOOK_BLOCK, coop_block_cb, NULL, 1, 0);  /* single-core timeslice */
     uc_hook_add(u, &h, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED
                 | UC_HOOK_MEM_FETCH_UNMAPPED, mem_invalid_cb, NULL, 1, 0);
     if (!g_nwatch) { const char *e = getenv("ME_WATCH");
@@ -195,26 +196,26 @@ int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime) {
     uint32_t cur = 0; uc_mem_read(g_uc, uaddr, &cur, 4);
     if (cur != val) {                           /* EAGAIN: the value already changed, don't block */
         pthread_mutex_unlock(&q->m);
-        /* Livelock backoff. uClibc's swp+futex mutex (the malloc lock) under our TRUE-PARALLEL
-           threading can livelock: two worker threads each swp the lock to 2, FUTEX_WAIT(val=2),
-           the OTHER's swp/release flips the value so each sees cur!=2 -> EAGAIN -> the guest re-spins
-           the swp instead of ever blocking, and neither wins. On a single-core device this can't
-           happen (one thread runs at a time). After a run of consecutive EAGAINs on the same
-           address (the livelock signature -- legitimate waits block or succeed quickly), yield the
-           CPU (releasing g_biglock) so the lock holder can finish its critical section and release.
-           This unblocked Didj boots that deadlocked with the audio decoder + module init both
-           mallocing at once (which then blocked the main thread in pthread_join -> stalled app). */
+        /* Livelock backoff. uClibc's swp+futex mutex (the malloc lock) under TRUE-PARALLEL threading
+           can livelock: two worker threads each swp the lock to 2, FUTEX_WAIT(val=2), the OTHER's
+           swp/release flips the value so each sees cur!=2 -> EAGAIN -> the guest re-spins the swp
+           instead of ever blocking, and neither wins. On a single-core device this can't happen
+           (one thread runs at a time). Under cooperative scheduling (g_coop) we ARE single-core, so
+           just hand the run token to the lock holder so it can finish + release. Otherwise (parallel
+           path) fall back to the address-streak yield: after a run of consecutive EAGAINs on the
+           same address (the livelock signature), drop g_biglock and sleep so the holder progresses. */
+        if (g_coop) { runtok_yield(); return -11; }
         static __thread uint32_t last_addr; static __thread int streak;
         if (uaddr == last_addr) { if (++streak >= 48) { streak = 0;
             BIGLOCK_UNLOCK(); me_usleep(60); BIGLOCK_LOCK(); } }
         else { last_addr = uaddr; streak = 0; }
         return -11;
     }
-    BIGLOCK_UNLOCK();                           /* let others run while we block */
+    COOP_BLOCK_UNLOCK();                         /* let others run while we block (drop biglock+token) */
     int r = abstime ? pthread_cond_timedwait(&q->c, &q->m, abstime)
                     : pthread_cond_wait(&q->c, &q->m);   /* atomically releases q->m */
     pthread_mutex_unlock(&q->m);
-    BIGLOCK_LOCK();
+    COOP_BLOCK_LOCK();
     return (r == ETIMEDOUT) ? -110 /* -ETIMEDOUT: guest re-checks + re-polls */ : 0;
 }
 int futex_wake(uint32_t uaddr, int n) {
@@ -296,6 +297,23 @@ void deliver_signals(void) {
     if (g_trace) fprintf(stderr, "  [signal %d -> handler %08x in tid %d]\n", sig, h, t->tid);
 }
 
+/* A blocking syscall handler (accept/read parking on a fake device) calls this each wait
+   iteration: if a deliverable signal is now pending -- e.g. LinuxThreads' cancellation signal (32),
+   sent by pthread_cancel via tgkill to interrupt a blocked thread -- enter its handler and report
+   that the syscall was interrupted. Mirrors the kernel making a blocking call return EINTR with a
+   signal pending: the guest's cancellation testpoint then unwinds + exits the thread, so a
+   pthread_cancel+pthread_join task teardown (CKernelMPI) can't deadlock on a thread parked forever
+   in our fake blocking call. Returns 1 if it dispatched a signal (caller must return immediately,
+   leaving R0=EINTR saved + PC at the handler); 0 to keep waiting. */
+int deliver_pending_signal(void) {
+    struct thread *t = g_self;
+    if (!t || !(t->sig_pending & ~t->sig_blocked) || t->has_sigsave) return 0;
+    gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
+    deliver_signals();
+    g_setpc = 1;
+    return 1;
+}
+
 /* sigsuspend/pause: block (releasing g_biglock) until a deliverable signal arrives. */
 void sigsuspend_wait(void) {
     if (g_siglog < 0) g_siglog = getenv("ME_SIGLOG") ? 1 : 0;
@@ -303,11 +321,11 @@ void sigsuspend_wait(void) {
         g_self->tid, (unsigned long long)g_self->sig_pending,
         (unsigned long long)g_self->sig_blocked);
     pthread_mutex_lock(&g_sigm);
-    BIGLOCK_UNLOCK();
+    COOP_BLOCK_UNLOCK();
     while (!(g_self->sig_pending & ~g_self->sig_blocked) && !g_exit)
         pthread_cond_wait(&g_sigc, &g_sigm);   /* g_exit: a teardown woke us to bail out */
     pthread_mutex_unlock(&g_sigm);
-    BIGLOCK_LOCK();
+    COOP_BLOCK_LOCK();
     if (g_siglog) fprintf(stderr, "SIG t%d sigsuspend_wait WAKE pend=%llx\n",
         g_self->tid, (unsigned long long)g_self->sig_pending);
 }

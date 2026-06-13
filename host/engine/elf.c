@@ -191,6 +191,7 @@ uint32_t load_elf(const char *path) {
         dev = caanoo ? 2 : (wiz ? 1 : (so3 ? 2 : 0));
     }
     g_device = dev;
+    coop_init(dev == ME_DEV_DIDJ);   /* single-core run token for Didj (uClibc not parallel-safe) */
     if (g_trace) fprintf(stderr, "  device=%d (%s) interp=%s\n", dev,
                          me_model()->name, interp[0] ? interp : "(static)");
 

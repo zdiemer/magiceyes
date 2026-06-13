@@ -250,6 +250,7 @@ struct thread {
     uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
     int enoent_streak;      /* consecutive failed opens -> back off (music worker) */
     uint32_t last_pc;       /* diagnostics */
+    int blkctr;             /* coop.c timeslice: basic blocks since the last run-token yield */
 };
 struct sigact { uint32_t handler, flags, restorer; uint64_t mask; };
 struct snap { uint64_t begin; uint32_t len; uint8_t *data; };
@@ -263,6 +264,22 @@ extern pthread_mutex_t g_biglock;   /* serialises the syscall + device layer */
 extern __thread int g_holds_biglock;
 #define BIGLOCK_LOCK()   do { pthread_mutex_lock(&g_biglock);   g_holds_biglock = 1; } while (0)
 #define BIGLOCK_UNLOCK() do { g_holds_biglock = 0; pthread_mutex_unlock(&g_biglock); } while (0)
+/* ---- coop.c (single-core cooperative scheduler / run token) ---- */
+/* COOP_BLOCK_UNLOCK / COOP_BLOCK_LOCK bracket a point where a guest thread BLOCKS (sleep, futex,
+   mqueue, sigwait). They drop g_biglock AND (under cooperative scheduling) the run token, so
+   another guest thread can run while this one is blocked, then reacquire both in lock order
+   (token outer, biglock inner). Use these -- not bare BIGLOCK_UNLOCK/LOCK -- only at real blocking
+   points; a non-blocking syscall keeps the run token (the thread stays the single active core). */
+extern int g_coop;                  /* 1 = serialise guest execution to a single core (Didj) */
+extern __thread int g_holds_runtok;
+void runtok_acquire(void);
+void runtok_release(void);
+void runtok_yield(void);            /* hand the token to a waiter, then take it back */
+void guard_release_runtok(void);   /* crash guard: drop the token on a host fault */
+void coop_block_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user);
+void coop_init(int is_didj);
+#define COOP_BLOCK_UNLOCK() do { BIGLOCK_UNLOCK(); runtok_release(); } while (0)
+#define COOP_BLOCK_LOCK()   do { runtok_acquire(); BIGLOCK_LOCK(); } while (0)
 extern __thread struct thread *g_self;   /* the calling host thread's guest-thread record */
 extern struct thread g_th[MAXTH];
 extern int g_nth, g_next_tid;
@@ -280,6 +297,7 @@ void threads_init(void);
 int thread_alloc(void);
 void dump_threads(const char *why);
 void deliver_signals(void);
+int deliver_pending_signal(void);   /* blocking syscall: dispatch a pending signal as EINTR (cancel) */
 long send_sig(int pid, int sig);
 
 /* ---- syscalls.c (syscall shim + synchronous fork + in-engine pipe) ---- */

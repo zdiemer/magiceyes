@@ -32,11 +32,14 @@ void guard_release_biglock(void) {
 static int emu_run(uc_engine *uc, uint32_t entry) {
     uint32_t pc = entry;
     int e;
+    runtok_acquire();   /* cooperative (Didj): hold the single-core run token while executing guest
+                           code; released at blocking points (COOP_BLOCK_*) + the timeslice hook */
     do {
         g_fpa_resume = 0;
         e = (int)uc_emu_start(uc, pc, 0, 0, 0);
         if (g_fpa_resume) uc_reg_read(uc, UC_ARM_REG_PC, &pc);
     } while (g_fpa_resume && e == UC_ERR_OK && !g_exit && !g_shutdown);
+    runtok_release();
     return e;
 }
 
@@ -105,6 +108,7 @@ int guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f) {
     if (g_returned) {                       /* came back via the handler -> a host fault */
         if (f) { f->faulted = 1; f->addr = g_faddr; f->pc = g_fpc; }
         guard_release_biglock();
+        guard_release_runtok();
         guard_release_reglock();
         return -1;
     }
@@ -163,6 +167,7 @@ int guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f) {
         g_armed = 0;
         if (f) { f->faulted = 1; f->addr = g_faddr; f->pc = 0; }
         guard_release_biglock();
+        guard_release_runtok();
         guard_release_reglock();
         return -1;
     }
