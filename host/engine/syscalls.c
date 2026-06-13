@@ -928,9 +928,13 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if (r != -11 || dev_nonblock((int)a0)) return r;        /* got events / error / non-blocking EAGAIN */
             /* Blocking evdev read (input_read returned -EAGAIN = no events): a real input device
                blocks until an event. The Didj button task (LightningButtonTask) does a bare blocking
-               read and asserts "button read failed" on EAGAIN, so wait (releasing g_biglock) for the
-               next button state change. */
+               read and ASSERTS "button read failed" if the read returns an error -- so we must NOT
+               return EINTR here. Instead, when the Brio teardown pthread_cancels this task (the
+               boot->menu handoff disconnects the boot app's modules), end it engine-side so the
+               canceller's pthread_join completes -- without returning to the guest's read (which would
+               assert) or running its C++ cancel cleanup (which deadlocks on a module mutex). */
             while (!g_shutdown && !g_exit) {
+                if (g_device == ME_DEV_DIDJ && me_thread_cancel_pending()) { me_engine_kill_self(); return 0; }
                 COOP_BLOCK_UNLOCK(); me_usleep(8000); COOP_BLOCK_LOCK();
                 if (input_pending((int)a0)) { r = input_read((int)a0, a1, a2); if (r != -11) return r; }
             }

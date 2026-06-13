@@ -47,29 +47,21 @@ long sock_accept(int fd, uint32_t flags) {
     int i = fd - FAKESOCK_BASE;
     int nb = (i >= 0 && i < FAKESOCK_N && g_fsock_nonblock[i]) || (flags & SOCK_NONBLOCK_BIT);
     if (nb) return -11 /*EAGAIN*/;
-    /* Park until a connection (never, in our single-process model), shutdown, or CANCELLATION.
-       Didj's CKernelMPI task teardown is pthread_cancel + pthread_join: the USB/Power module tasks
-       sit here forever waiting for a control connection, and DeinitModule cancels then joins them
-       during boot. This uClibc uses DEFERRED cancellation -- pthread_cancel only signals for the
-       (rare) async type; normally it just sets a CANCELED bit in the thread descriptor via
-       __kuser_cmpxchg (no syscall we can observe) and the cancellation point checks it AFTER the
-       raw syscall returns. Since our accept never returns, that check never runs and the joiner
-       deadlocks -- which stalled the entire Didj boot before the app loop ever started.
-       So poll the SAME cancel-state word pthread_testcancel reads: pthread_self()==TP-1152 and the
-       state is at TP-1064 (descriptor+88); cancellation is pending+enabled when (state & ~6)==8.
-       When set, return EINTR so libpthread's accept wrapper runs the cancellation and exits the
-       task -> the join completes. (deliver_pending_signal handles the async-signal path too.) */
-    /* ME_DIDJ_CANCEL (experimental, off by default): polling the deferred-cancel flag here and
-       returning EINTR does unblock the cancel, but forcing it AT the accept point makes the task
-       abort (SIGABRT) and orphan a mutex (the clean cancellation point is the task's later
-       TaskSleep/nanosleep, where it holds no lock). Left gated for continued work; see
-       didj-lf1000-support. */
-    int cancel_at_accept = getenv("ME_DIDJ_CANCEL") != NULL;
+    /* Park until a connection (never, in our single-process model), shutdown, or a pthread
+       CANCELLATION. Didj's boot->menu handoff disconnects the boot app's modules; CKernelMPI's task
+       teardown pthread_cancels + pthread_joins each module task, and the USB/Power tasks park here
+       forever waiting for a control connection. The deferred-cancel takes effect only at a
+       cancellation point after the syscall returns -- which our never-returning accept never does --
+       so the joiner deadlocks (this stalled the whole boot before the app loop started). Letting the
+       guest run its own C++ cancel cleanup instead aborts (double-free) or deadlocks (it locks a
+       module mutex the joiner holds). The task holds NO lock parked here, so on a pending cancel we
+       end it engine-side (me_engine_kill_self) and wake the joiner directly. */
     while (!g_shutdown && !g_exit) {
-        if (deliver_pending_signal()) return 0;   /* async cancellation signal (correct, harmless) */
-        if (cancel_at_accept && g_device == ME_DEV_DIDJ && g_self && g_self->tls) {
-            uint32_t st = 0; uc_mem_read(g_uc, g_self->tls - 1064, &st, 4);
-            if ((st & ~6u) == 8) return -4 /*EINTR: cancellation pending*/;
+        if (g_device == ME_DEV_DIDJ && g_self && g_self != &g_th[0] && me_thread_cancel_pending()) {
+            if (getenv("ME_DIDJ_CANCELLOG"))
+                fprintf(stderr, "  [accept] tid=%d cancelled -> engine exit\n", g_self->tid);
+            me_engine_kill_self();
+            return 0;
         }
         COOP_BLOCK_UNLOCK(); me_usleep(100000); COOP_BLOCK_LOCK();
     }

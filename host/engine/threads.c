@@ -216,6 +216,11 @@ int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime) {
                     : pthread_cond_wait(&q->c, &q->m);   /* atomically releases q->m */
     pthread_mutex_unlock(&q->m);
     COOP_BLOCK_LOCK();
+    /* A Brio module task blocked here (e.g. the Event thread on its queue semaphore) that the
+       boot->menu teardown pthread_cancelled: end it engine-side so the joiner completes, rather than
+       running its deadlock-prone C++ cancel cleanup. send_sig broadcasts the futex queues for Didj so
+       the cancel signal wakes us here to notice it. */
+    if (g_coop && g_self != &g_th[0] && me_thread_cancel_pending()) { me_engine_kill_self(); return 0; }
     return (r == ETIMEDOUT) ? -110 /* -ETIMEDOUT: guest re-checks + re-polls */ : 0;
 }
 int futex_wake(uint32_t uaddr, int n) {
@@ -263,6 +268,10 @@ long send_sig(int pid, int sig) {
         pthread_mutex_lock(&g_sigm);
         pthread_cond_broadcast(&g_sigc);    /* wake any sigsuspended thread to re-check */
         pthread_mutex_unlock(&g_sigm);
+        /* Didj: also wake every futex/cond wait so a target blocked on a semaphore/futex (e.g. the
+           Event thread) wakes to notice an async pthread_cancel (sig 32) and exit; otherwise a
+           teardown's pthread_join on it would deadlock. Spurious wakeups are harmless (re-checked). */
+        if (g_coop) { futex_wake_all(); mq_wake_all(); }
         return 0;
     }
     if (g_siglog) fprintf(stderr, "SIG send sig=%d -> tid=%d (from t%d): NO MATCH/dead\n",
@@ -301,10 +310,8 @@ void deliver_signals(void) {
    iteration: if a deliverable signal is now pending -- e.g. LinuxThreads' cancellation signal (32),
    sent by pthread_cancel via tgkill to interrupt a blocked thread -- enter its handler and report
    that the syscall was interrupted. Mirrors the kernel making a blocking call return EINTR with a
-   signal pending: the guest's cancellation testpoint then unwinds + exits the thread, so a
-   pthread_cancel+pthread_join task teardown (CKernelMPI) can't deadlock on a thread parked forever
-   in our fake blocking call. Returns 1 if it dispatched a signal (caller must return immediately,
-   leaving R0=EINTR saved + PC at the handler); 0 to keep waiting. */
+   signal pending. Returns 1 if it dispatched a signal (caller must return immediately, leaving
+   R0=EINTR saved + PC at the handler); 0 to keep waiting. */
 int deliver_pending_signal(void) {
     struct thread *t = g_self;
     if (!t || !(t->sig_pending & ~t->sig_blocked) || t->has_sigsave) return 0;
@@ -312,6 +319,38 @@ int deliver_pending_signal(void) {
     deliver_signals();
     g_setpc = 1;
     return 1;
+}
+
+/* True if THIS guest thread has a pthread cancellation pending -- either deferred (uClibc sets a
+   CANCELED bit in the thread descriptor at TP-1064 via __kuser_cmpxchg; pending+enabled when
+   (state & ~6)==8) or async (pthread_cancel sent the cancel signal 32). Used by our fake blocking
+   syscalls (accept/evdev-read) which a Brio module task parks in forever, so they can notice the
+   CKernelMPI teardown's pthread_cancel. (Didj/uClibc-specific offsets; gate on the device.) */
+int me_thread_cancel_pending(void) {
+    struct thread *t = g_self;
+    if (!t || !t->tls) return 0;
+    uint32_t st = 0; uc_mem_read(g_uc, t->tls - 1064, &st, 4);
+    if ((st & ~6u) == 8) return 1;                         /* deferred cancel flagged + enabled */
+    if (t->sig_pending & (1ull << 31)) return 1;           /* async: cancel signal 32 pending */
+    return 0;
+}
+
+/* End THIS guest thread from the engine, like a forced _exit, WITHOUT running its guest
+   cancellation cleanup. The Brio C++ tasks' deferred-cancel cleanup deadlocks (it locks a module
+   mutex the joining main thread holds) or aborts (double-free) under our emulation; since the task
+   is parked in a fake blocking call holding no lock, we can safely drop it here and just satisfy
+   the joiner: pthread_join FUTEX_WAITs on the thread's pid field at descriptor+72 (TP-1080),
+   expecting the kernel to zero it + wake on exit -- so do exactly that. Caller must return at once
+   (PC is left where it is; the thread won't resume -- uc_emu_stop ends its run). */
+void me_engine_kill_self(void) {
+    struct thread *t = g_self;
+    uint32_t jaddr = t->tls - 1080 /*descriptor+72*/, zero = 0;
+    uc_mem_write(g_uc, jaddr, &zero, 4);
+    futex_wake(jaddr, INT_MAX);
+    if (t->ctid && t->ctid != jaddr) { uc_mem_write(g_uc, t->ctid, &zero, 4); futex_wake(t->ctid, INT_MAX); }
+    t->state = TH_DEAD;
+    uc_emu_stop(g_uc);
+    g_setpc = 1;
 }
 
 /* sigsuspend/pause: block (releasing g_biglock) until a deliverable signal arrives. */

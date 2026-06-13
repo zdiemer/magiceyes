@@ -229,6 +229,9 @@ void me_btrace_note_open(const char *guest_path, int fd) {
 }
 
 void me_btrace_note_mmap(int fd, uint32_t at, uint64_t off, uint32_t len) {
+    if (getenv("ME_DIDJ_MMAPLOG"))   /* every mmap: addr range + fd + off, to identify a region (e.g. 0x71xxxxxx) */
+        fprintf(stderr, "[mmap] at=%08x end=%08x len=%06x off=%llx fd=%d\n",
+                at, at + len, len, (unsigned long long)off, fd);
     if (getenv("ME_LIBMAP") && off == 0 && len >= 0x40000)   /* big TEXT mmap = a real lib load; NO dedup */
         fprintf(stderr, "[bigmap] base=%08x len=%06x end=%08x fd=%d\n", at, len, at + len, fd);
     if (getenv("ME_LIBMAP") && off == 0 && len >= 0x1000)

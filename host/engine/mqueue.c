@@ -42,6 +42,18 @@ static struct mqueue *mq_for_fd(int fd) {
 }
 int mq_is_fd(int fd) { return mq_for_fd(fd) != NULL; }
 
+/* Wake every mq waiter (Didj send_sig): a Brio task blocked in mq_(timed)receive -- the Event
+   thread on its dispatch queue -- must wake to notice an async pthread_cancel (sig 32) and exit,
+   else the teardown's pthread_join on it deadlocks. Spurious wakeups are re-checked harmlessly. */
+void mq_wake_all(void) {
+    for (int i = 0; i < MQ_MAX; i++) if (g_mq[i].used) {
+        pthread_mutex_lock(&g_mq[i].m);
+        pthread_cond_broadcast(&g_mq[i].not_empty);
+        pthread_cond_broadcast(&g_mq[i].not_full);
+        pthread_mutex_unlock(&g_mq[i].m);
+    }
+}
+
 static struct mqueue *mq_find(const char *name) {
     for (int i = 0; i < MQ_MAX; i++)
         if (g_mq[i].used && !g_mq[i].unlinked && !strcmp(g_mq[i].name, name)) return &g_mq[i];
@@ -114,6 +126,7 @@ long mq_timedsend_sys(int fd, uint32_t gmsg, uint32_t len, uint32_t prio, uint32
                         : pthread_cond_wait(&q->not_full, &q->m);
         pthread_mutex_unlock(&q->m);
         COOP_BLOCK_LOCK();               /* token+biglock before q->m: consistent order */
+        if (g_coop && g_self != &g_th[0] && me_thread_cancel_pending()) { me_engine_kill_self(); return 0; }
         pthread_mutex_lock(&q->m);
         if (r == ETIMEDOUT && q->count >= q->maxmsg) { pthread_mutex_unlock(&q->m); return -110 /*ETIMEDOUT*/; }
     }
@@ -147,6 +160,7 @@ long mq_timedreceive_sys(int fd, uint32_t gmsg, uint32_t maxlen, uint32_t gprio,
                         : pthread_cond_wait(&q->not_empty, &q->m);
         pthread_mutex_unlock(&q->m);
         COOP_BLOCK_LOCK();
+        if (g_coop && g_self != &g_th[0] && me_thread_cancel_pending()) { me_engine_kill_self(); return 0; }
         pthread_mutex_lock(&q->m);
         if (r == ETIMEDOUT && q->count == 0) { pthread_mutex_unlock(&q->m); return -110 /*ETIMEDOUT*/; }
     }

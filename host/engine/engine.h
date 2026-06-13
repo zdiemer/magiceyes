@@ -292,12 +292,15 @@ void *thread_entry(void *arg);
 int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime);
 int futex_wake(uint32_t uaddr, int n);
 void futex_wake_all(void);   /* broadcast every wait-queue (teardown: free blocked threads) */
+void mq_wake_all(void);   /* wake all mq waiters (Didj cancel) */
 void sigsuspend_wait(void);
 void threads_init(void);
 int thread_alloc(void);
 void dump_threads(const char *why);
 void deliver_signals(void);
 int deliver_pending_signal(void);   /* blocking syscall: dispatch a pending signal as EINTR (cancel) */
+int me_thread_cancel_pending(void); /* this thread has a pthread cancel pending (deferred or async) */
+void me_engine_kill_self(void);     /* end this thread engine-side + wake its joiner (skip guest cleanup) */
 long send_sig(int pid, int sig);
 
 /* ---- syscalls.c (syscall shim + synchronous fork + in-engine pipe) ---- */
