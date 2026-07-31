@@ -252,3 +252,8 @@ bool fpa_invalid_cb(uc_engine *uc, void *user) {
 }
 
 void fpa_reset(void) { for (int i = 0; i < 8; i++) g_fpa[i] = 0.0; }
+
+/* Accessors for the OABI libm float-return shim (oabi_libm.c): GP2X games are OABI and read a
+   libm double result from FPA f0, which our soft-float rootfs libm never writes. */
+void   fpa_write(int r, double v) { g_fpa[r & 7] = v; }
+double fpa_read(int r)            { return g_fpa[r & 7]; }

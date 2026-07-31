@@ -39,6 +39,36 @@ typedef struct {
     Elf32_Word p_align;
 } Elf32_Phdr;
 
+typedef struct {
+    Elf32_Word sh_name;
+    Elf32_Word sh_type;
+    Elf32_Word sh_flags;
+    Elf32_Addr sh_addr;
+    Elf32_Off  sh_offset;
+    Elf32_Word sh_size;
+    Elf32_Word sh_link;
+    Elf32_Word sh_info;
+    Elf32_Word sh_addralign;
+    Elf32_Word sh_entsize;
+} Elf32_Shdr;
+
+typedef struct {
+    Elf32_Word    st_name;
+    Elf32_Addr    st_value;
+    Elf32_Word    st_size;
+    unsigned char st_info;
+    unsigned char st_other;
+    Elf32_Half    st_shndx;
+} Elf32_Sym;
+
+typedef struct {
+    Elf32_Addr r_offset;
+    Elf32_Word r_info;
+} Elf32_Rel;
+
+#define ELF32_R_SYM(i)  ((i) >> 8)
+#define ELF32_R_TYPE(i) ((unsigned char)(i))
+
 /* e_ident */
 #define EI_MAG0 0
 #define EI_MAG1 1

@@ -117,6 +117,7 @@ void uc_hook_std(uc_engine *u) {
         uc_hook_add(u, &h, UC_HOOK_CODE, mutex_cb, NULL, pcs[a], pcs[a]);
     }
     uc_hook_add(u, &h, UC_HOOK_INSN_INVALID, fpa_invalid_cb, NULL, 1, 0);  /* FPA float emulation */
+    oabi_libm_register(u);                                                 /* OABI libm f0-return shim (bx lr + hook) */
     if (!g_pchook) { const char *e = getenv("ME_PCHOOK"); if (e) g_pchook = strtoul(e, NULL, 0); }
     if (g_pchook) uc_hook_add(u, &h, UC_HOOK_CODE, pchook_cb, NULL, g_pchook, g_pchook);
     if (!g_looppc_on) { const char *e = getenv("ME_LOOPPC"); if (e) { g_looppc_on = 1; g_looppc_from = strtoul(e, NULL, 0); } }

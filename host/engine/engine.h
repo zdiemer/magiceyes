@@ -295,6 +295,12 @@ bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
 extern __thread int g_fpa_resume;   /* set by the invalid-insn hook -> guarded_emu_start restarts */
 bool fpa_invalid_cb(uc_engine *uc, void *user);   /* UC_HOOK_INSN_INVALID */
 void fpa_reset(void);
+void   fpa_write(int r, double v);
+double fpa_read(int r);
+
+/* OABI libm float-return shim (oabi_libm.c). */
+void oabi_libm_scan(const uint8_t *buf, long sz);   /* parse game ELF, record double-libm PLT stubs */
+void oabi_libm_register(uc_engine *u);              /* patch stubs -> bx lr (once) + hook them per uc */
 
 /* ---- cpu.c (SVC entry, hooks, preemption timer) ---- */
 extern volatile int g_timer_run;

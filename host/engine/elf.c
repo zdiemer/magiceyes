@@ -186,6 +186,10 @@ uint32_t load_elf(const char *path) {
     /* The program loads at its fixed vaddrs (ET_EXEC, bias 0). PIE (ET_DYN main) isn't a GP2X
        case, so we don't relocate the main image. */
     uint32_t max_end = map_loads(buf, eh, 0);
+    /* GP2X (OABI) dynamic titles read libm double results from FPA f0, which our soft-float rootfs
+       libm never writes -> record the double-returning libm PLT stubs so the engine can shim them
+       (oabi_libm.c). GP2X-only: EABI (Wiz/Caanoo) titles use AAPCS double args + r0/r1 returns. */
+    if (interp[0] && g_device == 0) oabi_libm_scan(buf, sz);
     g_brk_start = g_brk = ALIGN_UP(max_end);
     map_region(g_brk, PAGE, UC_PROT_READ | UC_PROT_WRITE);  /* initial brk page */
 
