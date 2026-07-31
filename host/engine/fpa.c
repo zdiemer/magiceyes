@@ -48,17 +48,23 @@ static int cond_pass(uint32_t insn, uint32_t cpsr) {
     }
 }
 
-/* Compute the data address + apply base-register writeback, ARM LDC/STC style. */
-static uint32_t cpdt_addr(uc_engine *uc, uint32_t insn) {
+/* Compute the data address + apply base-register writeback, ARM LDC/STC style. `pc` is the
+   CURRENT instruction's address (fpa_emulate's arg), needed for PC-relative literal loads. */
+static uint32_t cpdt_addr(uc_engine *uc, uint32_t insn, uint32_t pc) {
     int P = (insn >> 24) & 1, U = (insn >> 23) & 1, W = (insn >> 21) & 1, Rn = (insn >> 16) & 0xf;
     uint32_t off = (insn & 0xff) * 4, base = 0;
-    uc_reg_read(uc, g_sregs[Rn], &base);          /* g_sregs[0..15] = R0..R12,SP,LR,PC */
     if (Rn == 15) {
         /* PC-relative literal load (ldfd f0,[pc,#N] loads an FP constant from the literal pool):
-           the ARM addressing base is Align(PC,4)+8, but in the invalid-insn hook PC reads as the
-           faulting instruction's own address. Without the +8 every FP constant loads 8 bytes off
-           -> wrong gameplay physics -> object-list corruption (Odonata's AddPBullet assert). */
-        base = (base & ~3u) + 8;
+           the ARM addressing base is Align(PC,4)+8. Use the CURRENT instruction's `pc` (passed in),
+           NOT the UC PC register: fpa_invalid_cb emulates a RUN of consecutive FPA instructions but
+           only writes UC_ARM_REG_PC back once, at the end -- so mid-run the register still holds the
+           FIRST faulting instruction's address. A pc-relative FP-constant load that isn't the first
+           op in the run would then read 4*N bytes off -> garbage constant (e.g. sqdef's projectile
+           sqrt loads its 0.1 Newton step from the wrong address -> -inf trajectory -> projectiles
+           never move/hit/despawn; also Odonata's AddPBullet assert). */
+        base = (pc & ~3u) + 8;
+    } else {
+        uc_reg_read(uc, g_sregs[Rn], &base);      /* g_sregs[0..15] = R0..R12,SP,LR,PC */
     }
     uint32_t addr = P ? (U ? base + off : base - off) : base;
     /* LDC/STC writeback iff W==1 (P=0,W=0 is the no-writeback "unindexed" form -- writing back
@@ -82,7 +88,7 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
         int L = (insn >> 20) & 1;
         int Fd = (insn >> 12) & 7;
         int lenbits = ((insn >> 22) & 1) << 1 | ((insn >> 15) & 1);   /* {bit22,bit15} */
-        uint32_t addr = cpdt_addr(uc, insn);
+        uint32_t addr = cpdt_addr(uc, insn, pc);
         if (cpnum == 2) {                              /* LFM / SFM: multiple registers, 12 B each */
             static const int CNT[4] = {4, 1, 2, 3};
             int count = CNT[lenbits];
