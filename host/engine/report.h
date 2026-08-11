@@ -61,6 +61,10 @@ int me_report_ingest_guest(const char *buf, size_t len);
    (per-title). Best-effort; never aborts the run. */
 void me_report_flush_json(const char *path);
 
+/* Same document, into a malloc'd buffer the caller frees. Used by the control channel, which needs
+   it in-process (and cannot use open_memstream: MinGW has none). */
+void me_report_json_buf(char **out, size_t *outlen);
+
 /* Drop all accumulated events (called when a new game is loaded, so each title's report is
    its own). */
 void me_report_reset(void);

@@ -71,6 +71,28 @@ void map_region(uint32_t addr, uint32_t size, uint32_t perms) {
 
 int mem_nreg(void) { return g_nreg; }   /* diagnostics: region-registry occupancy (cap = array size) */
 
+/* Snapshot the region registry for an external inspector (the control channel). g_reg is
+   file-static and the array is mutated under g_reg_lock by every mapping op, so a caller can
+   neither walk it nor hold a pointer into it -- it must take a copy. Returns the number written
+   (<= cap); pass cap == 0 to just count. */
+int mem_regions(struct me_region *out, int cap) {
+    REGLOCK_LOCK();
+    int n = g_nreg;
+    if (out && cap > 0) {
+        if (n > cap) n = cap;
+        for (int i = 0; i < n; i++) {
+            out[i].addr = g_reg[i].addr;
+            out[i].len = g_reg[i].len;
+            out[i].perms = g_reg[i].perms;
+            out[i].external = g_reg[i].external;
+        }
+    } else {
+        n = g_nreg;
+    }
+    REGLOCK_UNLOCK();
+    return n;
+}
+
 /* Host pointer backing guest address gaddr (for host-atomic ops, e.g. kuser cmpxchg). */
 void *guest_to_host(uint32_t gaddr) {
     REGLOCK_LOCK();

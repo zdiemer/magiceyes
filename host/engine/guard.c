@@ -124,6 +124,16 @@ int guarded_present(void) {
     return 0;
 }
 
+int guarded_ctl(void (*fn)(void *), void *arg) {
+    g_returned = 0;
+    RtlCaptureContext(&g_ctx);
+    if (g_returned) { guard_release_reglock(); return -1; }
+    g_armed = 1;
+    fn(arg);
+    g_armed = 0;
+    return 0;
+}
+
 void guard_init(void) { AddVectoredExceptionHandler(1, veh); }
 
 #else  /* ---- Linux: sigaction + per-thread siglongjmp ---- */
@@ -176,6 +186,14 @@ int guarded_present(void) {
     if (sigsetjmp(g_fjmp, 1)) { g_armed = 0; return -1; }
     g_armed = 1;
     present_active();
+    g_armed = 0;
+    return 0;
+}
+
+int guarded_ctl(void (*fn)(void *), void *arg) {
+    if (sigsetjmp(g_fjmp, 1)) { g_armed = 0; guard_release_reglock(); return -1; }
+    g_armed = 1;
+    fn(arg);
     g_armed = 0;
     return 0;
 }

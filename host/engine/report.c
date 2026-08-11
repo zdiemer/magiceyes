@@ -128,30 +128,56 @@ static void json_escape(FILE *f, const char *s) {
     }
 }
 
-void me_report_flush_json(const char *path) {
-    if (!path || !*path) path = g_mr_path;
-    if (!path || !*path) return;
-    pthread_mutex_lock(&g_mr_lock);
-    FILE *f = fopen(path, "w");
-    if (!f) { pthread_mutex_unlock(&g_mr_lock); return; }
+/* Build the report JSON into a malloc'd buffer. Shared by the file writer and the control channel
+   (which needs the same document in-process, and cannot use open_memstream -- MinGW has none). */
+void me_report_json_buf(char **out, size_t *outlen) {
+    *out = NULL;
+    if (outlen) *outlen = 0;
+    /* Bound: the table is fixed at 512 entries, each well under 256 bytes rendered. */
+    size_t cap = 512 + (size_t)g_nev * 300 + MR_KIND_COUNT * 48;
+    char *b = malloc(cap);
+    if (!b) return;
+    size_t o = 0;
     long counts[MR_KIND_COUNT] = {0};
-    fputs("{\n  \"events\": [\n", f);
+
+    pthread_mutex_lock(&g_mr_lock);
+    o += (size_t)snprintf(b + o, cap - o, "{\"events\":[");
     for (int i = 0; i < g_nev; i++) {
         struct mr_entry *e = &g_ev[i];
         counts[e->kind] += e->count;
-        fprintf(f, "    {\"kind\":\"%s\",\"code\":%ld,\"name\":\"",
-                me_report_kind_str(e->kind), e->code);
-        json_escape(f, e->name);
-        fprintf(f, "\",\"count\":%u,\"pc\":\"0x%08x\"}%s\n",
-                e->count, e->pc, i + 1 < g_nev ? "," : "");
+        o += (size_t)snprintf(b + o, cap - o, "%s{\"kind\":\"%s\",\"code\":%ld,\"name\":\"",
+                              i ? "," : "", me_report_kind_str(e->kind), e->code);
+        for (const char *s = e->name; *s && o + 8 < cap; s++) {
+            unsigned char c = (unsigned char)*s;
+            if (c == '"' || c == '\\')  o += (size_t)snprintf(b + o, cap - o, "\\%c", c);
+            else if (c == '\n')         o += (size_t)snprintf(b + o, cap - o, "\\n");
+            else if (c == '\t')         o += (size_t)snprintf(b + o, cap - o, "\\t");
+            else if (c < 0x20)          o += (size_t)snprintf(b + o, cap - o, "\\u%04x", c);
+            else                        b[o++] = (char)c;
+        }
+        o += (size_t)snprintf(b + o, cap - o, "\",\"count\":%u,\"pc\":\"0x%08x\"}", e->count, e->pc);
     }
-    fputs("  ],\n  \"counts\": {", f);
+    o += (size_t)snprintf(b + o, cap - o, "],\"counts\":{");
     int first = 1;
     for (int k = 0; k < MR_KIND_COUNT; k++) if (counts[k]) {
-        fprintf(f, "%s\"%s\":%ld", first ? "" : ", ", me_report_kind_str(k), counts[k]);
+        o += (size_t)snprintf(b + o, cap - o, "%s\"%s\":%ld",
+                              first ? "" : ",", me_report_kind_str(k), counts[k]);
         first = 0;
     }
-    fputs("}\n}\n", f);
-    fclose(f);
+    o += (size_t)snprintf(b + o, cap - o, "}}");
     pthread_mutex_unlock(&g_mr_lock);
+
+    *out = b;
+    if (outlen) *outlen = o;
+}
+
+void me_report_flush_json(const char *path) {
+    if (!path || !*path) path = g_mr_path;
+    if (!path || !*path) return;
+    char *buf = NULL; size_t len = 0;
+    me_report_json_buf(&buf, &len);
+    if (!buf) return;
+    FILE *f = fopen(path, "w");
+    if (f) { fwrite(buf, 1, len, f); fputc('\n', f); fclose(f); }
+    free(buf);
 }

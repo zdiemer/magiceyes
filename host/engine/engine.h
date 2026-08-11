@@ -26,6 +26,7 @@
 #include <elf.h>
 #include "gp2xshm.h"
 #include "report.h"   /* structured run telemetry (me_report / me_report_flush_json) */
+#include "ctl.h"      /* debug control channel (ME_CTL); compiled out of release bundles */
 #include "paths.h"    /* portable, user-configurable storage roots (settings/firmware/cache) */
 
 /* ---- guest virtual memory layout ---- */
@@ -268,6 +269,24 @@ void dump_threads(const char *why);
    stack-scan backtrace both of them use. */
 void dump_threads_json(const char *path, const char *why);
 int  th_backtrace(struct thread *t, uint32_t *out, int cap);
+
+/* Snapshot of one guest memory region (mem.c owns the registry; see mem_regions). */
+struct me_region { uint32_t addr, len; int perms, external; };
+int mem_regions(struct me_region *out, int cap);
+
+/* Outermost lock: serialises the helper thread's present against reload teardown, and is taken by
+   the control channel around any guest-memory read for the same reason (defined in main.c). */
+extern pthread_mutex_t g_present_lock;
+
+/* MLC palette reconstructed from the write-only hardware port (gp2x_device.c). The only place an
+   8-bit title's palette is observable -- it never survives in guest RAM. */
+extern uint8_t g_pal[256][3];
+extern int g_pal_have;
+
+/* Run fn(arg) with the host-fault guard armed on THIS thread, releasing g_reg_lock if it faults.
+   Same shape as guarded_present; used by the control channel, which touches guest memory from a
+   non-guest thread and must not take the process down on a stale pointer. */
+int guarded_ctl(void (*fn)(void *), void *arg);
 void deliver_signals(void);
 long send_sig(int pid, int sig);
 

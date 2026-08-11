@@ -65,9 +65,10 @@ int g_shutdown = 0;   /* real quit (ends helper+viewer); g_exit is the transient
 int g_reloading = 0;  /* a reset/reload is in flight -> the helper thread skips present */
 /* Serialises the helper thread's framebuffer present against engine_reset_and_load's teardown,
    so present_active() can never dereference guest-RAM host pointers while mem_reset() is
-   munmapping them. The outermost lock (only ever co-held by helper-vs-teardown, which are
-   mutually exclusive) -> no ordering inversion with g_biglock/g_reg_lock. */
-static pthread_mutex_t g_present_lock = PTHREAD_MUTEX_INITIALIZER;
+   munmapping them. The outermost lock -> no ordering inversion with g_biglock/g_reg_lock.
+   Also taken by the control channel (ctl.c) around any guest-memory read, for exactly the same
+   reason: a reload munmaps every host backing, and ctl runs on its own thread. */
+pthread_mutex_t g_present_lock = PTHREAD_MUTEX_INITIALIZER;
 int g_reload_chdir = 0;   /* File->Open: chdir to the new game's dir; GPEComp re-exec: keep cwd */
 char g_reload_path[PATH_MAX] = {0};   /* non-empty -> the main loop resets + loads this binary */
 int g_trace = 0;
@@ -307,6 +308,7 @@ static void print_usage(const char *p0) {
         "      --debug        heavy logging: structured run report + fps profiling (ME_DEBUG)\n"
         "      --report P     write the structured run report (JSON) to path P (ME_REPORT)\n"
         "      --run-secs N   run for N seconds then exit cleanly (ME_RUN_SECS; for headless tests)\n"
+        "      --ctl PORT     debug control channel on 127.0.0.1:PORT, 0 = ephemeral (ME_CTL)\n"
         "  -h, --help         show this help\n"
         "      --version      show version\n", p0);
 }
@@ -466,6 +468,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--install-firmware"))               { if (++i < argc) fw_install = argv[i]; }
         else if (!strcmp(a, "--report"))                         { if (++i < argc) setenv("ME_REPORT", argv[i], 1); }
         else if (!strcmp(a, "--run-secs"))                       { if (++i < argc) setenv("ME_RUN_SECS", argv[i], 1); }
+        else if (!strcmp(a, "--ctl"))                            { if (++i < argc) setenv("ME_CTL", argv[i], 1); }
         else { fprintf(stderr, "magiceyes: unknown option '%s'\n", a); print_usage(argv[0]); return 2; }
     }
     if (g_view_scale < 1) g_view_scale = 1;
@@ -551,6 +554,9 @@ int main(int argc, char **argv) {
     atexit(syscalls_flush_all);   /* flush saved game data on every exit path (headless too) */
     threads_init();
     shm_setup();
+    /* Control channel (ME_CTL): after shm_setup so frame.get has a buffer to serve, but before the
+       first load so a client can attach and watch the very first game come up. No-op when unset. */
+    ctl_init();
 
     uint32_t entry = 0;
     if (bin) {
