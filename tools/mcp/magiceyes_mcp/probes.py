@@ -197,13 +197,30 @@ MMSP2_REGS = {
     0x3b42: ("ARM940_REG", "second-core register"),
     0x3b48: ("ARM940_REG", "second-core register"),
 }
-# (lo, hi, name, doc, only_on_device)
+# (lo, hi, name, doc, devices_it_exists_on)
 MMSP2_RANGES = [
     (0x2800, 0x295f, "MLC", "multi-layer controller config", None),
-    # Pollux-only. The GP2X's MMSP2 has something else entirely at 0x4000, so labelling this range
-    # for a GP2X title is actively misleading -- it was, until decode_mmio learned the device.
-    (0x4000, 0x44b8, "POLLUX_MLC", "Caanoo/Pollux MLC block (HSTRIDE/VSTRIDE/scanout)", "caanoo"),
+    # Pollux silicon (Wiz AND Caanoo). The GP2X's MMSP2 has something else entirely at 0x4000, so
+    # labelling this range for a GP2X title is actively misleading -- it was, until decode_mmio
+    # learned the device.
+    (0x4000, 0x44b8, "POLLUX_MLC", "Pollux MLC block (layer stride/scanout)", ("wiz", "caanoo")),
 ]
+
+# Individual Pollux MLC layer registers, from the decode in devices.c caanoo_mlc_write(). Layer 1
+# is what the firmware menu uses (24bpp RGB888).
+POLLUX_MLC_REGS = {
+    0x4000: "MLC_CONTROLT",   0x4004: "MLC_SCREENSIZE",
+    0x400c: "MLC_LEFTRIGHT0", 0x4010: "MLC_TOPBOTTOM0",
+    0x4024: "MLC_CONTROL0",   0x4028: "MLC_HSTRIDE0", 0x402c: "MLC_VSTRIDE0",
+    0x4038: "MLC_ADDRESS0",
+    0x4040: "MLC_LEFTRIGHT1", 0x4044: "MLC_TOPBOTTOM1",
+    0x4058: "MLC_CONTROL1",   0x405c: "MLC_HSTRIDE1", 0x4060: "MLC_VSTRIDE1",
+    0x406c: "MLC_ADDRESS1",
+}
+
+# The engine only ACTS on the Pollux MLC range when g_device == Caanoo (devices.c). A Wiz title
+# touching it would fall through to an unknown_mmio report even though the hardware has the block.
+POLLUX_HANDLED_ON = "caanoo"
 BLITTER_BASE = 0xE0020000
 BLITTER_REGS = {0x34: ("MESG_STATUS", "writing BUSY here triggers the blit")}
 
@@ -227,21 +244,28 @@ def decode_mmio(addr: int, device: str | None = None) -> dict:
         name, doc = MMSP2_REGS[off]
         return {"addr": hex(a), "block": "MMSP2 (phys 0xC0000000)", "offset": hex(off),
                 "name": name, "doc": doc}
-    for lo, hi, name, doc, only_dev in MMSP2_RANGES:
+    for lo, hi, name, doc, on_devs in MMSP2_RANGES:
         if not (lo <= off <= hi):
             continue
         r = {"addr": hex(a), "block": "MMSP2 (phys 0xC0000000)", "offset": hex(off),
              "name": f"{name}+0x{off - lo:x}", "doc": doc,
              "note": "in a known range but not individually decoded"}
-        if only_dev and dev and dev != only_dev:
-            r["name"] = "unknown"
-            r["doc"] = (f"NOT decoded for this device: 0x{lo:x}-0x{hi:x} is the {name} block on "
-                        f"{only_dev} only, and this title is {dev}. The same offset is something "
-                        f"else on this hardware.")
+        if name == "POLLUX_MLC" and off in POLLUX_MLC_REGS:
+            r["name"] = POLLUX_MLC_REGS[off]
             r.pop("note", None)
-        elif only_dev and not dev:
-            r["note"] = (f"only valid on {only_dev}; pass the session's device to disambiguate "
-                         f"(the same offset differs on other hardware)")
+        if on_devs and dev and dev not in on_devs:
+            r["name"] = "unknown"
+            r["doc"] = (f"NOT this block on {dev}: 0x{lo:x}-0x{hi:x} is the {name} on "
+                        f"{'/'.join(on_devs)} only. The same offset is different silicon here.")
+            r.pop("note", None)
+        elif on_devs and not dev:
+            r["note"] = (f"only exists on {'/'.join(on_devs)}; pass the session (or device) to "
+                         f"disambiguate -- the same offset differs on other hardware")
+        elif name == "POLLUX_MLC" and dev and dev != POLLUX_HANDLED_ON:
+            # Hardware has it, but the engine's handler is gated on Caanoo (devices.c), so a Wiz
+            # title touching it still lands in the run report as unknown_mmio.
+            r["note"] = (f"the engine only acts on this block for {POLLUX_HANDLED_ON} titles, so "
+                         f"on {dev} it will still be reported as unknown_mmio")
         return r
     return {"addr": hex(a), "block": "MMSP2 (phys 0xC0000000)", "offset": hex(off),
             "name": "unknown",
