@@ -19,6 +19,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Image
 
 from . import audio as audio_mod
+from . import ctl as ctl_mod
 from . import env, probes, screen  # env must precede shmlib (package __init__ sets sys.path)
 from .session import SessionManager
 
@@ -272,6 +273,88 @@ def perf(session: str | None = None) -> dict:
 def decode_mmio(addr: str) -> dict:
     a = int(addr, 0) if isinstance(addr, str) else int(addr)
     return probes.decode_mmio(a)
+
+
+# --------------------------------------------------------------------------- live inspection
+@mcp.tool(description="Read guest memory as a hex+ASCII dump. Addresses accept 0x form. This reads "
+                      "the live address space through the engine's control channel -- no rebuild, "
+                      "no printf. An unmapped range is an error and never allocates.")
+def memory_read(addr: str, length: int = 256, session: str | None = None) -> dict:
+    s = MGR.get(session)
+    a = int(addr, 0) if isinstance(addr, str) else int(addr)
+    hdr, blob = s.ctl().call("mem.read", addr=a, len=int(length))
+    if not hdr.get("ok"):
+        return {"ok": False, "addr": hex(a), "error": hdr.get("err"),
+                "detail": hdr.get("detail"),
+                "hint": "memory_map lists what is actually mapped"}
+    return {"ok": True, "addr": hex(a), "length": len(blob),
+            "dump": ctl_mod.hexdump(blob, base=a),
+            "hex": blob[:64].hex()}
+
+
+@mcp.tool(description="The guest memory map: every mapped region with size, permissions and a "
+                      "label for well-known areas (stack, mmap arena, ld.so, kuser page).")
+def memory_map(session: str | None = None) -> dict:
+    s = MGR.get(session)
+    hdr = s.ctl().ok("mem.map")
+    regs = []
+    for r in hdr["regions"]:
+        regs.append({"addr": "0x%08x" % r["addr"], "size": r["len"],
+                     "end": "0x%08x" % (r["addr"] + r["len"]),
+                     "perms": ctl_mod.PERM_NAMES.get(r["perms"], str(r["perms"])),
+                     "external": r["external"],
+                     "label": ctl_mod.label_region(r["addr"])})
+    regs.sort(key=lambda r: int(r["addr"], 16))
+    return {"count": hdr["count"], "regions": regs,
+            "total_bytes": sum(r["size"] for r in regs)}
+
+
+@mcp.tool(description="Live per-thread CPU state over the control channel: r0-r15, cpsr, the FPA "
+                      "register file, signal masks and a bl/blx-validated backtrace. Registers are "
+                      "read from running CPUs, so they are a torn peek, not a snapshot.")
+def cpu_state(session: str | None = None) -> dict:
+    s = MGR.get(session)
+    hdr = s.ctl().ok("threads")
+    out = []
+    for t in hdr["threads"]:
+        r = t["regs"]
+        out.append({
+            "tid": t["tid"], "state": t["state"], "has_cpu": t["has_cpu"],
+            "pc": "0x%08x" % r[15], "lr": "0x%08x" % r[14], "sp": "0x%08x" % r[13],
+            "cpsr": "0x%08x" % r[16],
+            "r": ["0x%08x" % v for v in r[:13]],
+            "last_syscall_pc": "0x%08x" % t["last_pc"],
+            "fpa": t["fpa"], "fpsr": t["fpsr"],
+            "sig_pending": t["sig_pending"], "sig_blocked": t["sig_blocked"],
+            "backtrace": ["0x%08x" % v for v in t["ra"]],
+        })
+    return {"nth": hdr["nth"], "stale": hdr.get("stale", True),
+            "note": hdr.get("note"), "threads": out}
+
+
+@mcp.tool(description="Live device state: framebuffer pointers and flip mode, MMSP2/blitter "
+                      "mapping, audio format, and the reconstructed MLC palette. The palette port "
+                      "is write-only on real hardware, so this is the only place it is visible.")
+def device_state(session: str | None = None, include_palette: bool = False) -> dict:
+    s = MGR.get(session)
+    hdr = s.ctl().ok("dev.state")
+    out = {
+        # bool before int: isinstance(False, int) is True in Python, which would render the
+        # engine's flip_active/oadr_driven flags as "0x00000000".
+        "framebuffer": {k: (v if isinstance(v, bool) else
+                            "0x%08x" % v if isinstance(v, int) else v)
+                        for k, v in hdr["fb"].items()},
+        "mmsp2_guest": "0x%08x" % hdr["mmsp2_guest"],
+        "blitter_guest": "0x%08x" % hdr["blit_guest"],
+        "audio": hdr["audio"],
+        "palette_captured": hdr["palette_captured"],
+        "counters": hdr["counters"],
+    }
+    if include_palette and hdr.get("palette"):
+        out["palette"] = ["#%06x" % c for c in hdr["palette"]]
+    elif hdr["palette_captured"]:
+        out["palette_note"] = "256 entries captured; pass include_palette=true to see them"
+    return out
 
 
 # --------------------------------------------------------------------------- corpus

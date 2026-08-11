@@ -98,6 +98,7 @@ class Session:
         return st
 
     def stop(self, timeout: float = 5.0) -> dict:
+        self.ctl_close()
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -126,6 +127,27 @@ class Session:
     def threads_path(self) -> Path:  return self.dir / "threads.json"
     @property
     def rec_path(self) -> Path:      return self.dir / "session.rec"
+    @property
+    def ctl_portfile(self) -> Path:  return self.dir / "ctl.port"
+
+    def ctl(self):
+        """Lazily connect to this engine's control channel, reconnecting if it dropped."""
+        from .ctl import Ctl
+        c = getattr(self, "_ctl", None)
+        if c is not None:
+            return c
+        if not self.alive():
+            raise RuntimeError(f"session {self.sid} engine is not running (exit "
+                               f"{self.proc.poll()}); start a new session")
+        c = Ctl.from_portfile(self.ctl_portfile)
+        self._ctl = c
+        return c
+
+    def ctl_close(self):
+        c = getattr(self, "_ctl", None)
+        if c is not None:
+            c.close()
+            self._ctl = None
 
     def write_recording(self) -> Path:
         """Emit the injected input in host/viewer.c's .rec format, so it replays through the same
@@ -214,6 +236,10 @@ class SessionManager:
             "ME_RUN_SECS": str(budget_secs),          # dead-man switch; not extendable at runtime
             "ME_AUDIO_DUMP": str(sdir / "audio.pcm"),  # lossless tap (engine-side, pre-ring-drop)
             "ME_THREADDUMP_JSON": str(sdir / "threads.json"),
+            # Ephemeral control port, published to a file: no fixed port to collide on, and it is
+            # how a console-less bundle can be found too.
+            "ME_CTL": "0",
+            "ME_CTL_PORTFILE": str(sdir / "ctl.port"),
         })
         if debug:
             e["ME_REPORT"] = str(sdir / "report.json")

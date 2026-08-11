@@ -28,6 +28,7 @@ Then restart Claude Code so it picks up `.mcp.json`, and call `engine_health` fi
 | Audio | `audio_analyze` |
 | Diagnostics | `run_report` `log_tail` `threads` |
 | Probes | `list_probes` `probe_results` `perf` `decode_mmio` |
+| Live inspection | `memory_read` `memory_map` `cpu_state` `device_state` |
 | Corpus | `list_games` |
 | Harness | `run_title` `baseline_check` |
 
@@ -98,10 +99,29 @@ auto-mount network drives and the mount does not survive a WSL restart, so `run.
 `ensure_corpus_mount()` re-establish it. The older local `F:\Roms` corpus is still exposed as
 `legacy_gp2x` / `legacy_caanoo`; the committed baselines were recorded from those paths.
 
+## Live inspection
+
+`memory_read`, `memory_map`, `cpu_state` and `device_state` go through the engine's control channel
+(`host/engine/ctl.c`), so they read the running address space with no rebuild and no printf. Each
+session gets an ephemeral port published to `ctl.port`, so nothing collides.
+
+```
+memory_map()                        → mapped regions, labelled (stack, mmap arena, ld.so, kuser)
+memory_read("0x8000", 64)           → hex+ASCII dump of live guest memory
+cpu_state()                         → r0-r15, cpsr, the FPA file, signal masks, backtrace
+device_state(include_palette=true)  → framebuffer/flip mode, audio format, the MLC palette
+```
+
+Two honesty notes carried through from the engine: registers are read from CPUs that may be
+executing, so `cpu_state` is a torn peek and says so (`stale: true`) — there is no pause primitive
+yet. And an unmapped `memory_read` is an error rather than a zero-fill, because a debugger probing
+a pointer must never silently change the guest address space.
+
+The channel is compiled out of release Windows bundles (guarded on `ME_BUNDLED && !ME_DEV`), so
+`bin/magiceyes.exe` has no listening socket; use `bin/magiceyes-dev.exe`.
+
 ## Scope
 
-This is the no-engine-changes layer: it drives the emulator from outside via the shm contract plus
-the engine's existing env-gated diagnostics. Live guest memory, registers, breakpoints and
-single-step need the engine-side control channel, which is a later phase. Note the Windows bundle
-(`bin/magiceyes.exe`) is **not** reachable from here at all — under `ME_BUNDLED` the shm is a private
-in-process mapping (`devices.c`), so it needs that control channel too.
+Not yet built: pause/resume, single-step, breakpoints, watchpoints and symbol resolution. Driving
+the Windows bundle from here also still needs work — the tools launch Linux engines today, and only
+`magiceyes-dev.exe` carries the channel.
