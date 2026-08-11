@@ -144,6 +144,44 @@ int sym_load_image(const char *host_path, uint32_t bias, const char *label) {
     return n;
 }
 
+/* A shared library has just been mapped executable at `map_base` (from the mmap2 that ld.so
+   issued). Work out its load bias from its own program headers -- for a normal ET_DYN the lowest
+   PT_LOAD p_vaddr is 0 so the bias is the base, but computing it properly costs nothing and is
+   correct for a prelinked object too -- then index its symbols at that bias. */
+static char g_loaded[IMG_MAX][PATH_MAX];
+static int  g_nloaded = 0;
+
+void sym_note_lib(const char *host_path, uint32_t map_base) {
+    if (!host_path || !*host_path || !map_base) return;
+    for (int i = 0; i < g_nloaded; i++)              /* ld.so maps each object several times */
+        if (!strcmp(g_loaded[i], host_path)) return;
+    if (g_nloaded < IMG_MAX) snprintf(g_loaded[g_nloaded++], PATH_MAX, "%s", host_path);
+
+    FILE *f = fopen(host_path, "rb");
+    if (!f) return;
+    Elf32_Ehdr eh;
+    if (fread(&eh, 1, sizeof eh, f) != sizeof eh ||
+        memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 || !eh.e_phoff || !eh.e_phnum) {
+        fclose(f); return;
+    }
+    uint32_t lowest = 0xffffffffu;
+    if (fseek(f, (long)eh.e_phoff, SEEK_SET) == 0) {
+        for (int i = 0; i < eh.e_phnum; i++) {
+            Elf32_Phdr ph;
+            if (fread(&ph, 1, sizeof ph, f) != sizeof ph) break;
+            if (ph.p_type == PT_LOAD && ph.p_vaddr < lowest) lowest = ph.p_vaddr;
+        }
+    }
+    fclose(f);
+    if (lowest == 0xffffffffu) return;
+    /* ET_EXEC is loaded at its own fixed addresses -- no bias. */
+    uint32_t bias = (eh.e_type == ET_DYN) ? map_base - lowest : 0;
+    int n = sym_load_image(host_path, bias, host_path);
+    if (n && g_trace)
+        fprintf(stderr, "  [sym] %s base=%08x bias=%08x -> %d symbols\n",
+                host_path, map_base, bias, n);
+}
+
 int sym_lookup(uint32_t addr, const char **name, uint32_t *off, const char **image) {
     sort_index();
     if (!g_nsym || !g_order) return 0;
@@ -192,7 +230,7 @@ int sym_iter(int i, uint32_t *addr, const char **name, const char **image) {
 }
 
 void sym_reset(void) {
-    g_nsym = 0; g_nimg = 0; g_arena_len = 0; g_sorted = 0;
+    g_nsym = 0; g_nimg = 0; g_arena_len = 0; g_sorted = 0; g_nloaded = 0;
     free(g_order); g_order = NULL;
     /* keep the arena allocation for the next title */
 }

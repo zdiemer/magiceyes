@@ -663,17 +663,36 @@ static uint32_t path_ino(const char *hp) {
     for (const unsigned char *p = (const unsigned char *)hp; *p; p++) { h ^= *p; h *= 16777619u; }
     return h ? h : 1u;
 }
-static void hostfd_track(int fd, uint32_t ino) {
+/* The host path behind each tracked fd. Needed because a shared library's LOAD BASE is only
+   observable at mmap2 time, where all we have is the fd -- and the debugger cannot symbolise
+   anything in a .so without knowing which file landed at which address. (ME_MMAPLOG used
+   /proc/self/fd for this, which is Linux-only; this works on both platforms.) */
+static char *g_hostfd_path[HOSTFD_MAX];
+static void hostfd_track_path(int fd, uint32_t ino, const char *hp) {
     if (fd < 0) return;
-    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] < 0) { g_hostfd[i] = fd; g_hostfd_ino[i] = ino; return; }
-    if (g_nhostfd < HOSTFD_MAX) { g_hostfd[g_nhostfd] = fd; g_hostfd_ino[g_nhostfd] = ino; g_nhostfd++; }
+    int slot = -1;
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] < 0) { slot = i; break; }
+    if (slot < 0 && g_nhostfd < HOSTFD_MAX) slot = g_nhostfd++;
+    if (slot < 0) return;
+    g_hostfd[slot] = fd; g_hostfd_ino[slot] = ino;
+    free(g_hostfd_path[slot]);
+    g_hostfd_path[slot] = hp ? strdup(hp) : NULL;
+}
+static const char *hostfd_path(int fd) {
+    for (int i = 0; i < g_nhostfd; i++)
+        if (g_hostfd[i] == fd) return g_hostfd_path[i];
+    return NULL;
 }
 static uint32_t hostfd_ino(int fd) {
     for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) return g_hostfd_ino[i];
     return 0;
 }
 static void hostfd_untrack(int fd) {
-    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) { g_hostfd[i] = -1; return; }
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) {
+        g_hostfd[i] = -1;
+        free(g_hostfd_path[i]); g_hostfd_path[i] = NULL;
+        return;
+    }
 }
 /* Flush every tracked host file to disk (called on quit, and by sync()). Cannot reach buffers
    the guest's own glibc still holds in guest RAM -- only data already write()-en to the host. */
@@ -858,13 +877,27 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         int fd = (m[4] == 0xffffffffu) ? -1 : (int)m[4], t = dev_type(fd);
         if (t == DEV_SHMFB) return shmfb_mmap(m[1]);
         if (t) return dev_mmap(t, m[0], m[1], m[3], m[5]);
-        return do_mmap(m[0], m[1], m[3], fd, m[5]);
+        long r = do_mmap(m[0], m[1], m[3], fd, m[5]);
+        /* glibc 2.3.6's ld.so (the Wiz/GP2X rootfs) loads shared objects through old_mmap, NOT
+           mmap2 -- hooking only mmap2 indexed no libraries at all. m[5] is a BYTE offset here. */
+        if (fd >= 0 && m[5] == 0 && r > 0 && (long)r < 0x7fffffffL)
+            sym_note_lib(hostfd_path(fd), (uint32_t)r);
+        return r;
     }
     case 192: { /* mmap2: a4=fd, a5=pgoff (4096 units) */
         int fd = (a4 == 0xffffffffu) ? -1 : (int)a4, t = dev_type(fd);
         if (t == DEV_SHMFB) return shmfb_mmap(a1);
         if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
         long r = do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
+        /* ld.so maps a shared object at file offset 0 to establish its load base -- the one moment
+           the debugger can learn where a .so landed, since nothing records it afterwards. Index it
+           so backtraces through library code resolve.
+           Keyed on offset 0 alone rather than on PROT_EXEC: mmap2's prot is a2 and its flags are
+           a3 (see do_mmap's signature), and depending on ld.so's exact protection for the initial
+           mapping is fragile anyway. sym_note_lib validates the ELF magic, so a non-ELF file
+           mapped at offset 0 is simply ignored. */
+        if (fd >= 0 && a5 == 0 && r > 0 && (long)r < 0x7fffffffL)
+            sym_note_lib(hostfd_path(fd), (uint32_t)r);
         if (fd >= 0 && getenv("ME_MMAPLOG")) { /* file-backed map: print base+len+fd(+path) for the lib layout */
             char lp[256] = "?";
 #ifndef _WIN32                                 /* /proc/self/fd readlink is a Linux-only triage aid */
@@ -1141,7 +1174,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
         if (getenv("ME_OPENLOG")) { char b[1300]; snprintf(b, sizeof b,
             "OPEN '%s' [%s] flags=%x -> %ld%s\n", p, hp, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
-        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track((int)r, path_ino(hp)); return r; }
+        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track_path((int)r, path_ino(hp), hp); return r; }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
         if (e2 == ENOENT && ++g_self->enoent_streak > 3) {
@@ -1165,7 +1198,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
               int dfd = dirfd_make(orig_d ? hp : NULL, ov_d ? ov : NULL);
               if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a2), a3);
-        if (r >= 0) { hostfd_track((int)r, path_ino(hp)); return r; }
+        if (r >= 0) { hostfd_track_path((int)r, path_ino(hp), hp); return r; }
         return LERR(errno);
     }
     case 6:    /* close */
