@@ -373,6 +373,61 @@ int thread_alloc(void) {
 }
 
 /* ---- diagnostics ---------------------------------------------------------- */
+
+/* PRECISE call chain: a stack word W is a real ARM return address only if the instruction at W-4
+   is a bl (0xeb......) or blx-imm (0xfa/0xfb......). Filters out data that merely looks like a
+   .text address. Scans both the main binary and the loaded libs. Extracted so the stderr dump and
+   the JSON dump (and, later, the control channel) share ONE copy of the heuristic -- these games
+   are mostly stripped statics, so this scan is frequently the only backtrace available. */
+int th_backtrace(struct thread *t, uint32_t *out, int cap) {
+    int n = 0;
+    uint32_t sp = 0;
+    if (!t || !t->uc || !out || cap <= 0) return 0;
+    uc_reg_read(t->uc, UC_ARM_REG_SP, &sp);
+    for (int k = 0; k < 256 && n < cap; k++) {
+        uint32_t w = 0;
+        uc_mem_read(t->uc, sp + k * 4, &w, 4);
+        if (!(w & 3) && w >= 0x8000 && w < 0x71000000) {      /* word-aligned, in the code arena */
+            uint32_t insn = 0;
+            if (uc_mem_read(t->uc, w - 4, &insn, 4) == UC_ERR_OK) {
+                uint32_t top = insn >> 24;
+                if (top == 0xeb || top == 0xfa || top == 0xfb) out[n++] = w;   /* bl / blx imm */
+            }
+        }
+    }
+    return n;
+}
+
+/* ME_THREADDUMP_JSON=<path>: the same snapshot dump_threads() prints, as machine-readable JSON so
+   a harness/agent can reason about a hang (futex pile-ups, a worker stuck mid-syscall) instead of
+   scraping stderr. Includes the FPA file, which is only readable cross-thread now that it lives in
+   struct thread. Rewritten in full each time; best-effort, never aborts the run. */
+void dump_threads_json(const char *path, const char *why) {
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    static const char *sn[] = {"FREE","RUN","BLOCKED","SLEEPING","DEAD"};
+    fprintf(f, "{\"why\":\"%s\",\"nth\":%d,\"threads\":[", why ? why : "", g_nth);
+    for (int i = 0; i < g_nth; i++) {
+        struct thread *t = &g_th[i];
+        uint32_t rg[17] = {0};
+        if (t->uc) for (int k = 0; k < 17; k++) uc_reg_read(t->uc, g_sregs[k], &rg[k]);
+        fprintf(f, "%s{\"i\":%d,\"tid\":%d,\"ppid\":%d,\"state\":\"%s\",\"last_pc\":%u,"
+                   "\"sig_pending\":%llu,\"sig_blocked\":%llu,\"regs\":[",
+                i ? "," : "", i, t->tid, t->ppid, sn[t->state & 7], t->last_pc,
+                (unsigned long long)t->sig_pending, (unsigned long long)t->sig_blocked);
+        for (int k = 0; k < 17; k++) fprintf(f, "%s%u", k ? "," : "", rg[k]);
+        fprintf(f, "],\"fpa\":[");
+        for (int k = 0; k < 8; k++) fprintf(f, "%s%.17g", k ? "," : "", t->fpa[k]);
+        fprintf(f, "],\"fpsr\":%u,\"ra\":[", t->fpsr);
+        uint32_t ra[32];
+        int n = th_backtrace(t, ra, 32);
+        for (int k = 0; k < n; k++) fprintf(f, "%s%u", k ? "," : "", ra[k]);
+        fprintf(f, "]}");
+    }
+    fprintf(f, "]}\n");
+    fclose(f);
+}
+
 void dump_threads(const char *why) {
     static const char *sn[] = {"FREE","RUN","BLOCKED","SLEEPING","DEAD"};
     fprintf(stderr, "== threads (%s) nth=%d ==\n", why, g_nth);
@@ -396,21 +451,10 @@ void dump_threads(const char *why) {
             uint32_t w = 0; uc_mem_read(t->uc, sp + k * 4, &w, 4);
             if (w >= 0x8100 && w < 0x19bc00) fprintf(stderr, " %08x", w);
         }
-        /* PRECISE call chain: a stack word W is a real ARM return address only if the instruction
-           at W-4 is a bl (0xeb......) or blx-imm (0xfa/0xfb......). Filters out data that merely
-           looks like a .text address. Scans both the main binary and the loaded libs. */
-        fprintf(stderr, "\n      ra:");
-        for (int k = 0; t->uc && k < 256; k++) {
-            uint32_t w = 0; uc_mem_read(t->uc, sp + k * 4, &w, 4);
-            if (!(w & 3) && w >= 0x8000 && w < 0x71000000) {   /* word-aligned, in code arena */
-                uint32_t insn = 0;
-                if (uc_mem_read(t->uc, w - 4, &insn, 4) == UC_ERR_OK) {
-                    uint32_t top = insn >> 24;
-                    if (top == 0xeb || top == 0xfa || top == 0xfb)   /* bl / blx imm */
-                        fprintf(stderr, " %08x", w);
-                }
-            }
-        }
+        fprintf(stderr, "\n      ra:");   /* bl/blx-validated call chain -- see th_backtrace() */
+        uint32_t ra[64];
+        int nra = th_backtrace(t, ra, 64);
+        for (int k = 0; k < nra; k++) fprintf(stderr, " %08x", ra[k]);
         fprintf(stderr, "\n");
     }
     looppc_dump();   /* ME_LOOPPC: hot block PCs since the last dump (the frozen loop body) */

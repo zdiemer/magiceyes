@@ -237,6 +237,14 @@ static void *helper_thread(void *arg) {
             pm = g_uc_newmap; pu = g_uc_unmap;
         }
         if (g_threaddump && now - tdp >= 2.0) { tdp = now; dump_threads("periodic"); }
+        /* ME_THREADDUMP_JSON: same snapshot, machine-readable, refreshed on the same 2s cadence so
+           a harness can poll a hung title's thread state without parsing stderr. Independent of
+           ME_THREADDUMP so it can be used alone. */
+        {
+            static const char *tdj = NULL; static int tdj_checked = 0; static double tdj_t = 0;
+            if (!tdj_checked) { tdj_checked = 1; tdj = getenv("ME_THREADDUMP_JSON"); }
+            if (tdj && *tdj && now - tdj_t >= 2.0) { tdj_t = now; dump_threads_json(tdj, "periodic"); }
+        }
         /* Flush the JSON report periodically so even a hard kill leaves a recent snapshot on disk
            (the harness imposes ME_RUN_SECS for a clean exit, but be robust anyway). */
         if (me_report_active() && now - rpt_t >= 3.0) { rpt_t = now; me_report_flush_json(NULL); }
@@ -356,6 +364,11 @@ static void engine_reset_globals(void) {
     memset(g_sigact, 0, sizeof g_sigact);
     devices_reset();
     syscalls_reset();
+    /* Per-title run report: flush the outgoing title's events before dropping them, so a chain-load
+       (GPEComp re-exec, launcher script, File->Open) doesn't attribute the previous game's
+       unimplemented syscalls / unknown devices to the next one. Without the reset the table is
+       cumulative for the life of the process, which silently poisons any multi-title sweep. */
+    if (me_report_active()) { me_report_flush_json(NULL); me_report_reset(); }
 }
 
 /* The load-bearing primitive: tear down all guest state and (re)load a fresh ELF, keeping the

@@ -595,6 +595,34 @@ uint32_t aud_free(void) {
    slowed to real time, else it free-runs (~1000x) spinning on a full ring while holding
    its mixer mutex -> starves other threads waiting on that lock. */
 int g_prod_on = 0; double g_prod_t0 = 0; uint64_t g_prod_bytes = 0;
+
+/* ME_AUDIO_DUMP=<path>: append every PCM buffer the game hands /dev/dsp, captured BEFORE the ring's
+   drop-oldest policy below and independent of a_read. An external consumer polling g_shm->aring
+   cannot do this: dsp_write never blocks, so when the reader falls behind it silently discards the
+   oldest samples -- which makes "is the BGM actually static, or is my capture just lossy?"
+   unanswerable (exactly the question Her Knights' radio-static BGM poses). Raw PCM, matching the
+   FAKESDL_AUDIO_DUMP / ME_AUDIODUMP convention; <path>.meta records the format so the dump is still
+   decodable after the engine (and its shm header) is gone. One file per engine PROCESS: it is
+   deliberately left open across reloads (devices_reset does not touch it) rather than reopened,
+   since "wb" would truncate the outgoing title's audio at every GPEComp re-exec / File-Open. */
+static FILE *g_adump = NULL;
+static int   g_adump_tried = 0;
+static void adump_write(const uint8_t *pcm, uint32_t n) {
+    if (!g_adump_tried) {
+        g_adump_tried = 1;
+        const char *p = getenv("ME_AUDIO_DUMP");
+        if (p && *p && (g_adump = fopen(p, "wb"))) {
+            char mp[PATH_MAX]; FILE *m;
+            snprintf(mp, sizeof mp, "%s.meta", p);
+            if ((m = fopen(mp, "w"))) {   /* format is settled by dsp_ioctl before the first write */
+                fprintf(m, "freq %u\nchannels %u\nbits %u\n", g_aud_freq, g_aud_ch, g_aud_bits);
+                fclose(m);
+            }
+        }
+    }
+    if (g_adump) { fwrite(pcm, 1, n, g_adump); fflush(g_adump); }
+}
+
 long dsp_write(uint32_t gbuf, uint32_t n) {
     if (!g_shm) return n;
     aud_drain();                                   /* advance a_read by wall clock */
@@ -608,6 +636,7 @@ long dsp_write(uint32_t gbuf, uint32_t n) {
         g_shm->a_read += drop;
     }
     uint8_t *tmp = malloc(n); uc_mem_read(g_uc, gbuf, tmp, n);
+    adump_write(tmp, n);                           /* lossless tap: what the GAME produced */
     uint32_t w = g_shm->a_write % GP2XSHM_ARING, first = GP2XSHM_ARING - w;
     if (first > n) first = n;
     memcpy(g_shm->aring + w, tmp, first);

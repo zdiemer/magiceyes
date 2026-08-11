@@ -232,6 +232,9 @@ struct thread {
     uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
     int enoent_streak;      /* consecutive failed opens -> back off (music worker) */
     uint32_t last_pc;       /* diagnostics */
+    double   fpa[8];        /* FPA f0-f7 register file (fpa.c) -- see the note there on why this
+                               lives here rather than in __thread storage */
+    uint32_t fpsr;          /* FPA status register (WFS/RFS) */
 };
 struct sigact { uint32_t handler, flags, restorer; uint64_t mask; };
 struct snap { uint64_t begin; uint32_t len; uint8_t *data; };
@@ -261,6 +264,10 @@ void sigsuspend_wait(void);
 void threads_init(void);
 int thread_alloc(void);
 void dump_threads(const char *why);
+/* Machine-readable twin of dump_threads (ME_THREADDUMP_JSON), + the shared bl/blx-validated
+   stack-scan backtrace both of them use. */
+void dump_threads_json(const char *path, const char *why);
+int  th_backtrace(struct thread *t, uint32_t *out, int cap);
 void deliver_signals(void);
 long send_sig(int pid, int sig);
 

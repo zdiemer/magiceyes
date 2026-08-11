@@ -157,12 +157,32 @@ fix, without a window. Built on the standalone Linux engine (`bin/me_unicorn`).
 - **drvfs huge inodes** bite twice: the SDK toolchain (above) and the guest's 32-bit
   `fstat()` returning EOVERFLOW (fixed by truncating st_ino to 32 bits — was the Caanoo
   "QType4 font" wall). See `caanoo-gpu-emulation`.
+- **drvfs bites a third time — never BENCHMARK an engine that lives on `/mnt`.** All writable
+  state (`cache/` GPEComp scratch, `saves/`) resolves *beside the exe* (`paths.c`), so running
+  `bin/me_unicorn` from `/mnt/e` puts the decompress cache on drvfs. Measured with **byte-identical
+  binaries** (same sha256): Payback **21.4–23.6 fps from `/mnt/e` vs 26.7–27.8 fps from `/tmp`** —
+  a ~20% swing that silently flips `baseline.py` status tiers (`playable` ⇄ `renders`, since the
+  cutoff is 25 fps) and inflates `black_ratio` because the sampler catches the loading screen.
+  **Copy the engine to ext4 before any timing run**; the committed baselines assume ext4. There is
+  currently no env override for the cache root (`paths.c` reads only `paths.conf` beside the exe),
+  so relocating means moving the exe or writing a `paths.conf`.
 
 ## External assets (NOT in git)
 
 Large/firmware/game files live under `assets/` (gitignored), or point env vars at a
-shared dir (`MAGICEYES_ROOTFS`, `MAGICEYES_SDK`). On the operator's machine: `F:\Roms\GP2X`,
-`F:\Roms\GP2X Caanoo`, + Wiz firmware zip.
+shared dir (`MAGICEYES_ROOTFS`, `MAGICEYES_SDK`).
+
+**The corpus lives on `S:` — a NAS share, not a local disk.** `S:` = `\\192.168.4.36\games\Roms`
+(romnas), holding `S:\GP2X` (699), `S:\GP2X Wiz` (163) and `S:\GP2X Caanoo` (229) — ~1091 titles,
+vs the 32 in the older local `F:\Roms\GP2X` + `F:\Roms\GP2X Caanoo` (still present; the committed
+`tools/test/baselines/` were recorded from the F: paths). **WSL does not auto-mount network drives**
+— `/mnt` has only `c,d,e,f,g,h`, so `/mnt/s` must be mounted explicitly, and the mount does *not*
+survive into a new `wsl.exe` session:
+```sh
+sudo mkdir -p /mnt/s && sudo mount -t drvfs '\\192.168.4.36\games\Roms' /mnt/s   # ~56 MB/s
+```
+Use the UNC form (the `S:` drive-letter form depends on the mapping being visible to WSL init).
+Any tooling that sweeps the corpus must ensure this mount itself rather than assume it.
 - **Wiz rootfs**: extract `wiz_ubifs.img` with `ubireader_extract_files` → glibc/SDL/
   libstdc++ + real libinkadrm/libdrmcode → `assets/rootfs`.
 - **EABI rootfs** (`assets/rootfs-eabi`): Debian Wheezy armel + EABI-cross-built shim

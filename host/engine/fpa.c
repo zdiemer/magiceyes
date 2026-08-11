@@ -11,8 +11,15 @@
  * compares (CMF) -- NO arithmetic (verified by disassembly). So we emulate the coprocessor
  * data-transfer + compare classes against a per-thread 8-register file of host doubles; an
  * arithmetic op would be logged loudly (none observed). One register file per HOST thread =
- * one per guest thread (the native-threads model), so __thread is the natural storage and it
- * survives across the uc_emu_start restarts the invalid-insn hook forces.
+ * one per guest thread (the native-threads model), and it survives across the uc_emu_start
+ * restarts the invalid-insn hook forces.
+ *
+ * Storage note: the file lives in `struct thread` (engine.h), NOT in __thread storage. __thread
+ * is the natural fit for a per-guest-thread file and was the original choice, but it makes f0-f7
+ * reachable ONLY from the owning host thread -- so a debugger/control-channel thread reading
+ * another guest thread's floats gets its own zeroes instead. Since the FPA state is exactly what
+ * you need to see when chasing an FP bug (e93a525, 95f99c4 were both FPA bugs), it has to be
+ * addressable as g_th[i].fpa. g_self gives the same per-thread semantics as before.
  *
  * Encoding (derived from the FPA datasheet + verified against objdump of the actual libs):
  *  - CPDT (bits[27:25]=110): coproc# (bits[11:8]) 1 = LDF/STF (one reg), 2 = LFM/SFM (1..4 regs).
@@ -27,8 +34,13 @@
 
 __thread int g_fpa_resume = 0;          /* set by the hook: guarded_emu_start must restart */
 unsigned long g_fpa_n = 0, g_fpa_ops = 0;   /* diag: hook invocations + emulated-op count */
-static __thread double g_fpa[8];        /* the 8 FPA registers (host doubles) */
-static __thread uint32_t g_fpsr = 0;    /* FPA status register (WFS/RFS; flags cosmetic here) */
+/* The calling guest thread's record, which owns its FPA register file. g_self is set for the main
+   thread in engine_load_game() and for workers in thread_entry(), so on any thread that can trap
+   an FPA instruction it is non-NULL; the orphan file only keeps a stray non-guest caller total. */
+static struct thread *fpa_self(void) {
+    static struct thread s_orphan;
+    return g_self ? g_self : &s_orphan;
+}
 
 /* FPA immediate constants (operand bit3 set, index in bits[2:0]). */
 static const double FPA_CONST[8] = { 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.5, 10.0 };
@@ -76,6 +88,7 @@ static uint32_t cpdt_addr(uc_engine *uc, uint32_t insn, uint32_t pc) {
 /* Emulate one FPA instruction at the current PC. Returns 1 if it was an FPA instruction we
    handled (PC advanced), 0 if not FPA (let Unicorn raise the real invalid-instruction error). */
 static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
+    struct thread *ft = fpa_self();
     uint32_t cpsr = 0; uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
     int is_cpdt = (insn & 0x0e000000) == 0x0c000000;   /* bits[27:25]=110 */
     int is_cpro = (insn & 0x0f000000) == 0x0e000000;   /* bits[27:24]=1110 */
@@ -95,17 +108,17 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
             for (int i = 0; i < count; i++) {
                 int r = (Fd + i) & 7;
                 if (L) {                               /* LFM: our 12-B slot = 8-B double + 4 pad */
-                    double v = 0; uc_mem_read(uc, addr + i * 12, &v, 8); g_fpa[r] = v;
+                    double v = 0; uc_mem_read(uc, addr + i * 12, &v, 8); ft->fpa[r] = v;
                 } else {                               /* SFM */
-                    double v = g_fpa[r]; uint8_t z[4] = {0};
+                    double v = ft->fpa[r]; uint8_t z[4] = {0};
                     uc_mem_write(uc, addr + i * 12, &v, 8);
                     uc_mem_write(uc, addr + i * 12 + 8, z, 4);
                 }
             }
         } else {                                       /* LDF / STF: one register */
             if (lenbits == 0) {                        /* single (4 bytes, one word -- no swap) */
-                if (L) { float f = 0; uc_mem_read(uc, addr, &f, 4); g_fpa[Fd] = (double)f; }
-                else   { float f = (float)g_fpa[Fd]; uc_mem_write(uc, addr, &f, 4); }
+                if (L) { float f = 0; uc_mem_read(uc, addr, &f, 4); ft->fpa[Fd] = (double)f; }
+                else   { float f = (float)ft->fpa[Fd]; uc_mem_write(uc, addr, &f, 4); }
             } else {                                    /* double (8 bytes) / extended (12, top 8) */
                 /* ARM FPA stores a double WORD-SWAPPED: the high 32-bit word at the lower address
                    (mixed-endian), unlike a host little-endian double. Without swapping the two
@@ -113,8 +126,8 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
                    PC-relative literal constants) is garbage -> corrupted gameplay physics. */
                 if (L) { uint8_t b[8]; uc_mem_read(uc, addr, b, 8);
                          uint8_t s[8]; memcpy(s, b + 4, 4); memcpy(s + 4, b, 4);
-                         double d; memcpy(&d, s, 8); g_fpa[Fd] = d; }
-                else   { double d = g_fpa[Fd]; uint8_t s[8]; memcpy(s, &d, 8);
+                         double d; memcpy(&d, s, 8); ft->fpa[Fd] = d; }
+                else   { double d = ft->fpa[Fd]; uint8_t s[8]; memcpy(s, &d, 8);
                          uint8_t b[8]; memcpy(b, s + 4, 4); memcpy(b + 4, s, 4);
                          uc_mem_write(uc, addr, b, 8);
                          if (lenbits == 2) { uint8_t z[4] = {0}; uc_mem_write(uc, addr + 8, z, 4); } }
@@ -133,13 +146,13 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
     int op   = (insn >> 20) & 0xf;
     int Fd   = (insn >> 12) & 7;
     int Fn   = (insn >> 16) & 7;
-    double Fm = ((insn >> 3) & 1) ? FPA_CONST[insn & 7] : g_fpa[insn & 7];
+    double Fm = ((insn >> 3) & 1) ? FPA_CONST[insn & 7] : ft->fpa[insn & 7];
     int prec  = ((insn >> 19) & 1) << 1 | ((insn >> 7) & 1);   /* 0=S 1=D 2=E */
     int rmode = (insn >> 5) & 3;                               /* 0=near 1=+inf 2=-inf 3=zero */
 
     if (!bit4) {                                   /* CPDO: arithmetic */
         int monadic = (insn >> 15) & 1;
-        double a = g_fpa[Fn], r;
+        double a = ft->fpa[Fn], r;
         if (monadic) {
             switch (op) {
             case 0x0: r = Fm; break;                          /* MVF */
@@ -178,13 +191,13 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
             }
         }
         if (prec == 0) r = (double)(float)r;                  /* single-precision dest: round */
-        g_fpa[Fd] = r;
+        ft->fpa[Fd] = r;
         return 1;
     }
 
     /* bit4 = 1: register transfer / compare */
     if (op == 0x9 || op == 0xb || op == 0xd || op == 0xf) {   /* CMF/CNF/CMFE/CNFE */
-        double a = g_fpa[Fn], b = Fm;
+        double a = ft->fpa[Fn], b = Fm;
         if (op == 0xb || op == 0xf) b = -b;                   /* CNF/CNFE: negate operand */
         cpsr &= 0x0fffffffu;
         if (a != a || b != b)  cpsr |= 0x30000000u;           /* unordered (NaN): C,V */
@@ -198,7 +211,7 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
         int Rd = (insn >> 12) & 0xf; uint32_t v = 0; uc_reg_read(uc, g_sregs[Rd], &v);
         double r = (double)(int32_t)v;
         if (prec == 0) r = (double)(float)r;
-        g_fpa[Fn] = r;
+        ft->fpa[Fn] = r;
         return 1;
     }
     if (op == 0x1) {                                          /* FIX Rd, Fm: float -> int */
@@ -213,10 +226,10 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
         return 1;
     }
     if (op == 0x2) {                                          /* WFS Rd -> FPSR */
-        int Rd = (insn >> 12) & 0xf; uc_reg_read(uc, g_sregs[Rd], &g_fpsr); return 1;
+        int Rd = (insn >> 12) & 0xf; uc_reg_read(uc, g_sregs[Rd], &ft->fpsr); return 1;
     }
     if (op == 0x3) {                                          /* RFS FPSR -> Rd */
-        int Rd = (insn >> 12) & 0xf; uc_reg_write(uc, g_sregs[Rd], &g_fpsr); return 1;
+        int Rd = (insn >> 12) & 0xf; uc_reg_write(uc, g_sregs[Rd], &ft->fpsr); return 1;
     }
     if (op == 0x4 || op == 0x5) return 1;                     /* WFC/RFC (coproc control): ignore */
 
@@ -251,9 +264,10 @@ bool fpa_invalid_cb(uc_engine *uc, void *user) {
     return true;
 }
 
-void fpa_reset(void) { for (int i = 0; i < 8; i++) g_fpa[i] = 0.0; }
+void fpa_reset(void) { struct thread *ft = fpa_self(); for (int i = 0; i < 8; i++) ft->fpa[i] = 0.0; }
 
 /* Accessors for the OABI libm float-return shim (oabi_libm.c): GP2X games are OABI and read a
-   libm double result from FPA f0, which our soft-float rootfs libm never writes. */
-void   fpa_write(int r, double v) { g_fpa[r & 7] = v; }
-double fpa_read(int r)            { return g_fpa[r & 7]; }
+   libm double result from FPA f0, which our soft-float rootfs libm never writes. These act on the
+   CALLING thread's file (same semantics as the old __thread storage). */
+void   fpa_write(int r, double v) { fpa_self()->fpa[r & 7] = v; }
+double fpa_read(int r)            { return fpa_self()->fpa[r & 7]; }
