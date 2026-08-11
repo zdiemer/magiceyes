@@ -5,14 +5,24 @@ never blocks, so when a consumer falls behind it drops the oldest samples -- pol
 "is the BGM actually broken, or is my capture lossy?" unanswerable. The tap captures what the game
 produced, before the drop.
 
-The metrics are chosen to name specific failure modes rather than just describe the waveform:
+The metrics name specific failure modes rather than just describing the waveform:
   silence / near-silence        -> game never opened the device, or mixes to nothing
   clipping                      -> gain staging or a format mismatch (U8 read as S16, etc.)
-  high discontinuity rate       -> the "radio static" signature: adjacent samples jumping across
-                                   the range, i.e. garbage bytes rather than a waveform. This is
-                                   the Her Knights BGM bug (an 8-bit sound bank corrupt before the
-                                   SDL layer) and it is invisible to an rms/peak check.
-  spectral flatness near 1.0    -> noise-like rather than tonal; corroborates the above
+  roughness + zero-crossing rate-> the reliable "radio static" detectors. Roughness is
+                                   mean|adjacent-sample-change| / rms, so it is scale-free.
+                                   Calibrated at 22 kHz: white noise ~1.15 roughness / ~0.50 zcr,
+                                   a 440 Hz tone ~0.11 / ~0.04, real BGM below that.
+  spectral flatness ABOVE 100Hz -> corroborates noise. Deliberately excludes the sub-bass bins:
+                                   computed across the whole spectrum, one large low-frequency
+                                   bin inflates the arithmetic mean and drives flatness to ~0,
+                                   reporting "strongly tonal" for a signal that is broadband hiss
+                                   sitting on a rumble. That mistake made this module call a
+                                   visibly wrong Her Knights capture "normal audio".
+  dominant peak below ~80Hz     -> not musically possible for these titles: the stream is being
+                                   consumed too slowly, or the negotiated rate/format does not
+                                   match what the game is writing.
+  high discontinuity rate       -> gross byte garbage; a blunt check that misses subtler noise,
+                                   so it is never the only signal relied on.
   channel imbalance             -> a downmix/stride bug
 """
 from __future__ import annotations
@@ -89,14 +99,25 @@ def analyse(pcm_path: Path, max_secs: float = 30.0) -> dict:
             best = max(best, run)
         longest_silence = best * blk / freq
 
-    # Discontinuity: adjacent samples jumping more than half of full scale. Music and speech almost
-    # never do this; byte-garbage does it constantly.
+    # Discontinuity: adjacent samples jumping more than half of full scale. Catches gross
+    # byte-garbage, but it is a blunt instrument -- at moderate levels real noise rarely jumps that
+    # far in one sample, so it must not be the only static detector (it read 0.0 on a signal whose
+    # spectrum was 91% sub-100Hz).
     d = np.abs(np.diff(mono))
     disc = float((d > 0.5).mean())
+
+    # Roughness and zero-crossing rate are the reliable noise discriminators, and they need no
+    # spectrum. Measured against references at 22 kHz: white noise ~1.15 roughness / ~0.50 zcr,
+    # a 440 Hz tone ~0.11 / ~0.04, real BGM well below that. Roughness is scale-free (mean
+    # adjacent-sample change over rms), so it works regardless of how loud the title mixes.
+    rms_safe = rms if rms > 1e-9 else 1e-9
+    roughness = float(d.mean() / rms_safe)
+    zcr = float(np.mean(np.diff(np.signbit(mono)) != 0))
 
     # Spectrum over the loudest window, so a mostly-silent dump still gets characterised.
     N = 4096
     flatness = centroid = dominant = float("nan")
+    band = None
     if n >= N:
         nw = n // N
         energies = (mono[:nw * N].reshape(nw, N) ** 2).sum(axis=1)
@@ -104,10 +125,19 @@ def analyse(pcm_path: Path, max_secs: float = 30.0) -> dict:
         spec = np.abs(np.fft.rfft(w)) ** 2
         spec = np.maximum(spec, 1e-20)
         pos = spec[1:]
-        flatness = float(np.exp(np.log(pos).mean()) / pos.mean())
         fr = np.fft.rfftfreq(N, 1 / freq)[1:]
         centroid = float((fr * pos).sum() / pos.sum())
         dominant = float(fr[int(pos.argmax())])
+        tot = float(pos.sum())
+        band = {"sub100_frac": round(float(pos[fr < 100].sum()) / tot, 4),
+                "mid_100_2k_frac": round(float(pos[(fr >= 100) & (fr < 2000)].sum()) / tot, 4),
+                "high_2k_frac": round(float(pos[fr >= 2000].sum()) / tot, 4)}
+        # Flatness over 100Hz..Nyquist only. Computed across the whole spectrum it is dominated by
+        # a large sub-bass bin: one huge value inflates the arithmetic mean, driving the ratio to
+        # ~0 and reporting "strongly tonal" even when everything above it is broadband hiss.
+        mb = pos[fr >= 100]
+        if mb.size:
+            flatness = float(np.exp(np.log(mb).mean()) / mb.mean())
 
     bal = None
     if ch == 2:
@@ -119,14 +149,33 @@ def analyse(pcm_path: Path, max_secs: float = 30.0) -> dict:
     if rms < 1e-4:
         verdict.append("effectively silent")
     if disc > 0.05:
-        verdict.append(f"HIGH discontinuity ({disc:.1%} of samples jump >50% FS) -- this is the "
-                       f"radio-static signature, i.e. the bytes are not a waveform")
-    if flatness == flatness and flatness > 0.5:
-        verdict.append(f"noise-like spectrum (flatness {flatness:.2f}; 1.0 = white noise)")
+        verdict.append(f"HIGH discontinuity ({disc:.1%} of samples jump >50% FS) -- the bytes are "
+                       f"not a waveform at all")
+    if roughness > 0.6 or zcr > 0.3:
+        verdict.append(f"NOISE-LIKE waveform (roughness {roughness:.2f}, zero-crossing rate "
+                       f"{zcr:.2f}; white noise is ~1.15/0.50, a pure tone ~0.11/0.04) -- this is "
+                       f"the radio-static signature")
+    if flatness == flatness and flatness > 0.4:
+        verdict.append(f"noise-like spectrum above 100Hz (flatness {flatness:.2f}; 1.0 = white "
+                       f"noise)")
+    # Energy concentrated in sub-bass is not musically possible for these titles' BGM: the stream
+    # is being consumed too slowly (everything shifted down), or the negotiated rate/format does
+    # not match what the game writes.
+    # This must test the ENERGY DISTRIBUTION, not just the dominant bin: a bass-heavy track
+    # legitimately has its single largest bin below 80Hz while its centroid sits in the midrange
+    # (measured on real Blazar captures: dominant 11Hz and 32Hz, but centroid 1407Hz / 2191Hz and
+    # only 20-35% of energy below 100Hz). Keying on the peak alone false-positived on both.
+    if (band and rms > 1e-3 and band["sub100_frac"] > 0.8
+            and centroid == centroid and centroid < 150):
+        verdict.append(f"energy is almost entirely sub-bass ({band['sub100_frac']:.0%} below "
+                       f"100Hz, dominant {dominant:.0f}Hz, centroid {centroid:.0f}Hz) -- "
+                       f"implausible for BGM; suspect a playback-rate or sample-format mismatch "
+                       f"rather than corrupt data")
     if clip > 0.01:
         verdict.append(f"clipping on {clip:.1%} of samples")
     if bal and bal["identical"] and ch == 2:
-        verdict.append("both channels bit-identical (mono content or a downmix bug)")
+        verdict.append("both channels bit-identical -- expected for the many mono-sourced titles "
+                       "here, but would also be how a downmix/stride bug looks")
     if not verdict:
         verdict.append("looks like normal audio")
 
@@ -142,6 +191,9 @@ def analyse(pcm_path: Path, max_secs: float = 30.0) -> dict:
         "silence_frac": round(float(silent_blocks.mean()), 4) if len(silent_blocks) else None,
         "longest_silence_secs": round(longest_silence, 2),
         "discontinuity_frac": round(disc, 5),
+        "roughness": round(roughness, 4),            # mean|Δsample| / rms; noise ~1.15, tone ~0.11
+        "zero_crossing_rate": round(zcr, 4),         # noise ~0.50, tone ~0.04
+        "band_energy": band,
         "spectral_flatness": None if flatness != flatness else round(flatness, 4),
         "spectral_centroid_hz": None if centroid != centroid else round(centroid, 1),
         "dominant_hz": None if dominant != dominant else round(dominant, 1),
