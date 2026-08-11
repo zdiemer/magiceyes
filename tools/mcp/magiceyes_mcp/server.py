@@ -269,10 +269,18 @@ def perf(session: str | None = None) -> dict:
 
 
 @mcp.tool(description="Name an MMSP2 or blitter register from its address (raw offset or full "
-                      "physical). Use this on unknown_mmio events from run_report.")
-def decode_mmio(addr: str) -> dict:
+                      "physical). Use this on unknown_mmio events from run_report. Device-aware: "
+                      "some ranges only exist on Pollux (Caanoo), so pass a session (or device) "
+                      "to avoid a confidently wrong label.")
+def decode_mmio(addr: str, session: str | None = None, device: str | None = None) -> dict:
     a = int(addr, 0) if isinstance(addr, str) else int(addr)
-    return probes.decode_mmio(a)
+    dev = device
+    if dev is None and (session is not None or MGR.sessions):
+        try:
+            dev = MGR.get(session).status().get("device")
+        except (KeyError, RuntimeError):
+            dev = None
+    return probes.decode_mmio(a, device=dev)
 
 
 # --------------------------------------------------------------------------- live inspection

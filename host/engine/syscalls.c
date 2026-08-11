@@ -783,10 +783,23 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uc_mem_read(g_uc, a1, tmp, a2);
         if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
         if (dev_type((int)a0) == DEV_DSP) { free(tmp); long r = dsp_write(a1, a2);
-            uint32_t us = dsp_pace_us();   /* pace like a blocking OSS write (frees the mixer
-                                              mutex + CPU; else the audio thread free-runs) */
-            if (us) { if (us > 100000) us = 100000;
-                      BIGLOCK_UNLOCK(); usleep(us); BIGLOCK_LOCK(); }
+            /* Pace like a blocking OSS write (frees the mixer mutex + CPU; else the audio thread
+               free-runs). This must LOOP until dsp_pace_us() reports we are caught up, exactly as
+               the qemu backend does (host/qemu/gp2x.c). Sleeping once and capping it meant that a
+               write which put the producer further ahead than the cap could never be absorbed, so
+               the producer gained a little on every write and kept it: Her Knights (Wiz) emitted a
+               steady 1.71 seconds of audio per wall second, i.e. audio ran ~71% ahead of the
+               action. Titles whose per-write deficit fits inside one sleep (Wind & Water, Blazar)
+               paced correctly at 1.000x, which is why this hid for so long.
+               Slept in <=20ms slices with the biglock released, and bounded so a bogus format
+               (huge bps) can never wedge the audio thread here. */
+            BIGLOCK_UNLOCK();
+            for (int i = 0; i < 100; i++) {         /* <= ~2s of catch-up, then give up */
+                uint32_t us = dsp_pace_us();
+                if (!us || g_exit || g_shutdown) break;
+                usleep(us > 20000 ? 20000 : us);
+            }
+            BIGLOCK_LOCK();
             return r; }
         if (dev_type((int)a0)) { free(tmp); return a2; }  /* other devices: accept + discard */
         /* route guest stdout/stderr through the C streams so they follow ME_LOGFILE's freopen

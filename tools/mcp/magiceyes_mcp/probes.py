@@ -197,17 +197,26 @@ MMSP2_REGS = {
     0x3b42: ("ARM940_REG", "second-core register"),
     0x3b48: ("ARM940_REG", "second-core register"),
 }
+# (lo, hi, name, doc, only_on_device)
 MMSP2_RANGES = [
-    (0x2800, 0x295f, "MLC", "multi-layer controller config"),
-    (0x4000, 0x44b8, "POLLUX_MLC", "Caanoo MLC block (HSTRIDE/VSTRIDE/scanout)"),
+    (0x2800, 0x295f, "MLC", "multi-layer controller config", None),
+    # Pollux-only. The GP2X's MMSP2 has something else entirely at 0x4000, so labelling this range
+    # for a GP2X title is actively misleading -- it was, until decode_mmio learned the device.
+    (0x4000, 0x44b8, "POLLUX_MLC", "Caanoo/Pollux MLC block (HSTRIDE/VSTRIDE/scanout)", "caanoo"),
 ]
 BLITTER_BASE = 0xE0020000
 BLITTER_REGS = {0x34: ("MESG_STATUS", "writing BUSY here triggers the blit")}
 
 
-def decode_mmio(addr: int) -> dict:
-    """Name an MMSP2/blitter register. Accepts a raw offset or a full physical address."""
+def decode_mmio(addr: int, device: str | None = None) -> dict:
+    """Name an MMSP2/blitter register. Accepts a raw offset or a full physical address.
+
+    `device` ("gp2x"|"wiz"|"caanoo") gates device-specific ranges. Without it the Pollux MLC block
+    is reported as a possibility rather than a fact: the same offset means something different on
+    the GP2X's MMSP2, and confidently mislabelling it sends you down the wrong path.
+    """
     a = int(addr)
+    dev = (device or "").strip().lower() or None
     if a >= BLITTER_BASE:
         off = a - BLITTER_BASE
         name, doc = BLITTER_REGS.get(off, ("?", "unknown blitter register"))
@@ -218,11 +227,22 @@ def decode_mmio(addr: int) -> dict:
         name, doc = MMSP2_REGS[off]
         return {"addr": hex(a), "block": "MMSP2 (phys 0xC0000000)", "offset": hex(off),
                 "name": name, "doc": doc}
-    for lo, hi, name, doc in MMSP2_RANGES:
-        if lo <= off <= hi:
-            return {"addr": hex(a), "block": "MMSP2 (phys 0xC0000000)", "offset": hex(off),
-                    "name": f"{name}+0x{off - lo:x}", "doc": doc,
-                    "note": "in a known range but not individually decoded"}
+    for lo, hi, name, doc, only_dev in MMSP2_RANGES:
+        if not (lo <= off <= hi):
+            continue
+        r = {"addr": hex(a), "block": "MMSP2 (phys 0xC0000000)", "offset": hex(off),
+             "name": f"{name}+0x{off - lo:x}", "doc": doc,
+             "note": "in a known range but not individually decoded"}
+        if only_dev and dev and dev != only_dev:
+            r["name"] = "unknown"
+            r["doc"] = (f"NOT decoded for this device: 0x{lo:x}-0x{hi:x} is the {name} block on "
+                        f"{only_dev} only, and this title is {dev}. The same offset is something "
+                        f"else on this hardware.")
+            r.pop("note", None)
+        elif only_dev and not dev:
+            r["note"] = (f"only valid on {only_dev}; pass the session's device to disambiguate "
+                         f"(the same offset differs on other hardware)")
+        return r
     return {"addr": hex(a), "block": "MMSP2 (phys 0xC0000000)", "offset": hex(off),
             "name": "unknown",
             "doc": "not in the decoded map; an unknown_mmio report event names the pc that "
