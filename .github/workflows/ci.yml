@@ -39,6 +39,26 @@ jobs:
       - name: Build bundle (exe-only)
         run: ME_BUILD_ONLY=1 bash host/win/build_release.sh "ci-${GITHUB_SHA::8}"
 
+      # The debug control channel gives arbitrary guest memory read/write over a loopback socket.
+      # It is compiled out of the release bundle (ME_BUNDLED && !ME_DEV) precisely so a shipping
+      # consumer binary never opens a listening socket -- firewall prompts on a -mwindows app with
+      # no console, AV heuristics, and 127.0.0.1 is not a security boundary on Windows. Assert it,
+      # so the guarantee cannot regress silently.
+      - name: Assert no control channel in the release binary
+        run: |
+          if strings -a bin/magiceyes.exe | grep -q "\[ctl\] listening"; then
+            echo "::error::magiceyes.exe contains the debug control channel"
+            exit 1
+          fi
+          for sym in WSAStartup bind listen accept; do
+            if x86_64-w64-mingw32-nm -C --extern-only bin/magiceyes.exe 2>/dev/null \
+                 | grep -qw "$sym"; then
+              echo "::error::magiceyes.exe imports $sym -- a listening socket must not ship"
+              exit 1
+            fi
+          done
+          echo "ok: release bundle has no control channel and no socket imports"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

@@ -34,4 +34,30 @@ grep -q '"kind":"unimpl_syscall"' "$T/report.json" || fail "report missing unimp
 grep -q '"code":4242'             "$T/report.json" || fail "report missing syscall 4242"
 echo "  ok: report.json recorded the unimplemented syscall"
 
+echo "== smoke 3: control channel (pause/step/breakpoint/symbols) =="
+$CC -nostdlib -static -marm -march=armv5te -o "$T/spin" "$REPO/host/engine/tests/smoke_spin.S"
+ME_CTL=0 ME_CTL_PORTFILE="$T/port" ME_RUN_SECS=20 ME_SHM_NAME="gp2x_smoke$$" \
+  "$ENGINE" "$T/spin" >"$T/ctl.log" 2>&1 &
+ENG=$!
+for _ in $(seq 1 60); do [ -s "$T/port" ] && break; sleep 0.2; done
+[ -s "$T/port" ] || { kill $ENG 2>/dev/null; fail "engine never published a ctl port"; }
+PORT="$(cat "$T/port")"
+python3 "$REPO/tools/test/ctl_selftest.py" "$PORT" || { kill $ENG 2>/dev/null; fail "ctl selftest"; }
+# The client above left the world PAUSED and disconnected. A parked guest thread never returns from
+# uc_emu_start, so if the last-client-disconnect release ever regresses, this hangs -- which is
+# exactly what we want CI to catch. The engine self-terminates via ME_RUN_SECS; wait comfortably
+# longer than that so a slow CI box can't masquerade as a deadlock.
+for _ in $(seq 1 90); do kill -0 $ENG 2>/dev/null || break; sleep 0.5; done
+if kill -0 $ENG 2>/dev/null; then kill -9 $ENG 2>/dev/null
+  fail "engine did not exit after a client vanished mid-pause (teardown deadlock)"
+fi
+wait $ENG 2>/dev/null || true
+echo "  ok: engine exited cleanly after a client vanished mid-pause"
+
+echo "== smoke 4: control channel is INERT when ME_CTL is unset =="
+out="$("$ENGINE" "$T/hello" 2>&1)" || fail "hello regressed with ctl compiled in"
+echo "$out" | grep -q "hello from magiceyes" || fail "hello: missing stdout with ctl compiled in"
+echo "$out" | grep -qi "ctl.*listening" && fail "ctl started without ME_CTL being set"
+echo "  ok: no listener, no behaviour change"
+
 echo "SMOKE PASS"

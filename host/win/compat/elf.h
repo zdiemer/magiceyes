@@ -69,6 +69,29 @@ typedef struct {
 #define ELF32_R_SYM(i)  ((i) >> 8)
 #define ELF32_R_TYPE(i) ((unsigned char)(i))
 
+/* Symbol-table decoding (symbols.c). MinGW has no <elf.h>, so anything the engine uses has to be
+   spelled out here or the Windows build breaks -- which is exactly how this was found. */
+#define ELF32_ST_BIND(i)  ((i) >> 4)
+#define ELF32_ST_TYPE(i)  ((i) & 0xf)
+#define STT_NOTYPE  0
+#define STT_OBJECT  1
+#define STT_FUNC    2
+#define STT_SECTION 3
+#define STT_FILE    4
+#define SHN_UNDEF   0
+#define SHN_ABS     0xfff1
+
+/* Section types */
+#define SHT_NULL     0
+#define SHT_PROGBITS 1
+#define SHT_SYMTAB   2
+#define SHT_STRTAB   3
+#define SHT_RELA     4
+#define SHT_DYNAMIC  6
+#define SHT_NOBITS   8
+#define SHT_REL      9
+#define SHT_DYNSYM   11
+
 /* e_ident */
 #define EI_MAG0 0
 #define EI_MAG1 1
