@@ -117,6 +117,8 @@ class Session:
     @property
     def log_path(self) -> Path:      return self.dir / "log.txt"
     @property
+    def stderr_path(self) -> Path:   return self.dir / "stderr.log"
+    @property
     def report_path(self) -> Path:   return self.dir / "report.json"
     @property
     def audio_path(self) -> Path:    return self.dir / "audio.pcm"
@@ -218,11 +220,16 @@ class SessionManager:
         if extra_env:
             e.update({k: str(v) for k, v in extra_env.items()})
 
+        # stderr must go to a FILE, not DEVNULL. ME_LOGFILE only redirects DIAG; the probe
+        # callbacks (WATCH/PCHOOK/MUTEX in threads.c, the ME_SCRET syscall trace in main.c) write
+        # to raw stderr, so discarding it would make every probe silently produce nothing.
+        self_err = open(sdir / "stderr.log", "wb")
         proc = subprocess.Popen(
             [str(staged), str(game_path)], env=e,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=self_err,
             cwd=str(sdir),
         )
+        self_err.close()   # the child holds its own dup
         (sdir / "engine.pid").write_text(str(proc.pid))
 
         s = Session(sid=sid, game=str(game_path), engine=engine, shm_name=shm_name, dir=sdir,

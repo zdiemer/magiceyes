@@ -12,13 +12,14 @@ import atexit
 import json
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Image
 
 from . import audio as audio_mod
-from . import env, screen          # env must precede shmlib (package __init__ sets sys.path)
+from . import env, probes, screen  # env must precede shmlib (package __init__ sets sys.path)
 from .session import SessionManager
 
 import shmlib  # noqa: E402  -- tools/test/shmlib.py
@@ -51,15 +52,23 @@ def engine_health() -> dict:
 
 
 @mcp.tool(description="Start a persistent emulator session and wait for the first frame. `game` is "
-                      "a path to a .gpe, a game directory, or a zip. Returns the session id plus "
-                      "initial status. The engine is staged onto ext4 automatically.")
+                      "a path to a .gpe, a game directory, or a zip. `probes` enables engine "
+                      "instrumentation for this run, e.g. {'pchook':'0x8f24','scret':true} -- see "
+                      "list_probes. Probes are latched when the CPU is created, so they can only "
+                      "be set at launch; read them back with probe_results.")
 def launch(game: str, budget_secs: int = 900, wait_secs: float = 25.0,
-           engine: str = "linux", env_extra: dict | None = None) -> dict:
+           engine: str = "linux", probes_: dict | None = None,
+           env_extra: dict | None = None) -> dict:
     env.ensure_corpus_mount()
-    s = MGR.start(game, engine=engine, budget_secs=budget_secs, extra_env=env_extra)
+    extra = dict(probes.build_env(probes_))
+    if env_extra:
+        extra.update({k: str(v) for k, v in env_extra.items()})
+    s = MGR.start(game, engine=engine, budget_secs=budget_secs, extra_env=extra)
     got = MGR.wait_for_frame(s, timeout=wait_secs)
     out = s.status()
     out["first_frame"] = got
+    if extra:
+        out["probes"] = extra
     if not got:
         out["hint"] = ("no frame within %.0fs. The title may still be loading (GPEComp decompress "
                        "can be slow on first run), may be black, or may have failed to start -- "
@@ -224,6 +233,47 @@ def threads(session: str | None = None) -> dict:
     return j
 
 
+@mcp.tool(description="List the engine probes that can be passed to launch(probes_=...): what each "
+                      "one does and whether it needs a value.")
+def list_probes() -> dict:
+    return {"probes": probes.describe(),
+            "note": "probes are latched when a CPU is created, so they cannot be toggled on a "
+                    "running session -- relaunch with them set",
+            "example": {"pchook": "0x8f24", "pchook_eq": True, "scret": True}}
+
+
+@mcp.tool(description="Parse this session's probe output into structured rows: watchpoint hits, "
+                      "pchook register snapshots, mutex traces, syscall traces, PROF counters, and "
+                      "the LOOPPC hot-block histogram.")
+def probe_results(session: str | None = None, kinds: list[str] | None = None,
+                  limit: int = 200) -> dict:
+    s = MGR.get(session)
+    res = probes.parse([s.stderr_path, s.log_path], kinds=kinds, limit=limit)
+    if not any(res["total_seen"].values()):
+        res["note"] = ("nothing captured. Probes must be enabled at launch "
+                       "(launch(probes_={...})); see list_probes.")
+    return res
+
+
+@mcp.tool(description="Latest engine performance counters (fps, MMSP2 reads/writes, host faults, "
+                      "FPA ops, JIT map churn). Requires the 'prof' probe. A rise in newmap/unmap "
+                      "means JIT translation-cache churn.")
+def perf(session: str | None = None) -> dict:
+    s = MGR.get(session)
+    rows = probes.parse([s.stderr_path, s.log_path], kinds=["prof"])["rows"]["prof"]
+    if not rows:
+        return {"samples": [], "note": "no PROF output -- relaunch with probes_={'prof': true}"}
+    return {"latest": rows[-1], "samples": rows,
+            "hint": "newmap/unmap per second is the leading indicator of TB-flush churn"}
+
+
+@mcp.tool(description="Name an MMSP2 or blitter register from its address (raw offset or full "
+                      "physical). Use this on unknown_mmio events from run_report.")
+def decode_mmio(addr: str) -> dict:
+    a = int(addr, 0) if isinstance(addr, str) else int(addr)
+    return probes.decode_mmio(a)
+
+
 # --------------------------------------------------------------------------- corpus
 @mcp.tool(description="List games in the corpus. system: gp2x | wiz | caanoo | legacy_gp2x | "
                       "legacy_caanoo. Optional substring filter.")
@@ -255,7 +305,9 @@ def list_games(system: str = "gp2x", contains: str | None = None, limit: int = 1
 def run_title(game: str, secs: float = 20.0, press_script: str | None = None) -> dict:
     env.ensure_corpus_mount()
     # Stage on ext4: a drvfs-resident engine measures ~20% slow and flips status tiers.
-    staged = env.stage_engine("linux", "harness")
+    # Unique staging dir per call: two concurrent harness calls would otherwise race on copying
+    # the same file, and could exec a half-written binary.
+    staged = env.stage_engine("linux", "harness-" + uuid.uuid4().hex[:8])
     cmd = ["python3", str(env.TOOLS_TEST / "run_title.py"), game,
            "--secs", str(secs), "--engine", str(staged), "--json"]
     if press_script:
@@ -271,7 +323,9 @@ def run_title(game: str, secs: float = 20.0, press_script: str | None = None) ->
 @mcp.tool(description="Check the committed golden baselines (fps, status tier, perceptual frame "
                       "hashes) for regressions. Run this before and after engine changes.")
 def baseline_check(games: list[str] | None = None) -> dict:
-    staged = env.stage_engine("linux", "harness")
+    # Unique staging dir per call: two concurrent harness calls would otherwise race on copying
+    # the same file, and could exec a half-written binary.
+    staged = env.stage_engine("linux", "harness-" + uuid.uuid4().hex[:8])
     default = [str(env.LEGACY_CORPUS / "GP2X" / n)
                for n in ("Blazar_v1-30_gp2x", "Payback-GP2X-v1.1", "vektar-free")]
     targets = games or default

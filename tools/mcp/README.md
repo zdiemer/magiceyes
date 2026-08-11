@@ -27,6 +27,7 @@ Then restart Claude Code so it picks up `.mcp.json`, and call `engine_health` fi
 | Input | `press` `touch` `save_recording` |
 | Audio | `audio_analyze` |
 | Diagnostics | `run_report` `log_tail` `threads` |
+| Probes | `list_probes` `probe_results` `perf` `decode_mmio` |
 | Corpus | `list_games` |
 | Harness | `run_title` `baseline_check` |
 
@@ -40,6 +41,27 @@ engine_health → list_games(system="wiz", contains="knight")
               → launch(game=...) → screenshot → press(["START"]) → wait_for_change → screenshot
               → audio_analyze → run_report
 ```
+
+## Probes
+
+The engine already ships breakpoint-at-PC (`ME_PCHOOK`), write-watchpoints (`ME_WATCH`), a hot-loop
+histogram (`ME_LOOPPC`), lock tracing (`ME_MUTEXWATCH`) and a syscall+return trace (`ME_SCRET`).
+They are latched when a CPU is created, so they cannot be toggled on a running session — but a
+relaunch costs seconds, and these probes are already proven on real bugs. `launch(probes_=...)`
+enables them and `probe_results` parses their output into rows:
+
+```
+launch(game=..., probes_={"pchook": "0x8f24", "pchook_eq": true})
+probe_results(kinds=["pchook"])   → register snapshots per hit
+perf()                            → fps + MMSP2/fault/FPA/JIT-churn counters
+decode_mmio("0x290e")             → MLC_OADRL, "written on flip (frame boundary)"
+```
+
+`ME_LOOPPC` is the exception worth care: it uses a per-block hook, which disables TB chaining and is
+genuinely slow. Use it to pin a hang, not to measure one.
+
+`decode_mmio` exists so a session stops re-deriving `0x0a00` / `0x290e` / `0x2958` from prose every
+time an `unknown_mmio` event shows up in `run_report`.
 
 ## Design notes (each of these is a bug that already cost time)
 
