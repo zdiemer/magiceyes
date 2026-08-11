@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "magiceyes": {
+      "command": "wsl.exe",
+      "args": [
+        "-e",
+        "bash",
+        "/mnt/e/Code/magiceyes/tools/mcp/run.sh"
+      ]
+    }
+  }
+}

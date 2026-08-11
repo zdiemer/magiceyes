@@ -122,6 +122,16 @@ from Pollux sonames; set explicitly for non-GLES Caanoo titles). See
 The point: point a Claude agent (or yourself) at a directory of `.gpe` binaries and learn what to
 fix, without a window. Built on the standalone Linux engine (`bin/me_unicorn`).
 
+**Use the MCP server (`tools/mcp/`) before adding `fprintf`s and rebuilding.** It keeps an engine
+alive across calls (which `run_title.py` cannot) and exposes: `screenshot`/`filmstrip` as real
+images, `press`/`touch` input injection, `audio_analyze` (level/clipping/silence + the
+discontinuity + spectral-flatness measures that identify "radio static" corruption, plus a
+spectrogram and a `.wav`), and `run_report`/`log_tail`/`threads`. Launched from `.mcp.json` via
+`wsl.exe -e bash tools/mcp/run.sh`. Every injected input is recorded to a `.rec` that can be
+promoted into `tools/test/recordings/` as a regression test. See `tools/mcp/README.md`.
+Live guest memory/registers/breakpoints (and any access to the Windows bundle, whose shm is
+in-process) need the engine-side control channel — not built yet.
+
 - **Structured run report** (`host/engine/report.{c,h}`): one central sink (`me_report`) for every
   "I don't fully handle this" event — unimplemented syscall, unknown ioctl/MMSP2-register/`/dev`
   node, missing ld.so symbol (caught by scraping guest stderr), unsupported GLES/blit/audio, host
