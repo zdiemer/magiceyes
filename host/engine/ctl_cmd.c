@@ -378,9 +378,7 @@ static void cmd_bp(const struct jp *req, struct jw *w, const char *cmd) {
         int id = dbg_bp_add((uint32_t)a);
         if (id < 0) { jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "too_many"); return; }
         jw_kv_bool(w, "ok", 1); jw_kv_i64(w, "id", id); jw_kv_u32(w, "addr", (uint32_t)a);
-        if (!dbg_is_paused())
-            jw_kv_str(w, "note", "set while running: threads currently blocked in a syscall pick "
-                                 "it up when they next return");
+        jw_sym_for(w, "sym", (uint32_t)a);
     } else if (!strcmp(cmd, "bp.del")) {
         int rc = dbg_bp_del((int)jp_int(req, "id", -1));
         jw_kv_bool(w, "ok", rc == 0);

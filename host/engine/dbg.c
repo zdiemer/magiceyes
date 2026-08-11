@@ -267,10 +267,9 @@ int dbg_step(int tid, int n) {
     return left ? -4 : 0;
 }
 
-/* Breakpoint/watchpoint edits apply immediately to every PARKED thread's uc; threads blocked in a
-   syscall pick the change up at their next park (dbg_park syncs on epoch). */
+/* Apply the current breakpoint/watchpoint set to every PARKED thread's uc. Caller holds g_dbg_lock.
+   Threads that are merely blocked in a syscall pick the change up at their next park (epoch). */
 static void apply_to_parked(void) {
-    g_epoch++;
     for (int i = 0; i < g_nth; i++) {
         if (!g_th[i].uc || g_th[i].state == TH_DEAD) continue;
         if (g_state[i] != DTH_PARKED) continue;
@@ -279,16 +278,41 @@ static void apply_to_parked(void) {
     }
 }
 
+/* Publish a breakpoint/watchpoint change to the running world.
+ *
+ * Hooks may only be mutated on a uc that is not executing, so if the guest is running we take a
+ * TRANSIENT stop-the-world, install, and resume. Without this, setting a breakpoint on a running
+ * guest silently did nothing at all: apply_to_parked() found no parked threads, and a running
+ * thread only re-syncs inside dbg_park -- which is never reached unless a stop is already pending.
+ * Must be called with g_dbg_lock NOT held (dbg_pause takes it). */
+static void publish_change(void) {
+    pthread_mutex_lock(&g_dbg_lock);
+    g_epoch++;
+    int was_paused = g_dbg_stop;
+    if (was_paused) apply_to_parked();
+    pthread_mutex_unlock(&g_dbg_lock);
+    if (was_paused) return;
+
+    dbg_pause(2000, NULL, NULL, NULL);
+    pthread_mutex_lock(&g_dbg_lock);
+    apply_to_parked();
+    /* Installing during a transient stop is not itself a debugger stop -- don't leave a bogus
+       "paused" reason behind for the next status query. */
+    g_last.reason = DBG_NONE;
+    pthread_mutex_unlock(&g_dbg_lock);
+    dbg_resume();
+}
+
 int dbg_bp_add(uint32_t addr) {
     pthread_mutex_lock(&g_dbg_lock);
     int slot = -1;
     for (int i = 0; i < MAXBP; i++) if (!g_bp[i].used) { slot = i; break; }
     if (slot < 0) { pthread_mutex_unlock(&g_dbg_lock); return -1; }
     g_bp[slot].used = 1; g_bp[slot].addr = addr; g_bp[slot].id = g_next_id++;
-    g_dbg_armed = 1;
-    apply_to_parked();
     int id = g_bp[slot].id;
+    g_dbg_armed = 1;   /* must be set before publish_change stops the world */
     pthread_mutex_unlock(&g_dbg_lock);
+    publish_change();
     return id;
 }
 
@@ -297,16 +321,16 @@ int dbg_bp_del(int id) {
     int found = 0;
     for (int i = 0; i < MAXBP; i++)
         if (g_bp[i].used && g_bp[i].id == id) { g_bp[i].used = 0; found = 1; }
-    if (found) apply_to_parked();
     pthread_mutex_unlock(&g_dbg_lock);
+    if (found) publish_change();
     return found ? 0 : -1;
 }
 
 void dbg_bp_clear(void) {
     pthread_mutex_lock(&g_dbg_lock);
     for (int i = 0; i < MAXBP; i++) g_bp[i].used = 0;
-    apply_to_parked();
     pthread_mutex_unlock(&g_dbg_lock);
+    publish_change();
 }
 
 int dbg_bp_list(uint32_t *addrs, int *ids, int cap) {
@@ -325,10 +349,10 @@ int dbg_wp_add(uint32_t addr, uint32_t len) {
     for (int i = 0; i < MAXWP; i++) if (!g_wp[i].used) { slot = i; break; }
     if (slot < 0) { pthread_mutex_unlock(&g_dbg_lock); return -1; }
     g_wp[slot].used = 1; g_wp[slot].addr = addr; g_wp[slot].len = len; g_wp[slot].id = g_next_id++;
-    g_dbg_armed = 1;
-    apply_to_parked();
     int id = g_wp[slot].id;
+    g_dbg_armed = 1;
     pthread_mutex_unlock(&g_dbg_lock);
+    publish_change();
     return id;
 }
 
@@ -337,8 +361,8 @@ int dbg_wp_del(int id) {
     int found = 0;
     for (int i = 0; i < MAXWP; i++)
         if (g_wp[i].used && g_wp[i].id == id) { g_wp[i].used = 0; found = 1; }
-    if (found) apply_to_parked();
     pthread_mutex_unlock(&g_dbg_lock);
+    if (found) publish_change();
     return found ? 0 : -1;
 }
 

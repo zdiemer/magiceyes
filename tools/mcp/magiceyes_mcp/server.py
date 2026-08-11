@@ -78,9 +78,24 @@ def launch(game: str, budget_secs: int = 900, wait_secs: float = 25.0,
 
 
 @mcp.tool(description="Status of a session: alive, device, backend, frame count, audio state, "
-                      "remaining time budget.")
+                      "remaining time budget, and — when the control channel is up — whether "
+                      "execution is paused and why (so a breakpoint hit is visible here).")
 def status(session: str | None = None) -> dict:
-    return MGR.get(session).status()
+    s = MGR.get(session)
+    st = s.status()
+    if st.get("alive"):
+        # The shm header cannot report execution state; that lives on the control channel. Merge it
+        # in so "did my breakpoint hit?" is answerable from status alone rather than needing a
+        # second stop request.
+        try:
+            c = s.ctl().ok("status")
+            st["paused"] = c.get("paused", False)
+            st["threads"] = c.get("nth")
+            if c.get("stop"):
+                st["stop"] = c["stop"]
+        except Exception as e:
+            st["control_channel"] = f"unavailable ({type(e).__name__})"
+    return st
 
 
 @mcp.tool(description="List active sessions.")

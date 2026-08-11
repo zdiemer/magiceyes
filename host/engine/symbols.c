@@ -98,8 +98,14 @@ int sym_load_image_buf(const uint8_t *buf, long sz, uint32_t bias, const char *l
             uint32_t n = sh[i].sh_size / sh[i].sh_entsize;
             for (uint32_t k = 0; k < n && g_nsym < SYM_MAX; k++) {
                 unsigned char t = ELF32_ST_TYPE(sy[k].st_info);
-                if (t != STT_FUNC && t != STT_OBJECT) continue;
-                if (!sy[k].st_value || sy[k].st_shndx == SHN_UNDEF) continue;
+                /* NOTYPE is accepted deliberately: a plain `.global label` in hand-written
+                   assembly, and plenty of real text symbols, carry no type (these are exactly the
+                   "T" entries nm prints). Filtering to FUNC/OBJECT silently loses them. Junk is
+                   held back instead by requiring a defined section and a non-zero value, by the
+                   mapping-symbol filter below, and by the size gate in sym_lookup. */
+                if (t != STT_FUNC && t != STT_OBJECT && t != STT_NOTYPE) continue;
+                if (!sy[k].st_value || sy[k].st_shndx == SHN_UNDEF ||
+                    sy[k].st_shndx == SHN_ABS) continue;
                 const char *nm = str + sy[k].st_name;
                 if (!nm || !*nm) continue;
                 /* Skip ARM mapping symbols ($a/$d/$t mark ARM/data/Thumb regions). They share
