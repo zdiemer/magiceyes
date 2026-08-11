@@ -129,6 +129,9 @@ void uc_hook_std(uc_engine *u) {
              p && g_nwatch < 4; p = strtok(NULL, ",")) g_watch[g_nwatch++] = strtoul(p, NULL, 0); }
     for (int i = 0; i < g_nwatch; i++)
         uc_hook_add(u, &h, UC_HOOK_MEM_WRITE, watch_cb, NULL, g_watch[i], g_watch[i] + 3);
+    /* Give a newly created CPU the current breakpoint/watchpoint set, so a thread cloned while
+       breakpoints are armed inherits them. Safe by construction: nobody is running this uc yet. */
+    dbg_hooks_install(u);
 }
 
 uc_engine *uc_new_thread(void) {
@@ -222,6 +225,14 @@ void futex_wake_all(void) {
 static pthread_mutex_t g_sigm = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_sigc = PTHREAD_COND_INITIALIZER;
 
+/* Wake every sigsuspend waiter so it re-checks its predicate. The teardown paths inline this;
+   exported so the debugger's pause can also free a signal-blocked thread to reach a park point. */
+void engine_wake_sigwaiters(void) {
+    pthread_mutex_lock(&g_sigm);
+    pthread_cond_broadcast(&g_sigc);
+    pthread_mutex_unlock(&g_sigm);
+}
+
 /* deliver `sig` to the thread whose tid==pid; wake it if it's sigsuspended. */
 static int g_siglog = -1;
 long send_sig(int pid, int sig) {
@@ -296,6 +307,9 @@ void threads_init(void) { fxq_init(); }
    bail on g_exit. The main thread (g_th[0]) is the caller and has already left its own
    uc_emu_start, so it is neither stopped nor joined here. */
 void engine_stop_all_threads(void) {
+    /* Release any parked thread FIRST: a debugger pause left mid-teardown would otherwise wedge
+       the join loop below forever, since a parked thread never returns from uc_emu_start. */
+    dbg_force_resume();
     BIGLOCK_LOCK();
     g_exit = 1;
     for (int i = 1; i < g_nth; i++)
@@ -341,6 +355,7 @@ void engine_stop_all_threads(void) {
    g_biglock serialises against a syscall in flight. */
 void engine_request_reload(const char *host_path) {
     if (!host_path || !*host_path) return;
+    dbg_force_resume();   /* File->Open while paused must not deadlock the teardown */
     snprintf(g_reload_path, sizeof g_reload_path, "%s", host_path);
     g_reload_chdir = 1;   /* a new game from the picker -> run from its directory */
     BIGLOCK_LOCK();
@@ -357,6 +372,7 @@ void engine_request_reload(const char *host_path) {
    thread); stopping only the caller left the main thread spinning and the reload never ran. */
 void engine_reload_in_syscall(const char *host_path) {
     if (!host_path || !*host_path) return;
+    dbg_force_resume();   /* chain-load (execve/GPEComp re-exec) while paused */
     snprintf(g_reload_path, sizeof g_reload_path, "%s", host_path);
     g_reload_chdir = 1;
     g_exit = 1;

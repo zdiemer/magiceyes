@@ -124,6 +124,29 @@ int read_guest(void *dst, uint32_t gaddr, uint32_t len) {
     return 0;
 }
 
+/* Mirror of read_guest: copy len bytes INTO guest memory, walking region boundaries for exactly
+   the same reason (host backings are separate mmaps, not contiguous across regions). Returns 0, or
+   -1 if any byte of the range is unmapped -- it never allocates, because a debugger writing
+   through a stale pointer must fail rather than silently create memory.
+   NOTE: this bypasses TCG's dirty/SMC tracking, so a write into executable memory will not
+   invalidate already-translated blocks. Callers patching code must invalidate every uc's cache
+   (and see fork-patches/smc_freeze.py: hot pages deliberately stop being SMC-protected). */
+int write_guest(const void *src, uint32_t gaddr, uint32_t len) {
+    const uint8_t *s = src;
+    if (gaddr + len < gaddr) return -1;               /* 32-bit wrap */
+    REGLOCK_LOCK();
+    while (len) {
+        struct gregion *r = find_region(gaddr);
+        if (!r) { REGLOCK_UNLOCK(); return -1; }
+        uint32_t avail = r->addr + r->len - gaddr;
+        uint32_t n = len < avail ? len : avail;
+        memcpy((uint8_t *)r->host + (gaddr - r->addr), s, n);
+        s += n; gaddr += n; len -= n;
+    }
+    REGLOCK_UNLOCK();
+    return 0;
+}
+
 /* Free every guest-RAM host backing (the registry owns it; uc_close only drops the uc's
    view of these uc_mem_map_ptr mappings). Called between games by engine_reset_and_load
    AFTER all worker ucs and the main uc are closed -- nothing maps these pointers anymore. */

@@ -25,6 +25,11 @@ void guard_release_biglock(void) {
     if (g_holds_biglock) { g_holds_biglock = 0; pthread_mutex_unlock(&g_biglock); }
 }
 
+/* "This thread is inside a guarded region." Hoisted above emu_run (and shared by both platform
+   implementations below, which previously each declared their own) because the debugger park
+   point in emu_run has to disarm across the wait. */
+static __thread volatile int g_armed = 0;
+
 /* Run uc from `entry`, restarting after each FPA instruction the invalid-insn hook emulates.
    Unicorn stops emulation when an invalid-instruction hook reports "handled" (it can't resume
    in place), so the hook advances PC + sets g_fpa_resume and we re-enter from the new PC. A
@@ -32,11 +37,28 @@ void guard_release_biglock(void) {
 static int emu_run(uc_engine *uc, uint32_t entry) {
     uint32_t pc = entry;
     int e;
-    do {
+    for (;;) {
         g_fpa_resume = 0;
+        /* Debugger park point. It lives here because this is the one spot that holds NO engine
+           lock and already knows how to re-enter uc_emu_start at a fresh PC (the FPA path below
+           proves that shape works in production). Checking BEFORE uc_emu_start closes the race
+           where a stop request lands between the test and entry and would otherwise be consumed
+           and lost. The fault guard is disarmed across the park: a host fault while parked is an
+           engine bug and must crash loudly, not be misreported as "the game crashed". */
+        if (g_dbg_armed && dbg_stop_pending()) {
+            g_armed = 0;
+            int cont = dbg_park(uc, &pc);
+            g_armed = 1;
+            if (!cont) return UC_ERR_OK;
+        }
         e = (int)uc_emu_start(uc, pc, 0, 0, 0);
-        if (g_fpa_resume) uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-    } while (g_fpa_resume && e == UC_ERR_OK && !g_exit && !g_shutdown);
+        if (g_exit || g_shutdown) break;
+        if (g_fpa_resume && e == UC_ERR_OK) { uc_reg_read(uc, UC_ARM_REG_PC, &pc); continue; }
+        if (e != UC_ERR_OK) break;
+        if (!g_dbg_armed || !dbg_stop_pending()) break;   /* a genuine end of run */
+        /* Stopped by a breakpoint/watchpoint/pause: re-enter where we left off after parking. */
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    }
     return e;
 }
 
@@ -49,7 +71,6 @@ static int emu_run(uc_engine *uc, uint32_t entry) {
    slams the registers back, so it needs no unwind info for the discarded JIT/callback frames. */
 
 static __thread CONTEXT g_ctx;             /* captured arm point */
-static __thread volatile int g_armed = 0;
 static __thread volatile int g_returned = 0;  /* set by the handler -> "we faulted" on resume */
 static __thread volatile uintptr_t g_faddr = 0, g_fpc = 0;
 
@@ -141,7 +162,6 @@ void guard_init(void) { AddVectoredExceptionHandler(1, veh); }
 #include <setjmp.h>
 
 static __thread sigjmp_buf g_fjmp;
-static __thread volatile int g_armed = 0;
 static __thread volatile uintptr_t g_faddr = 0;
 static struct sigaction g_old_segv, g_old_bus;
 

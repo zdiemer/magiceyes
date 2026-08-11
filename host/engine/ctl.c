@@ -36,13 +36,14 @@ typedef int SOCKET;
 
 /* ctl_cmd.c */
 int ctl_dispatch(const struct jp *req, struct jw *resp, const uint8_t **bin, size_t *binlen,
-                 void **binown);
+                 void **binown, const uint8_t *payload, size_t paylen);
 
 #define CTL_MAXLINE (64 * 1024)
 
 static SOCKET g_lsock = INVALID_SOCKET;
 static int g_ctl_running = 0;
 static char g_token[128];
+static volatile int g_nconn = 0;   /* live connections; the last one leaving releases a pause */
 
 static int send_all(SOCKET s, const void *buf, size_t n) {
     const char *p = buf;
@@ -109,17 +110,39 @@ static void *conn_thread(void *arg) {
                 authed = 1;
             }
 
+            /* A request may carry a binary payload too (mem.write): "bin":N in the header line,
+               then exactly N raw bytes after the newline -- symmetric with responses. */
+            uint8_t *payload = NULL; size_t paylen = 0;
+            long long want = jp_int(&req, "bin", 0);
+            if (want > 0 && want <= 16 * 1024 * 1024) {
+                payload = malloc((size_t)want);
+                size_t got = 0;
+                while (payload && got < (size_t)want) {
+                    int k = (int)recv(s, (char *)payload + got, (int)((size_t)want - got), 0);
+                    if (k <= 0) break;
+                    got += (size_t)k;
+                }
+                if (!payload || got != (size_t)want) {
+                    free(payload); payload = NULL;
+                    send_err(s, "short_payload", "declared bin bytes never arrived");
+                    len = 0;
+                    continue;
+                }
+                paylen = (size_t)want;
+            }
+
             struct jw resp; jw_init(&resp);
             const uint8_t *bin = NULL; size_t binlen = 0; void *binown = NULL;
-            int rc = ctl_dispatch(&req, &resp, &bin, &binlen, &binown);
+            int rc = ctl_dispatch(&req, &resp, &bin, &binlen, &binown, payload, paylen);
             if (rc != 0 && resp.len == 0) {
                 send_err(s, "unknown_cmd", cmd);
             } else if (send_msg(s, &resp, bin, binlen) < 0) {
-                jw_free(&resp); free(binown);
+                jw_free(&resp); free(binown); free(payload);
                 break;
             }
             jw_free(&resp);
             free(binown);
+            free(payload);
             len = 0;
             continue;
         }
@@ -128,6 +151,15 @@ static void *conn_thread(void *arg) {
     }
     free(line);
     CLOSESOCK(s);
+    /* Safety valve: a debugger that crashes or is killed mid-pause would otherwise leave every
+       guest thread parked forever. When the last client goes away, release the world. */
+    if (--g_nconn <= 0) {
+        g_nconn = 0;
+        if (dbg_is_paused()) {
+            fprintf(DIAG, "[ctl] last client disconnected while paused -- resuming\n");
+            dbg_force_resume();
+        }
+    }
     return NULL;
 }
 
@@ -143,10 +175,10 @@ static void *accept_thread(void *arg) {
             continue;
         }
         pthread_t th;
+        g_nconn++;
         if (pthread_create(&th, NULL, conn_thread, (void *)(intptr_t)c) == 0)
             pthread_detach(th);
-        else
-            CLOSESOCK(c);
+        else { g_nconn--; CLOSESOCK(c); }
     }
     return NULL;
 }

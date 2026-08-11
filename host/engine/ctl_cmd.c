@@ -27,6 +27,8 @@ static void reg_snapshot(struct thread *t, uint32_t *out17) {
     for (int i = 0; i < 17; i++) uc_reg_read(t->uc, g_sregs[i], &out17[i]);
 }
 
+static void emit_stop(struct jw *w);   /* defined with the debugger commands below */
+
 /* ---- individual commands --------------------------------------------------- */
 
 static void cmd_hello(struct jw *w) {
@@ -57,6 +59,7 @@ static void cmd_status(struct jw *w) {
     jw_kv_bool(w, "reloading", g_reloading != 0);
     jw_kv_bool(w, "eabi", g_eabi != 0);
     jw_kv_i64(w, "nregions", mem_nreg());
+    jw_kv_bool(w, "paused", dbg_is_paused() != 0);
     jw_kv_bool(w, "fault_pending", g_fault_pending != 0);
     jw_kv_i64(w, "fault_addr", (long long)g_fault_addr);
     jw_kv_u32(w, "brk", g_brk);
@@ -73,6 +76,9 @@ static void cmd_status(struct jw *w) {
         jw_kv_i64(w, "backend", g_shm->backend);
         jw_raw(w, "}");
     }
+    /* Why we are stopped, so a client can poll status and learn a breakpoint hit WITHOUT having
+       to call pause (which would be a second stop request). */
+    if (dbg_is_paused()) emit_stop(w);
 }
 
 static void cmd_threads(struct jw *w) {
@@ -262,6 +268,187 @@ static int cmd_frame(struct jw *w, const uint8_t **bin, size_t *binlen, void **b
     return 0;
 }
 
+/* ---- debugger ------------------------------------------------------------- */
+static const char *stop_reason_str(int r) {
+    switch (r) {
+    case DBG_PAUSE: return "pause";
+    case DBG_BP:    return "breakpoint";
+    case DBG_WP:    return "watchpoint";
+    case DBG_STEP:  return "step";
+    case DBG_ENTRY: return "entry";
+    default:        return "running";
+    }
+}
+
+static void emit_stop(struct jw *w) {
+    struct dbg_stop s;
+    dbg_last_stop(&s);
+    jw_key(w, "stop"); jw_raw(w, "{");
+    jw_kv_str(w, "reason", stop_reason_str(s.reason));
+    jw_kv_i64(w, "tid", s.tid);
+    jw_kv_u32(w, "pc", s.pc);
+    jw_kv_i64(w, "id", s.id);
+    if (s.reason == DBG_WP) {
+        jw_kv_u32(w, "addr", s.addr);
+        jw_kv_u32(w, "value", s.value);
+        /* The store has already completed and the CPU stops at the next block boundary. */
+        jw_kv_bool(w, "precise", 0);
+    }
+    jw_raw(w, "}");
+}
+
+static void cmd_pause(const struct jp *req, struct jw *w) {
+    int parked = 0, blocked = 0, running = 0;
+    int rc = dbg_pause((int)jp_int(req, "timeout_ms", 2000), &parked, &blocked, &running);
+    if (rc < 0) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "busy");
+        jw_kv_str(w, "detail", "pause requested from a thread holding the engine lock");
+        return;
+    }
+    jw_kv_bool(w, "ok", 1);
+    jw_kv_bool(w, "paused", 1);
+    jw_kv_i64(w, "parked", parked);
+    jw_kv_i64(w, "blocked_in_syscall", blocked);
+    jw_kv_i64(w, "still_running", running);
+    if (blocked)
+        jw_kv_str(w, "blocked_note", "threads blocked in a syscall (futex/sigsuspend) are not "
+                                     "executing, but have not reached a park point; their "
+                                     "registers are readable, stepping them is not");
+    if (running)
+        jw_kv_str(w, "running_note", "some threads did not quiesce before the timeout");
+    emit_stop(w);
+}
+
+static void cmd_resume(struct jw *w) {
+    dbg_resume();
+    jw_kv_bool(w, "ok", 1);
+    jw_kv_bool(w, "paused", 0);
+}
+
+static void cmd_step(const struct jp *req, struct jw *w) {
+    int tid = (int)jp_int(req, "tid", -1);
+    int n   = (int)jp_int(req, "n", 1);
+    if (tid < 0) {          /* default: the first live thread */
+        for (int i = 0; i < g_nth; i++)
+            if (g_th[i].uc && g_th[i].state != TH_DEAD) { tid = g_th[i].tid; break; }
+    }
+    int rc = dbg_step(tid, n);
+    if (rc) {
+        jw_kv_bool(w, "ok", 0);
+        jw_kv_str(w, "err", rc == -1 ? "not_paused" : rc == -2 ? "no_such_tid"
+                          : rc == -3 ? "not_parked" : "step_timeout");
+        jw_kv_str(w, "detail", rc == -1 ? "pause first"
+                             : rc == -3 ? "that thread is blocked in a syscall, not parked"
+                             : "");
+        return;
+    }
+    jw_kv_bool(w, "ok", 1);
+    jw_kv_i64(w, "tid", tid);
+    jw_kv_i64(w, "n", n);
+    emit_stop(w);
+}
+
+static void cmd_bp(const struct jp *req, struct jw *w, const char *cmd) {
+    if (!strcmp(cmd, "bp.add")) {
+        long long a = jp_int(req, "addr", -1);
+        if (a < 0) { jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "bad_addr"); return; }
+        int id = dbg_bp_add((uint32_t)a);
+        if (id < 0) { jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "too_many"); return; }
+        jw_kv_bool(w, "ok", 1); jw_kv_i64(w, "id", id); jw_kv_u32(w, "addr", (uint32_t)a);
+        if (!dbg_is_paused())
+            jw_kv_str(w, "note", "set while running: threads currently blocked in a syscall pick "
+                                 "it up when they next return");
+    } else if (!strcmp(cmd, "bp.del")) {
+        int rc = dbg_bp_del((int)jp_int(req, "id", -1));
+        jw_kv_bool(w, "ok", rc == 0);
+        if (rc) jw_kv_str(w, "err", "no_such_id");
+    } else if (!strcmp(cmd, "bp.clear")) {
+        dbg_bp_clear();
+        jw_kv_bool(w, "ok", 1);
+    } else {   /* bp.list */
+        uint32_t addrs[32]; int ids[32];
+        int n = dbg_bp_list(addrs, ids, 32);
+        jw_kv_bool(w, "ok", 1);
+        jw_key(w, "breakpoints"); jw_raw(w, "[");
+        for (int i = 0; i < n; i++) {
+            jw_comma(w); jw_raw(w, "{");
+            jw_kv_i64(w, "id", ids[i]); jw_kv_u32(w, "addr", addrs[i]);
+            jw_raw(w, "}");
+        }
+        jw_raw(w, "]");
+    }
+}
+
+static void cmd_wp(const struct jp *req, struct jw *w, const char *cmd) {
+    if (!strcmp(cmd, "wp.add")) {
+        long long a = jp_int(req, "addr", -1);
+        long long l = jp_int(req, "len", 4);
+        if (a < 0) { jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "bad_addr"); return; }
+        int id = dbg_wp_add((uint32_t)a, (uint32_t)(l > 0 ? l : 4));
+        if (id < 0) { jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "too_many"); return; }
+        jw_kv_bool(w, "ok", 1); jw_kv_i64(w, "id", id);
+        jw_kv_str(w, "note", "write watchpoint; the stop lands after the store completes");
+    } else if (!strcmp(cmd, "wp.del")) {
+        int rc = dbg_wp_del((int)jp_int(req, "id", -1));
+        jw_kv_bool(w, "ok", rc == 0);
+        if (rc) jw_kv_str(w, "err", "no_such_id");
+    } else {   /* wp.list */
+        uint32_t addrs[8], lens[8]; int ids[8];
+        int n = dbg_wp_list(addrs, lens, ids, 8);
+        jw_kv_bool(w, "ok", 1);
+        jw_key(w, "watchpoints"); jw_raw(w, "[");
+        for (int i = 0; i < n; i++) {
+            jw_comma(w); jw_raw(w, "{");
+            jw_kv_i64(w, "id", ids[i]); jw_kv_u32(w, "addr", addrs[i]); jw_kv_u32(w, "len", lens[i]);
+            jw_raw(w, "}");
+        }
+        jw_raw(w, "]");
+    }
+}
+
+struct wjob { uint32_t addr, len; const uint8_t *src; int rc; };
+static void do_write_guest(void *p) {
+    struct wjob *j = p;
+    j->rc = write_guest(j->src, j->addr, j->len);
+}
+
+static int cmd_mem_write(const struct jp *req, struct jw *w, const uint8_t *payload,
+                         size_t paylen) {
+    long long addr = jp_int(req, "addr", -1);
+    if (addr < 0 || !payload || !paylen) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "bad_request");
+        jw_kv_str(w, "detail", "need addr and a binary payload");
+        return 0;
+    }
+    if (!dbg_is_paused()) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "not_paused");
+        jw_kv_str(w, "detail", "mem.write requires a pause: writing under a running guest races "
+                               "the code you are debugging");
+        return 0;
+    }
+    struct wjob j = {(uint32_t)addr, (uint32_t)paylen, payload, -1};
+    pthread_mutex_lock(&g_present_lock);
+    int guarded = guarded_ctl(do_write_guest, &j);
+    pthread_mutex_unlock(&g_present_lock);
+    if (guarded < 0 || j.rc != 0) {
+        jw_kv_bool(w, "ok", 0);
+        jw_kv_str(w, "err", guarded < 0 ? "fault" : "unmapped");
+        return 0;
+    }
+    /* Host-side writes bypass TCG's SMC tracking, and every guest thread has its own TB cache, so
+       a code patch must be invalidated in EVERY uc or already-translated blocks keep running the
+       old bytes. */
+    int flushed = 0;
+    for (int i = 0; i < g_nth; i++)
+        if (g_th[i].uc && !uc_ctl_remove_cache(g_th[i].uc, (uint64_t)addr,
+                                               (uint64_t)addr + paylen)) flushed++;
+    jw_kv_bool(w, "ok", 1);
+    jw_kv_u32(w, "addr", (uint32_t)addr);
+    jw_kv_i64(w, "len", (long long)paylen);
+    jw_kv_i64(w, "tb_caches_invalidated", flushed);
+    return 0;
+}
+
 static void cmd_report(struct jw *w) {
     jw_kv_bool(w, "ok", 1);
     jw_kv_bool(w, "active", me_report_active() != 0);
@@ -276,7 +463,7 @@ static void cmd_report(struct jw *w) {
 
 /* ---- dispatch -------------------------------------------------------------- */
 int ctl_dispatch(const struct jp *req, struct jw *w, const uint8_t **bin, size_t *binlen,
-                 void **binown) {
+                 void **binown, const uint8_t *payload, size_t paylen) {
     const char *cmd = jp_get(req, "cmd");
     if (!cmd) return -1;
 
@@ -284,19 +471,26 @@ int ctl_dispatch(const struct jp *req, struct jw *w, const uint8_t **bin, size_t
     long long id = jp_int(req, "id", -1);
     if (id >= 0) jw_kv_i64(w, "id", id);
 
-    if      (!strcmp(cmd, "hello"))    cmd_hello(w);
-    else if (!strcmp(cmd, "status"))   cmd_status(w);
-    else if (!strcmp(cmd, "threads"))  cmd_threads(w);
-    else if (!strcmp(cmd, "mem.map"))  cmd_mem_map(w);
-    else if (!strcmp(cmd, "mem.read")) cmd_mem_read(req, w, bin, binlen, binown);
-    else if (!strcmp(cmd, "dev.state"))cmd_dev_state(w);
-    else if (!strcmp(cmd, "frame.get"))cmd_frame(w, bin, binlen, binown);
-    else if (!strcmp(cmd, "report"))   cmd_report(w);
+    if      (!strcmp(cmd, "hello"))     cmd_hello(w);
+    else if (!strcmp(cmd, "status"))    cmd_status(w);
+    else if (!strcmp(cmd, "threads"))   cmd_threads(w);
+    else if (!strcmp(cmd, "mem.map"))   cmd_mem_map(w);
+    else if (!strcmp(cmd, "mem.read"))  cmd_mem_read(req, w, bin, binlen, binown);
+    else if (!strcmp(cmd, "mem.write")) cmd_mem_write(req, w, payload, paylen);
+    else if (!strcmp(cmd, "dev.state")) cmd_dev_state(w);
+    else if (!strcmp(cmd, "frame.get")) cmd_frame(w, bin, binlen, binown);
+    else if (!strcmp(cmd, "report"))    cmd_report(w);
+    else if (!strcmp(cmd, "pause"))     cmd_pause(req, w);
+    else if (!strcmp(cmd, "resume"))    cmd_resume(w);
+    else if (!strcmp(cmd, "step"))      cmd_step(req, w);
+    else if (!strncmp(cmd, "bp.", 3))   cmd_bp(req, w, cmd);
+    else if (!strncmp(cmd, "wp.", 3))   cmd_wp(req, w, cmd);
     else {
         jw_kv_bool(w, "ok", 0);
         jw_kv_str(w, "err", "unknown_cmd");
-        jw_kv_str(w, "detail", "known: hello status threads mem.map mem.read dev.state "
-                               "frame.get report");
+        jw_kv_str(w, "detail", "known: hello status threads mem.map mem.read mem.write dev.state "
+                               "frame.get report pause resume step bp.add bp.del bp.list bp.clear "
+                               "wp.add wp.del wp.list");
     }
     jw_raw(w, "}");
     return 0;

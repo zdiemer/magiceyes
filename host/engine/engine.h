@@ -27,6 +27,7 @@
 #include "gp2xshm.h"
 #include "report.h"   /* structured run telemetry (me_report / me_report_flush_json) */
 #include "ctl.h"      /* debug control channel (ME_CTL); compiled out of release bundles */
+#include "dbg.h"      /* pause / step / breakpoints (inert until armed) */
 #include "paths.h"    /* portable, user-configurable storage roots (settings/firmware/cache) */
 
 /* ---- guest virtual memory layout ---- */
@@ -260,7 +261,8 @@ uc_engine *uc_new_thread(void);
 void *thread_entry(void *arg);
 int futex_wait(uint32_t uaddr, uint32_t val, const struct timespec *abstime);
 int futex_wake(uint32_t uaddr, int n);
-void futex_wake_all(void);   /* broadcast every wait-queue (teardown: free blocked threads) */
+void futex_wake_all(void);
+void engine_wake_sigwaiters(void);   /* broadcast the sigsuspend queue (teardown + debugger pause) */   /* broadcast every wait-queue (teardown: free blocked threads) */
 void sigsuspend_wait(void);
 void threads_init(void);
 int thread_alloc(void);
@@ -273,6 +275,7 @@ int  th_backtrace(struct thread *t, uint32_t *out, int cap);
 /* Snapshot of one guest memory region (mem.c owns the registry; see mem_regions). */
 struct me_region { uint32_t addr, len; int perms, external; };
 int mem_regions(struct me_region *out, int cap);
+int write_guest(const void *src, uint32_t gaddr, uint32_t len);
 
 /* Outermost lock: serialises the helper thread's present against reload teardown, and is taken by
    the control channel around any guest-memory read for the same reason (defined in main.c). */

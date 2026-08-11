@@ -166,6 +166,11 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
        caller's own buffer), and hammered in tight timing loops (Liar busy-polls gettimeofday
        ~850k/s). Serve it WITHOUT the biglock or per-syscall housekeeping -- that overhead both
        tanked fps and starved the game's frame pacing. */
+    /* Debugger: mark this thread as off-CPU for the duration of the syscall. A thread blocked in
+       a long syscall (futex, sigsuspend) is not executing TCG and cannot reach the park point in
+       emu_run until it returns -- dbg_pause needs to tell that apart from "still running", and
+       t->state cannot (TH_BLOCKED/TH_SLEEPING are never assigned anywhere). */
+    if (g_dbg_armed) dbg_leave_tcg();
     if (!g_exit && (nr == 78 || nr == 263 || nr == 266)) {
         struct timeval tv; gettimeofday(&tv, NULL);
         if (nr == 78) { uint32_t tvp = gread(UC_ARM_REG_R0);
@@ -173,6 +178,7 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
         else { uint32_t tsp = gread(UC_ARM_REG_R1);   /* clock_gettime(clk, timespec) */
             if (tsp) { uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec * 1000 }; uc_mem_write(uc, tsp, t, 8); } }
         gwrite(UC_ARM_REG_R0, 0);
+        if (g_dbg_armed) { dbg_enter_tcg(); if (dbg_stop_pending()) uc_emu_stop(uc); }
         return;
     }
     BIGLOCK_LOCK();
@@ -188,7 +194,10 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
         fputs(b, stderr);
     }
     BIGLOCK_UNLOCK();
-    if (g_exit) uc_emu_stop(uc);
+    /* Stopping here is what makes a thread that was blocked in a long syscall park as soon as it
+       returns, with no code hook and no polling. */
+    if (g_dbg_armed) dbg_enter_tcg();
+    if (g_exit || (g_dbg_armed && dbg_stop_pending())) uc_emu_stop(uc);
 }
 
 /* host helper thread: present the framebuffer + prof + thread dump, off the guest CPUs. */
@@ -366,6 +375,7 @@ static void engine_reset_globals(void) {
     memset(g_sigact, 0, sizeof g_sigact);
     devices_reset();
     syscalls_reset();
+    dbg_reset();          /* drop breakpoints + park state; the ucs are already closed */
     /* Per-title run report: flush the outgoing title's events before dropping them, so a chain-load
        (GPEComp re-exec, launcher script, File->Open) doesn't attribute the previous game's
        unimplemented syscalls / unknown devices to the next one. Without the reset the table is
