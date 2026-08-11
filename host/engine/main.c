@@ -376,6 +376,7 @@ static void engine_reset_globals(void) {
     devices_reset();
     syscalls_reset();
     dbg_reset();          /* drop breakpoints + park state; the ucs are already closed */
+    sym_reset();          /* the next title has its own symbols */
     /* Per-title run report: flush the outgoing title's events before dropping them, so a chain-load
        (GPEComp re-exec, launcher script, File->Open) doesn't attribute the previous game's
        unimplemented syscalls / unknown devices to the next one. Without the reset the table is

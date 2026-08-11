@@ -83,6 +83,9 @@ static uint32_t load_interp(const char *guest_interp) {
     map_loads(buf, eh, INTERP_BASE);
     uint32_t entry = INTERP_BASE + eh->e_entry;
     if (g_trace) fprintf(stderr, "  interp %s -> base=%08x entry=%08x\n", host, INTERP_BASE, entry);
+    /* ld.so is normally NOT stripped, so this is often the richest symbol source available -- and
+       it is exactly what you need when a dynamic title dies during relocation. */
+    sym_load_image_buf(buf, sz, INTERP_BASE, guest_interp);
     free(buf);
     return entry;
 }
@@ -190,6 +193,10 @@ uint32_t load_elf(const char *path) {
        libm never writes -> record the double-returning libm PLT stubs so the engine can shim them
        (oabi_libm.c). GP2X-only: EABI (Wiz/Caanoo) titles use AAPCS double args + r0/r1 returns. */
     if (interp[0] && g_device == 0) oabi_libm_scan(buf, sz);
+    /* Index the main image's symbols while we still hold the file buffer (it is freed below).
+       Unconditional, unlike oabi_libm_scan: a symbol table is useful on every device, and most of
+       these titles are stripped so this simply finds nothing and costs nothing. */
+    sym_load_image_buf(buf, sz, 0, path);
     g_brk_start = g_brk = ALIGN_UP(max_end);
     map_region(g_brk, PAGE, UC_PROT_READ | UC_PROT_WRITE);  /* initial brk page */
 

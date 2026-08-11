@@ -28,6 +28,7 @@
 #include "report.h"   /* structured run telemetry (me_report / me_report_flush_json) */
 #include "ctl.h"      /* debug control channel (ME_CTL); compiled out of release bundles */
 #include "dbg.h"      /* pause / step / breakpoints (inert until armed) */
+#include "symbols.h"  /* addr <-> symbol, where a symbol table survives */
 #include "paths.h"    /* portable, user-configurable storage roots (settings/firmware/cache) */
 
 /* ---- guest virtual memory layout ---- */

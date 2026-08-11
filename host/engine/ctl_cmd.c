@@ -27,7 +27,8 @@ static void reg_snapshot(struct thread *t, uint32_t *out17) {
     for (int i = 0; i < 17; i++) uc_reg_read(t->uc, g_sregs[i], &out17[i]);
 }
 
-static void emit_stop(struct jw *w);   /* defined with the debugger commands below */
+static void emit_stop(struct jw *w);                                    /* debugger cmds, below */
+static void jw_sym_for(struct jw *w, const char *key, uint32_t addr);   /* symbol cmds, below */
 
 /* ---- individual commands --------------------------------------------------- */
 
@@ -84,11 +85,16 @@ static void cmd_status(struct jw *w) {
 static void cmd_threads(struct jw *w) {
     static const char *sn[] = {"FREE", "RUN", "BLOCKED", "SLEEPING", "DEAD"};
     jw_kv_bool(w, "ok", 1);
-    /* Registers are read while the owning thread may be executing: a torn peek, not a snapshot.
-       Say so rather than letting a caller trust it. */
-    jw_kv_bool(w, "stale", 1);
-    jw_kv_str(w, "note", "registers are read from running CPUs and may be torn; a pause "
-                         "primitive is not implemented in this phase");
+    /* While paused every thread is parked or blocked in a syscall -- not executing -- so the
+       registers are a real snapshot. While running they are a torn peek, and saying so is the
+       whole point: a caller must know which it got. */
+    int paused = dbg_is_paused();
+    jw_kv_bool(w, "stale", !paused);
+    jw_kv_str(w, "note", paused
+              ? "paused: threads are parked or blocked in a syscall, so these registers are a "
+                "consistent snapshot"
+              : "running: registers are sampled from live CPUs and may be torn -- pause first for "
+                "a trustworthy snapshot");
     jw_kv_i64(w, "nth", g_nth);
     jw_key(w, "threads"); jw_raw(w, "[");
     for (int i = 0; i < g_nth; i++) {
@@ -122,6 +128,22 @@ static void cmd_threads(struct jw *w) {
         for (int k = 0; k < n; k++) { jw_comma(w); char b[16];
             snprintf(b, sizeof b, "%u", ra[k]); jw_raw(w, b); }
         jw_raw(w, "]");
+        jw_sym_for(w, "pc_sym", r[15]);
+        jw_sym_for(w, "lr_sym", r[14]);
+        /* Symbolised call chain, where a symbol table survived. Emitted alongside the raw
+           addresses rather than instead of them: most of these titles are stripped, so the raw
+           chain is usually all there is. */
+        if (sym_count()) {
+            jw_key(w, "ra_sym"); jw_raw(w, "[");
+            for (int k = 0; k < n; k++) {
+                const char *nm = NULL, *img = NULL; uint32_t off = 0;
+                jw_comma(w);
+                if (sym_lookup(ra[k], &nm, &off, &img)) {
+                    char b[160]; snprintf(b, sizeof b, "%s+0x%x", nm, off); jw_str(w, b);
+                } else jw_raw(w, "null");
+            }
+            jw_raw(w, "]");
+        }
         jw_raw(w, "}");
     }
     jw_raw(w, "]");
@@ -287,6 +309,7 @@ static void emit_stop(struct jw *w) {
     jw_kv_str(w, "reason", stop_reason_str(s.reason));
     jw_kv_i64(w, "tid", s.tid);
     jw_kv_u32(w, "pc", s.pc);
+    jw_sym_for(w, "pc_sym", s.pc);
     jw_kv_i64(w, "id", s.id);
     if (s.reason == DBG_WP) {
         jw_kv_u32(w, "addr", s.addr);
@@ -449,6 +472,65 @@ static int cmd_mem_write(const struct jp *req, struct jw *w, const uint8_t *payl
     return 0;
 }
 
+/* ---- symbols --------------------------------------------------------------- */
+/* Emit "name+0x1c" (or nothing) for an address, as a sibling key. */
+static void jw_sym_for(struct jw *w, const char *key, uint32_t addr) {
+    const char *nm = NULL, *img = NULL; uint32_t off = 0;
+    if (!sym_lookup(addr, &nm, &off, &img)) return;
+    char b[160];
+    if (off) snprintf(b, sizeof b, "%s+0x%x", nm, off);
+    else     snprintf(b, sizeof b, "%s", nm);
+    jw_kv_str(w, key, b);
+}
+
+static void cmd_sym(const struct jp *req, struct jw *w, const char *cmd) {
+    if (!strcmp(cmd, "sym.at")) {
+        long long a = jp_int(req, "addr", -1);
+        const char *nm = NULL, *img = NULL; uint32_t off = 0;
+        jw_kv_bool(w, "ok", 1);
+        jw_kv_u32(w, "addr", (uint32_t)a);
+        if (a >= 0 && sym_lookup((uint32_t)a, &nm, &off, &img)) {
+            jw_kv_str(w, "name", nm);
+            jw_kv_u32(w, "offset", off);
+            jw_kv_str(w, "image", img);
+        } else {
+            jw_kv_str(w, "name", NULL);
+            jw_kv_str(w, "note", sym_count() ? "no symbol covers that address"
+                                             : "this title has no symbol table (stripped static "
+                                               "-- use the thread backtrace instead)");
+        }
+    } else if (!strcmp(cmd, "sym.find")) {
+        const char *n = jp_get(req, "name");
+        uint32_t addr = 0, size = 0;
+        if (n && sym_find(n, &addr, &size)) {
+            jw_kv_bool(w, "ok", 1);
+            jw_kv_str(w, "name", n);
+            jw_kv_u32(w, "addr", addr);
+            jw_kv_u32(w, "size", size);
+        } else {
+            jw_kv_bool(w, "ok", 0);
+            jw_kv_str(w, "err", "not_found");
+            jw_kv_i64(w, "symbols_loaded", sym_count());
+        }
+    } else {   /* sym.list */
+        int limit = (int)jp_int(req, "limit", 100);
+        int start = (int)jp_int(req, "start", 0);
+        if (limit < 1) limit = 1;
+        if (limit > 500) limit = 500;
+        jw_kv_bool(w, "ok", 1);
+        jw_kv_i64(w, "total", sym_count());
+        jw_key(w, "symbols"); jw_raw(w, "[");
+        for (int i = start, n = 0; n < limit; i++, n++) {
+            uint32_t a; const char *nm, *img;
+            if (!sym_iter(i, &a, &nm, &img)) break;
+            jw_comma(w); jw_raw(w, "{");
+            jw_kv_u32(w, "addr", a); jw_kv_str(w, "name", nm); jw_kv_str(w, "image", img);
+            jw_raw(w, "}");
+        }
+        jw_raw(w, "]");
+    }
+}
+
 static void cmd_report(struct jw *w) {
     jw_kv_bool(w, "ok", 1);
     jw_kv_bool(w, "active", me_report_active() != 0);
@@ -485,12 +567,13 @@ int ctl_dispatch(const struct jp *req, struct jw *w, const uint8_t **bin, size_t
     else if (!strcmp(cmd, "step"))      cmd_step(req, w);
     else if (!strncmp(cmd, "bp.", 3))   cmd_bp(req, w, cmd);
     else if (!strncmp(cmd, "wp.", 3))   cmd_wp(req, w, cmd);
+    else if (!strncmp(cmd, "sym.", 4))  cmd_sym(req, w, cmd);
     else {
         jw_kv_bool(w, "ok", 0);
         jw_kv_str(w, "err", "unknown_cmd");
         jw_kv_str(w, "detail", "known: hello status threads mem.map mem.read mem.write dev.state "
                                "frame.get report pause resume step bp.add bp.del bp.list bp.clear "
-                               "wp.add wp.del wp.list");
+                               "wp.add wp.del wp.list sym.at sym.find sym.list");
     }
     jw_raw(w, "}");
     return 0;

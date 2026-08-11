@@ -326,15 +326,22 @@ def cpu_state(session: str | None = None) -> dict:
     out = []
     for t in hdr["threads"]:
         r = t["regs"]
+        ra_sym = t.get("ra_sym") or []
+        bt = []
+        for i, v in enumerate(t["ra"]):
+            nm = ra_sym[i] if i < len(ra_sym) else None
+            bt.append(f"0x{v:08x}  {nm}" if nm else "0x%08x" % v)
         out.append({
             "tid": t["tid"], "state": t["state"], "has_cpu": t["has_cpu"],
-            "pc": "0x%08x" % r[15], "lr": "0x%08x" % r[14], "sp": "0x%08x" % r[13],
+            "pc": "0x%08x" % r[15], "pc_sym": t.get("pc_sym"),
+            "lr": "0x%08x" % r[14], "lr_sym": t.get("lr_sym"),
+            "sp": "0x%08x" % r[13],
             "cpsr": "0x%08x" % r[16],
             "r": ["0x%08x" % v for v in r[:13]],
             "last_syscall_pc": "0x%08x" % t["last_pc"],
             "fpa": t["fpa"], "fpsr": t["fpsr"],
             "sig_pending": t["sig_pending"], "sig_blocked": t["sig_blocked"],
-            "backtrace": ["0x%08x" % v for v in t["ra"]],
+            "backtrace": bt,
         })
     return {"nth": hdr["nth"], "stale": hdr.get("stale", True),
             "note": hdr.get("note"), "threads": out}
@@ -363,6 +370,105 @@ def device_state(session: str | None = None, include_palette: bool = False) -> d
     elif hdr["palette_captured"]:
         out["palette_note"] = "256 entries captured; pass include_palette=true to see them"
     return out
+
+
+# --------------------------------------------------------------------------- debugger
+@mcp.tool(description="Stop every guest thread. Reports how many parked vs are blocked in a "
+                      "syscall vs failed to quiesce, and why execution stopped (a breakpoint hit "
+                      "is preserved, not overwritten). Registers are only trustworthy while paused.")
+def pause(session: str | None = None, timeout_ms: int = 2000) -> dict:
+    return MGR.get(session).ctl().ok("pause", timeout_ms=timeout_ms)
+
+
+@mcp.tool(description="Resume all guest threads.")
+def resume(session: str | None = None) -> dict:
+    return MGR.get(session).ctl().ok("resume")
+
+
+@mcp.tool(description="Single-step a parked thread n instructions. An SVC steps over the whole "
+                      "syscall. Requires a pause first.")
+def step(session: str | None = None, tid: int | None = None, n: int = 1) -> dict:
+    kw = {"n": n}
+    if tid is not None:
+        kw["tid"] = tid
+    return MGR.get(session).ctl().ok("step", **kw)
+
+
+@mcp.tool(description="Set a breakpoint at an address (accepts 0x form or a symbol name). "
+                      "Execution stops the whole world when any thread reaches it; poll status to "
+                      "see the hit.")
+def breakpoint_set(addr: str, session: str | None = None) -> dict:
+    s = MGR.get(session)
+    c = s.ctl()
+    a = _resolve_addr(c, addr)
+    r = c.ok("bp.add", addr=a)
+    r["resolved_addr"] = hex(a)
+    return r
+
+
+@mcp.tool(description="List, delete, or clear breakpoints. Pass id to delete one, or clear=true "
+                      "to remove all.")
+def breakpoints(session: str | None = None, id: int | None = None,
+                clear: bool = False) -> dict:
+    c = MGR.get(session).ctl()
+    if clear:
+        c.ok("bp.clear")
+    elif id is not None:
+        c.ok("bp.del", id=id)
+    return c.ok("bp.list")
+
+
+@mcp.tool(description="Set or list write watchpoints on guest memory. The stop lands just after "
+                      "the store completes, so it is not instruction-precise.")
+def watchpoint(addr: str | None = None, length: int = 4, session: str | None = None,
+               id: int | None = None) -> dict:
+    c = MGR.get(session).ctl()
+    if addr is not None:
+        c.ok("wp.add", addr=_resolve_addr(c, addr), len=length)
+    elif id is not None:
+        c.ok("wp.del", id=id)
+    return c.ok("wp.list")
+
+
+@mcp.tool(description="Resolve a symbol: pass `addr` for address->name+offset, or `name` for "
+                      "name->address. Many titles are stripped statics with no symbol table; the "
+                      "thread backtrace is the fallback there.")
+def symbol(addr: str | None = None, name: str | None = None,
+           session: str | None = None) -> dict:
+    c = MGR.get(session).ctl()
+    if name:
+        hdr, _ = c.call("sym.find", name=name)
+        if hdr.get("ok"):
+            return {"name": name, "addr": "0x%08x" % hdr["addr"], "size": hdr["size"]}
+        return {"ok": False, "name": name, "error": "not found",
+                "symbols_loaded": hdr.get("symbols_loaded", 0)}
+    if addr is not None:
+        hdr, _ = c.call("sym.at", addr=int(addr, 0) if isinstance(addr, str) else int(addr))
+        out = {"addr": "0x%08x" % hdr.get("addr", 0), "name": hdr.get("name")}
+        if hdr.get("name"):
+            out["offset"] = "0x%x" % hdr.get("offset", 0)
+            out["image"] = hdr.get("image")
+        else:
+            out["note"] = hdr.get("note")
+        return out
+    hdr, _ = c.call("sym.list", limit=1)
+    return {"symbols_loaded": hdr.get("total", 0),
+            "hint": "pass addr= or name="}
+
+
+def _resolve_addr(c, addr) -> int:
+    """Accept 0x1234, 1234, or a symbol name."""
+    if isinstance(addr, int):
+        return addr
+    a = addr.strip()
+    try:
+        return int(a, 0)
+    except ValueError:
+        hdr, _ = c.call("sym.find", name=a)
+        if hdr.get("ok"):
+            return hdr["addr"]
+        raise ValueError(f"{a!r} is neither an address nor a known symbol "
+                         f"({hdr.get('symbols_loaded', 0)} symbols loaded)")
 
 
 # --------------------------------------------------------------------------- corpus
