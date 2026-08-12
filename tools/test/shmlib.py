@@ -128,6 +128,23 @@ def buttons_mask(names):
     return m
 
 
+def read_frame_raw(path, w, h):
+    """The visible frame as tightly packed RGB565 (w*h*2 bytes), or None.
+
+    For recording motion: this is a byte copy with the row stride cropped off, which is cheap
+    enough to run at video rates. Encoding to PNG here instead would cost ~200ms a frame and
+    change the timing of the very thing being measured. Decode later with
+    PIL.Image.frombytes("RGB", (w, h), data, "raw", "BGR;16").
+    """
+    if w == 0 or h == 0:
+        return None
+    data = _read_pixels(path, w, h)
+    row, stride = w * 2, MAXW * 2
+    if len(data) < stride * (h - 1) + row:
+        return None
+    return b"".join(data[y * stride: y * stride + row] for y in range(h))
+
+
 def _read_pixels(path, w, h):
     with open(path, "rb") as f:
         f.seek(PIX_OFF)

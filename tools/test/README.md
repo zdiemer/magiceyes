@@ -88,9 +88,19 @@ python3 tools/test/compat_issues.py  --manifest tools/test/compat_manifest.json 
 | `run_nas_sweep.sh` | Mounts the corpus share, stages engine+assets on **ext4** (drvfs costs ~20% fps and flips tiers), sweeps GP2X/Wiz/Caanoo with the right `MAGICEYES_DEVICE` |
 | `compat_report.py` | Classifies every title into **one** failure group, ranks groups by titles blocked, writes `CORPUS_SWEEP.md` + `compat_manifest.json` |
 | `compat_frames.py` | Picks the most representative captured frame per title (stdlib-only PNG decode) |
+| `compat_visual.py` | Measures the frames for shear, duplication, noise and wrong geometry, so a title that runs but draws garbage is graded `ingame` instead of `playable` |
+| `compat_clips.py` | Encodes each run's recorded window into an animated GIF (needs Pillow; skipped without it) |
 | `compat_syscalls.py` | ARM syscall numbers to names, so a blocker reads `97 (setpriority)` |
 | `compat_publish.py` | Copies chosen screenshots into the tracker repo and pushes them in one commit |
 | `compat_issues.py` | Files/updates one issue per title, keyed by a hidden marker so re-runs update instead of duplicating |
+
+### Motion clips
+
+`run_title.py --clip-fps 15 --clip-start 8 --clip-secs 6` records a window of the run as raw
+RGB565 frames (`clip.raw` + `clip.json`), which `compat_clips.py` turns into a GIF. Recording is a
+byte copy per frame with the row stride cropped (`shmlib.read_frame_raw`) precisely so it does not
+disturb the run: encoding a PNG inline costs ~200ms a frame and would change the frame rate being
+measured. A control run with and without recording confirmed the fps is unchanged.
 
 `CORPUS_SWEEP.md` is the generated whole-corpus report (every title, homebrew included). The
 top-level `COMPATIBILITY.md` is a different, hand-curated document covering commercial titles only;

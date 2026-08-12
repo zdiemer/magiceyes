@@ -45,7 +45,8 @@ def discover(roots, include_all=False):
     return titles
 
 
-def run_corpus(roots, secs=20.0, jobs=1, out_dir=None, include_all=False, press=None, engine=None):
+def run_corpus(roots, secs=20.0, jobs=1, out_dir=None, include_all=False, press=None, engine=None,
+               clip_fps=0, clip_start=6.0, clip_secs=0.0):
     out_dir = out_dir or os.path.join(REPO, "tools", "test", "results")
     os.makedirs(out_dir, exist_ok=True)
     titles = discover(roots, include_all)
@@ -58,7 +59,8 @@ def run_corpus(roots, secs=20.0, jobs=1, out_dir=None, include_all=False, press=
         name = os.path.basename(path.rstrip("/\\"))
         tdir = os.path.join(out_dir, "%03d_%s" % (i, re.sub(r"[^A-Za-z0-9._-]", "_", name)[:40]))
         return run_title.run_one(path, secs=secs, engine=engine, out_dir=tdir,
-                                 shm_name="gp2x_fb_%d" % i, press=press)
+                                 shm_name="gp2x_fb_%d" % i, press=press,
+                                 clip_fps=clip_fps, clip_start=clip_start, clip_secs=clip_secs)
 
     verdicts = []
     if jobs <= 1:
@@ -163,9 +165,13 @@ def main():
     ap.add_argument("--engine", default=None)
     ap.add_argument("--press", default=None)
     ap.add_argument("--all", action="store_true", help="don't skip firmware/lib-looking entries")
+    ap.add_argument("--clip-fps", type=int, default=0, help="record a motion clip at N fps")
+    ap.add_argument("--clip-start", type=float, default=6.0, help="seconds in to start recording")
+    ap.add_argument("--clip-secs", type=float, default=0.0, help="length of the recorded window")
     a = ap.parse_args()
     r = run_corpus(a.roots, secs=a.secs, jobs=a.jobs, out_dir=a.out, include_all=a.all,
-                   press=a.press, engine=a.engine)
+                   press=a.press, engine=a.engine,
+                   clip_fps=a.clip_fps, clip_start=a.clip_start, clip_secs=a.clip_secs)
     return 0 if r else 2
 
 

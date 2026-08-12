@@ -134,7 +134,12 @@ def body_for(r, shot_url, clip_url=""):
     if clip_url:
         A("![run](%s)" % clip_url)
         A("")
-        A("*The whole run as a time-lapse, one frame every couple of seconds.*")
+        c = r.get("clip") or {}
+        if c.get("fps"):
+            A("*%.0f seconds of play, recorded at %d fps.*"
+              % (c.get("frames", 0) / max(1, c["fps"]), c["fps"]))
+        else:
+            A("*The run as a time-lapse, one frame every couple of seconds.*")
         A("")
     if shot_url:
         A("![representative frame](%s)" % shot_url)

@@ -244,6 +244,7 @@ def build(results_dir):
                 "log_tail": "\n".join(log.strip().splitlines()[-12:]),
                 "screenshot": shot,
                 "frame_pngs": v.get("frame_pngs") or [],   # compat_clips.py stitches these
+                "clip": v.get("clip"),                     # recorded motion, when the run captured it
                 # Frames advancing + audio + 25fps can still mean the title only ever paints one
                 # flat colour. It scores 'playable' but plainly is not, so mark it rather than
                 # letting it sit in the working pile.

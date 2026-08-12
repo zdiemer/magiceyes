@@ -40,7 +40,8 @@ def parse_press(script):
 
 
 def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
-            press=None, headed=False, extra_env=None, quiet=False, replay=None):
+            press=None, headed=False, extra_env=None, quiet=False, replay=None,
+            clip_fps=0, clip_start=6.0, clip_secs=0.0):
     engine = engine or os.path.join(REPO, "bin", "me_unicorn")
     if not os.path.exists(engine):
         return {"title": os.path.basename(game), "path": game, "status": "error",
@@ -104,6 +105,16 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     hold_until = 0.0
     held_mask = 0
     poll = 0.02 if rep is not None else 0.1      # finer polling tracks frames during replay
+
+    # Motion clip: a window of raw frames at a real frame rate, for a smooth playback later. Only
+    # the byte copy happens here (see shmlib.read_frame_raw); encoding is done offline so recording
+    # does not slow down the run it is recording.
+    clip_f = clip_w = clip_h = clip_n = 0
+    clip_next = None
+    if clip_fps > 0 and clip_secs > 0:
+        clip_f = open(os.path.join(out_dir, "clip.raw"), "wb")
+        clip_next = clip_start
+        poll = min(poll, 1.0 / (clip_fps * 2.0))     # Nyquist, so frames land on time
     hard_deadline = t0 + secs + 12  # backstop if the engine ignores ME_RUN_SECS / hangs
 
     while True:
@@ -122,6 +133,19 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
                 frames_seen = last_seq - seq0
             audio_active = audio_active or h["audio_active"]
             aw_max = max(aw_max, h["a_write"])
+            if clip_next is not None and h["width"]:
+                el_c = now - t0
+                if el_c >= clip_next and el_c < clip_start + clip_secs:
+                    raw = shmlib.read_frame_raw(spath, h["width"], h["height"])
+                    if raw:
+                        if not clip_n:
+                            clip_w, clip_h = h["width"], h["height"]
+                        if (h["width"], h["height"]) == (clip_w, clip_h):
+                            clip_f.write(raw)
+                            clip_n += 1
+                    clip_next += 1.0 / clip_fps
+                elif el_c >= clip_start + clip_secs:
+                    clip_next = None
             if now - t0 >= next_cap and h["width"]:
                 png = os.path.join(out_dir, "frame%02d.png" % len(frame_pngs))
                 if shmlib.save_png(spath, png, h["width"], h["height"]):
@@ -167,6 +191,19 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
         stderr_f.close()
     except OSError:
         pass
+    clip = None
+    if clip_f:
+        clip_f.close()
+        if clip_n >= 2:
+            clip = {"path": os.path.join(out_dir, "clip.raw"), "w": clip_w, "h": clip_h,
+                    "fps": clip_fps, "frames": clip_n}
+            with open(os.path.join(out_dir, "clip.json"), "w") as f:
+                json.dump(clip, f)
+        else:
+            try:
+                os.unlink(os.path.join(out_dir, "clip.raw"))
+            except OSError:
+                pass
 
     elapsed = max(0.001, time.time() - t0)
     fps = frames_seen / elapsed
@@ -198,6 +235,7 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
         "replay": replay,
         "replay_hashes": replay_hashes,   # [[frame_seq, hash], ...] -- deterministic, for baselines
         "frame_pngs": frame_pngs,
+        "clip": clip,
         "log": log_path,
         "stderr": stderr_path,
         "report": report_path,
@@ -266,13 +304,17 @@ def main():
     ap.add_argument("--out", default=None, help="output dir (default: a temp dir)")
     ap.add_argument("--shm-name", default="gp2x_fb")
     ap.add_argument("--press", default=None, help='e.g. "UP:0.5,A:0.2,B+DOWN:0.3"')
+    ap.add_argument("--clip-fps", type=int, default=0, help="record a motion clip at N fps")
+    ap.add_argument("--clip-start", type=float, default=6.0, help="seconds in to start recording")
+    ap.add_argument("--clip-secs", type=float, default=0.0, help="length of the recorded window")
     ap.add_argument("--replay", default=None,
                     help="play back a recorded input file (frame-keyed; forces deterministic vtime)")
     ap.add_argument("--headed", action="store_true", help="also open the live viewer window")
     ap.add_argument("--json", action="store_true", help="print the full verdict JSON")
     a = ap.parse_args()
     v = run_one(a.game, secs=a.secs, engine=a.engine, out_dir=a.out, shm_name=a.shm_name,
-                press=a.press, headed=a.headed, replay=a.replay)
+                press=a.press, headed=a.headed, replay=a.replay,
+                clip_fps=a.clip_fps, clip_start=a.clip_start, clip_secs=a.clip_secs)
     if a.json:
         print(json.dumps(v, indent=2))
     else:

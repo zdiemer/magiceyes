@@ -17,10 +17,19 @@ set -u
 SECS=25
 JOBS=6
 STAGE_ONLY=0
+# Motion clip: a window of raw frames at a real rate, encoded to GIF afterwards by
+# compat_clips.py. Recording is a byte copy per frame, and a control run confirmed it does not
+# move the frame rate it is measuring.
+CLIP_FPS=15
+CLIP_START=8
+CLIP_SECS=6
 while [ $# -gt 0 ]; do
   case "$1" in
     --secs) SECS=$2; shift 2;;
     --jobs) JOBS=$2; shift 2;;
+    --clip-fps) CLIP_FPS=$2; shift 2;;
+    --clip-secs) CLIP_SECS=$2; shift 2;;
+    --no-clips) CLIP_FPS=0; shift;;
     --stage-only) STAGE_ONLY=1; shift;;
     *) echo "unknown arg: $1"; exit 2;;
   esac
@@ -66,6 +75,7 @@ cd "$STAGE"
     if [ -n "$dev" ]; then export MAGICEYES_DEVICE="$dev"; else unset MAGICEYES_DEVICE; fi
     python3 "$STAGE/harness/run_corpus.py" "/mnt/s/$dir" \
       --secs "$SECS" --jobs "$JOBS" --press "$PRESS" \
+      --clip-fps "$CLIP_FPS" --clip-start "$CLIP_START" --clip-secs "$CLIP_SECS" \
       --engine "$STAGE/me_unicorn" --out "$STAGE/results/$tag"
     echo "---- $dir done $(date -Is) ----"
   done
