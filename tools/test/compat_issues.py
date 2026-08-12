@@ -30,6 +30,10 @@ GROUP_BLURB = {
     "playable":             "This title runs. It held at or above 25 fps, rendered real frames, and "
                             "produced audio for the whole sampled run. Tracked here so regressions "
                             "have somewhere to land.",
+    "garbled-visuals":      "The title runs by every measure the harness takes, but the picture is "
+                            "wrong. Details below, from measuring the captured frame.",
+    "flat-fill":            "The title runs by every measure the harness takes, while only ever "
+                            "painting a flat colour.",
     "no-executable":        "The engine found no runnable `.gpe` in this entry, so nothing was ever "
                             "launched. Usually means the folder is a patch, a media pack, or an "
                             "incomplete dump rather than a game.",
@@ -125,7 +129,7 @@ def body_for(r, shot_url):
     B = []
     A = B.append
     A("**Platform:** %s  |  **Status:** `%s`  |  **Failure group:** `%s`"
-      % (r["platform"], r["status"], r["group"]))
+      % (r["platform"], r.get("tier", r["status"]), r["group"]))
     A("")
     if shot_url:
         A("![last rendered frame](%s)" % shot_url)
@@ -141,9 +145,23 @@ def body_for(r, shot_url):
     A(GROUP_BLURB.get(r["group"], r["group_title"]))
     if r.get("flat_fill"):
         A("")
-        A("**The tier overstates this one.** Frames advanced and audio ran, which is what earns "
-          "`%s`, but the framebuffer never held more than a colour or two. Treat it as broken "
-          "rather than working." % r["status"])
+        A("**Graded down from `%s`.** Frames advanced and audio ran, but the framebuffer never "
+          "held more than a colour or two." % r["status"])
+    if r.get("visual_suspicions"):
+        A("")
+        A("**Graded down from `%s`.** It passes every running check, but measuring the captured "
+          "frame says the picture itself is wrong:" % r["status"])
+        A("")
+        for s in r["visual_suspicions"]:
+            A("- %s" % s)
+        v = r.get("visual") or {}
+        if v:
+            A("")
+            A("<sub>frame %sx%s, per-row shear %s px, peak self-similarity %s at %s px, "
+              "halves L/R %s and T/B %s, neighbour noise %s</sub>"
+              % (v.get("w"), v.get("h"), v.get("skew_px"), v.get("repeat_score"),
+                 v.get("repeat_at"), v.get("dup_half_h"), v.get("dup_half_v"),
+                 v.get("edge_energy")))
     if r["fatal"]:
         A("")
         A("The engine reported:")
@@ -157,7 +175,8 @@ def body_for(r, shot_url):
     A("")
     A("| Metric | Value |")
     A("|---|---|")
-    A("| Status tier | `%s` |" % r["status"])
+    A("| Reported tier | `%s` |" % r.get("tier", r["status"]))
+    A("| Harness status | `%s` (frame rate / non-black / audio only) |" % r["status"])
     A("| Frames rendered | %d |" % r["frames"])
     A("| Frame rate | %s fps |" % r["fps"])
     A("| Run length | %s s |" % r["secs"])
@@ -225,43 +244,58 @@ def body_for(r, shot_url):
     return "\n".join(B)
 
 
-def add_labels_individually(repo, number, labels):
-    """Apply labels one at a time so a single unusable one does not strip the others."""
-    for l in labels:
-        try:
-            sh_retry(["gh", "issue", "edit", str(number), "--repo", repo, "--add-label", l])
-        except RuntimeError:
-            print("     could not apply label %r to #%s" % (l, number), file=sys.stderr)
-        time.sleep(0.2)
+def add_labels_individually(repo, number, labels, stale=()):
+    """Apply (and drop) labels one at a time so a single unusable one does not strip the others."""
+    for flag, names in (("--add-label", labels), ("--remove-label", stale)):
+        for l in names:
+            try:
+                sh_retry(["gh", "issue", "edit", str(number), "--repo", repo, flag, l])
+            except RuntimeError:
+                print("     could not %s %r on #%s" % (flag, l, number), file=sys.stderr)
+            time.sleep(0.2)
+
+
+# Label namespaces this tool owns. Anything here that a title no longer wants gets removed, so a
+# re-graded title does not end up carrying both `status: renders` and `status: ingame`. Labels
+# outside these (hand-applied ones) are left alone.
+MANAGED_PREFIXES = ("platform: ", "status: ", "group: ", "blocker: ")
+MANAGED_FLAGS = {"no audio", "needs triage", "flat fill", "visual corruption"}
+
+
+def is_managed(name):
+    return name.startswith(MANAGED_PREFIXES) or name in MANAGED_FLAGS
 
 
 def existing_issues(repo):
-    """marker -> issue number, for idempotent re-runs."""
+    """marker -> (issue number, set of current labels), for idempotent re-runs."""
     out = sh_retry(["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "2000",
-                    "--json", "number,body"])
+                    "--json", "number,body,labels"])
     found = {}
     for it in json.loads(out or "[]"):
         m = re.search(re.escape(MARKER) + r": ([^\s]+) -->", it.get("body") or "")
         if m:
-            found[m.group(1)] = it["number"]
+            found[m.group(1)] = (it["number"], {l["name"] for l in it.get("labels", [])})
     return found
 
 
-STATUS_COLOUR = {"playable": "0e8a16", "renders": "bfd4f2", "black": "5319e7",
+STATUS_COLOUR = {"playable": "0e8a16", "ingame": "fbca04", "renders": "bfd4f2", "black": "5319e7",
                  "incompatible": "d93f0b", "crashed": "b60205", "error": "e99695"}
 
 
 def labels_for(r):
     """Categorisation lives in labels: platform, tier, failure group, specific blocker."""
-    out = ["platform: %s" % r["platform"], "status: %s" % r["status"], "group: %s" % r["group"]]
+    tier = r.get("tier", r["status"])
+    out = ["platform: %s" % r["platform"], "status: %s" % tier, "group: %s" % r["group"]]
     if r.get("subgroup"):
         out.append("blocker: %s" % r["subgroup"][:45])
-    if r["status"] in ("playable", "renders") and not r.get("audio_active"):
+    if tier in ("playable", "ingame") and not r.get("audio_active"):
         out.append("no audio")
     if r["group"] == "no-frames":
         out.append("needs triage")
     if r.get("flat_fill"):
         out.append("flat fill")
+    if r.get("visual_suspicions"):
+        out.append("visual corruption")
     return out
 
 
@@ -346,9 +380,12 @@ def main():
         labels = labels_for(r)
         try:
             if mk in have:
-                n = str(have[mk])
+                n, current = have[mk]
+                n = str(n)
                 base = ["gh", "issue", "edit", n, "--repo", a.repo, "--title", title, "--body", body]
                 lab = sum([["--add-label", l] for l in labels], [])
+                stale = sorted(l for l in current if is_managed(l) and l not in labels)
+                lab += sum([["--remove-label", l] for l in stale], [])
                 try:
                     sh_retry(base + lab)
                 except RuntimeError as e:
@@ -357,7 +394,7 @@ def main():
                     if "not found" not in str(e).lower():
                         raise
                     sh_retry(base)
-                    add_labels_individually(a.repo, n, labels)
+                    add_labels_individually(a.repo, n, labels, stale)
                 updated += 1
             else:
                 base = ["gh", "issue", "create", "--repo", a.repo, "--title", title, "--body", body]

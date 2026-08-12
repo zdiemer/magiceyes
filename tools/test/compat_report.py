@@ -21,10 +21,27 @@ import argparse, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat_syscalls import SYSCALL_NAMES
 from compat_frames import pick_screenshot
+import compat_visual
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PLATFORMS = [("gp2x", "GP2X"), ("wiz", "Wiz"), ("caanoo", "Caanoo")]
 STATUS_ORDER = ["error", "crashed", "incompatible", "black", "renders", "playable"]
+
+# The harness tiers answer "did it run". They cannot see that the picture is sheared, tiled or a
+# single flat colour, so a visibly broken title still scores `playable`. TIER is the reported
+# grade and adds `ingame`, matching the vocabulary the curated COMPATIBILITY.md already uses:
+# boots and renders gameplay, but with a notable gap. The raw harness status is kept alongside it
+# (and baseline.py still gates on that, so its committed baselines are unaffected).
+TIER_ORDER = ["error", "crashed", "incompatible", "black", "ingame", "playable"]
+
+
+def tier_for(v, flat_fill, suspicions):
+    status = v.get("status")
+    if status == "renders":
+        return "ingame"          # rendered gameplay, but slow or silent
+    if status == "playable":
+        return "ingame" if (flat_fill or suspicions) else "playable"
+    return status
 
 # Engine fatal messages (host/engine/{main,loader,elf}.c) -> failure group. Ordered: first match
 # wins, so the most specific loader diagnosis beats the generic "never rendered".
@@ -106,9 +123,15 @@ def normalise_fatal(line):
     return re.sub(r"\s+", " ", s).strip(" :,.").lower()[:60]
 
 
-def classify(v, log, fatal):
+def classify(v, log, fatal, flat_fill=False, suspicions=()):
     """-> (group_key, group_title). Exactly one bucket per title, most-actionable first."""
     status = v.get("status")
+    # A title that renders can still be visibly wrong. Judge the picture before the tier.
+    if status in ("playable", "renders"):
+        if flat_fill:
+            return "flat-fill", "Draws only a flat colour"
+        if suspicions:
+            return "garbled-visuals", "Renders, but the picture is wrong"
     if status == "playable":
         return "playable", "Playable"
 
@@ -183,13 +206,18 @@ def build(results_dir):
         for v in rep.get("titles", []):
             log = read_log(v)
             fat = fatal_line(log)
-            key, gtitle = classify(v, log, fat)
             shot = pick_screenshot(v.get("frame_pngs") or [])
+            flat = bool(shot and shot.get("colours", 0) <= 2
+                        and v.get("status") in ("playable", "renders"))
+            vis = compat_visual.measure(shot["path"]) if shot else None
+            susp = compat_visual.suspicions(vis) if (vis and not flat) else []
+            key, gtitle = classify(v, log, fat, flat, susp)
             records.append({
                 "title": v.get("title"),
                 "platform": label,
                 "path": v.get("path"),
                 "status": v.get("status"),
+                "tier": tier_for(v, flat, susp),
                 "group": key,
                 "group_title": gtitle,
                 "subgroup": subgroup(v, key, fat),
@@ -213,12 +241,13 @@ def build(results_dir):
                 # Frames advancing + audio + 25fps can still mean the title only ever paints one
                 # flat colour. It scores 'playable' but plainly is not, so mark it rather than
                 # letting it sit in the working pile.
-                "flat_fill": bool(shot and shot.get("colours", 0) <= 2
-                                  and v.get("status") in ("playable", "renders")),
+                "flat_fill": flat,
+                "visual": vis,
+                "visual_suspicions": susp,
                 "out_dir": v.get("out_dir"),
             })
-    records.sort(key=lambda r: (STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER
-                                else 99, r["platform"], r["title"].lower()))
+    records.sort(key=lambda r: (TIER_ORDER.index(r["tier"]) if r["tier"] in TIER_ORDER else 99,
+                                r["platform"], r["title"].lower()))
     return records
 
 
@@ -242,29 +271,34 @@ def write_md(records, path):
       "Regenerate with `tools/test/compat_report.py`.\n")
 
     A("\n## Summary\n")
-    A("| Platform | Titles | Playable | Renders | Black | Incompatible | Crashed |")
+    A("| Platform | Titles | Playable | Ingame | Black | Incompatible | Crashed |")
     A("|---|--:|--:|--:|--:|--:|--:|")
     for _, label in PLATFORMS:
         rs = by_plat.get(label, [])
         if not rs:
             continue
-        c = _tally(rs, "status")
+        c = _tally(rs, "tier")
         A("| %s | %d | %d | %d | %d | %d | %d |" % (
-            label, len(rs), c.get("playable", 0), c.get("renders", 0), c.get("black", 0),
+            label, len(rs), c.get("playable", 0), c.get("ingame", 0), c.get("black", 0),
             c.get("incompatible", 0), c.get("crashed", 0)))
-    c = _tally(records, "status")
+    c = _tally(records, "tier")
     A("| **All** | **%d** | **%d** | **%d** | **%d** | **%d** | **%d** |" % (
-        len(records), c.get("playable", 0), c.get("renders", 0), c.get("black", 0),
+        len(records), c.get("playable", 0), c.get("ingame", 0), c.get("black", 0),
         c.get("incompatible", 0), c.get("crashed", 0)))
 
     A("\n### What the tiers mean\n")
     A("| Tier | Meaning |")
     A("|---|---|")
-    A("| `playable` | Sustained ≥25 fps, non-black, audio active |")
-    A("| `renders` | Rendered real frames, but low fps or no audio |")
+    A("| `playable` | Held ≥25 fps with audio, and the picture survived the visual checks |")
+    A("| `ingame` | Renders gameplay with a notable gap: slow, silent, a flat fill, or a picture "
+      "that is visibly wrong |")
     A("| `black` | Frames advanced, but every sampled frame was black |")
     A("| `incompatible` | Never rendered: died in the loader/ld.so, or no frame at all |")
     A("| `crashed` | Host fault after booting (engine exit 70) |")
+    A("")
+    A("`playable` and `ingame` are the reported grades. The harness's own tier (which only knows "
+      "frame rate, non-black and audio) is kept per title as `status`, and `baseline.py` still "
+      "gates on that.")
 
     A("\n## Failure groups (ranked by titles blocked)\n")
     A("One fix at the top of this table unblocks the whole row.\n")
@@ -284,6 +318,21 @@ def write_md(records, path):
                          for s, n in sorted(g["subs"].items(), key=lambda kv: -kv[1])[:4]) or "n/a"
         A("| **%s** (`%s`) | %d | %s | %s |" % (g["title"], key, len(g["titles"]),
                                                 ", ".join(plats), subs))
+
+    vis = [r for r in records if r.get("visual_suspicions")]
+    if vis:
+        A("\n## Renders, but the picture is wrong\n")
+        A("These %d titles pass the running checks (frames advancing, frame rate, audio) while the "
+          "frame itself is visibly broken, so they are graded `ingame` rather than `playable`. The "
+          "reasons come from measuring the captured frame: a consistent per-row offset means a "
+          "stride/pitch mismatch, large-scale repetition means the screen holds more than one copy "
+          "of itself, and noise far above what dithered artwork reaches means corrupt memory.\n"
+          % len(vis))
+        A("| Title | Platform | fps | What the frame looks like |")
+        A("|---|---|--:|---|")
+        for r in sorted(vis, key=lambda r: (r["platform"], r["title"].lower())):
+            A("| %s | %s | %s | %s |" % (r["title"].replace("|", "\\|"), r["platform"], r["fps"],
+                                         "; ".join(r["visual_suspicions"]).replace("|", "\\|")))
 
     flat = [r for r in records if r.get("flat_fill")]
     if flat:
@@ -320,15 +369,16 @@ def write_md(records, path):
         if not rs:
             continue
         A("\n### %s (%d titles)\n" % (label, len(rs)))
-        A("| Title | Status | fps | Frames | Audio | Failure group | Detail |")
+        A("| Title | Tier | fps | Frames | Audio | Failure group | Detail |")
         A("|---|---|--:|--:|:-:|---|---|")
         for r in rs:
-            detail = r["subgroup"] or (r["fatal"][:80] if r["fatal"] else "")
+            detail = (r["subgroup"] or "; ".join(r.get("visual_suspicions") or [])
+                      or (r["fatal"][:80] if r["fatal"] else ""))
             A("| %s | `%s` | %s | %d | %s | %s | %s |" % (
-                r["title"].replace("|", "\\|"), r["status"], r["fps"], r["frames"],
+                r["title"].replace("|", "\\|"), r["tier"], r["fps"], r["frames"],
                 "✓" if r["audio_active"] else "–",
                 "" if r["group"] == "playable" else r["group"],
-                detail.replace("|", "\\|")))
+                detail[:90].replace("|", "\\|")))
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(L) + "\n")
