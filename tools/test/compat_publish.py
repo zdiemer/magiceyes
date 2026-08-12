@@ -9,7 +9,7 @@ path, where every upload would be another API round-trip.
 Usage:
   compat_publish.py --manifest PATH --repo-dir DIR [--summary PATH] [--push]
 """
-import argparse, json, os, re, shutil, subprocess, sys
+import argparse, glob, json, os, re, shutil, subprocess, sys
 
 
 def slug(s):
@@ -29,6 +29,7 @@ def main():
 
     shots_root = os.path.join(a.repo_dir, "shots")
     copied = missing = 0
+    expected = set()
     for r in records:
         shot = r.get("screenshot")
         if not shot or not os.path.exists(shot.get("path", "")):
@@ -36,9 +37,21 @@ def main():
             continue
         dest_dir = os.path.join(shots_root, r["platform"])
         os.makedirs(dest_dir, exist_ok=True)
-        shutil.copyfile(shot["path"], os.path.join(dest_dir, slug(r["title"]) + ".png"))
+        dest = os.path.join(dest_dir, slug(r["title"]) + ".png")
+        shutil.copyfile(shot["path"], dest)
+        expected.add(os.path.abspath(dest))
         copied += 1
     print("screenshots: %d copied, %d titles had no usable frame" % (copied, missing))
+
+    # Drop screenshots from titles that no longer produce one, otherwise a rename or a title that
+    # stopped rendering leaves an orphan in the repo forever.
+    stale = 0
+    for p in glob.glob(os.path.join(shots_root, "*", "*.png")):
+        if os.path.abspath(p) not in expected:
+            os.unlink(p)
+            stale += 1
+    if stale:
+        print("  pruned %d stale screenshots" % stale)
 
     if a.summary and os.path.exists(a.summary):
         shutil.copyfile(a.summary, os.path.join(a.repo_dir, "COMPATIBILITY.md"))

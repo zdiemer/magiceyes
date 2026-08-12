@@ -355,8 +355,12 @@ def main():
     ap.add_argument("--shots-base-url", default="")
     ap.add_argument("--clips-base-url", default="")
     ap.add_argument("--clips-dir", default="", help="local clips dir, to know which ones exist")
-    ap.add_argument("--status", default="crashed,incompatible,black,renders,playable")
+    ap.add_argument("--status", default="crashed,incompatible,black,ingame,renders,playable",
+                    help="reported tiers to file (matches either the tier or the harness status)")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--only-file", default="", help="file of exact titles, one per line: update "
+                                                    "just these (a full pass over 1000+ issues "
+                                                    "takes an hour, so target small changes)")
     ap.add_argument("--sleep", type=float, default=3.0, help="pace GitHub writes")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
@@ -364,7 +368,11 @@ def main():
     with open(a.manifest) as f:
         records = json.load(f)["titles"]
     keep = {s.strip() for s in a.status.split(",") if s.strip()}
-    records = [r for r in records if r["status"] in keep]
+    records = [r for r in records if r.get("tier", r["status"]) in keep or r["status"] in keep]
+    if a.only_file:
+        with open(a.only_file) as f:
+            want = {ln.strip() for ln in f if ln.strip()}
+        records = [r for r in records if r["title"] in want]
     if a.limit:
         records = records[:a.limit]
     print("%d titles to track" % len(records))
