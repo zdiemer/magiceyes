@@ -69,6 +69,34 @@ the engine's structured run report:
 `shmlib.py` holds the shared shm reader + RGB565→PNG writer (pure stdlib). `run_corpus.py` imports
 `run_title.py`, which imports `shmlib`.
 
+## Whole-corpus compatibility sweep
+
+`run_corpus.py` scores a directory. The `compat_*` tools turn several of those runs into the
+published compatibility picture: a summary doc, and one tracker issue per title.
+
+```sh
+bash   tools/test/run_nas_sweep.sh                      # stage on ext4 + sweep all 3 platforms
+python3 tools/test/compat_report.py  --results ~/me-sweep/results
+python3 tools/test/compat_publish.py --manifest tools/test/compat_manifest.json \
+        --repo-dir ~/me-sweep/compat-repo --summary COMPATIBILITY.md --push
+python3 tools/test/compat_issues.py  --manifest tools/test/compat_manifest.json \
+        --repo zdiemer/magiceyes-compat --shots-base-url <raw url>
+```
+
+| Tool | Does |
+|---|---|
+| `run_nas_sweep.sh` | Mounts the corpus share, stages engine+assets on **ext4** (drvfs costs ~20% fps and flips tiers), sweeps GP2X/Wiz/Caanoo with the right `MAGICEYES_DEVICE` |
+| `compat_report.py` | Classifies every title into **one** failure group, ranks groups by titles blocked, writes `COMPATIBILITY.md` + `compat_manifest.json` |
+| `compat_frames.py` | Picks the most representative captured frame per title (stdlib-only PNG decode) |
+| `compat_syscalls.py` | ARM syscall numbers to names, so a blocker reads `97 (setpriority)` |
+| `compat_publish.py` | Copies chosen screenshots into the tracker repo and pushes them in one commit |
+| `compat_issues.py` | Files/updates one issue per title, keyed by a hidden marker so re-runs update instead of duplicating |
+
+The grouping is the point: a title lands in exactly one bucket, chosen by what actually stopped it,
+so a group's size is the number of titles one fix would unblock. Blocker lists (unimplemented
+syscalls, unknown `/dev` nodes) only classify a title that **never rendered** — a game that draws
+fine while probing `/dev/input/mouse/0` was not stopped by it.
+
 ## Regression guard
 
 See `baseline.py` — records golden metrics + perceptual frame hashes for the known-good set and

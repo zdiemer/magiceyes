@@ -72,8 +72,13 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     if extra_env:
         env.update(extra_env)
 
+    # Keep the engine's stderr: the loader's fatal diagnosis ("no .gpe found under ...", "is not a
+    # 32-bit ARM ELF", ...) is printed there before ME_LOGFILE logging starts, and it is the only
+    # thing that explains a title that never rendered.
+    stderr_path = os.path.join(out_dir, "stderr.txt")
+    stderr_f = open(stderr_path, "w")
     proc = subprocess.Popen([engine, game], env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.DEVNULL, stderr=stderr_f)
     viewer = None
     if headed:                      # optional: a live window for a human to watch alongside
         vbin = os.path.join(REPO, "bin", "viewer")
@@ -158,6 +163,10 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
         exit_code = proc.wait()
     if viewer:
         viewer.terminate()
+    try:
+        stderr_f.close()
+    except OSError:
+        pass
 
     elapsed = max(0.001, time.time() - t0)
     fps = frames_seen / elapsed
@@ -190,6 +199,7 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
         "replay_hashes": replay_hashes,   # [[frame_seq, hash], ...] -- deterministic, for baselines
         "frame_pngs": frame_pngs,
         "log": log_path,
+        "stderr": stderr_path,
         "report": report_path,
         "out_dir": out_dir,
     }
