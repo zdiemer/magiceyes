@@ -225,10 +225,20 @@ def body_for(r, shot_url):
     return "\n".join(B)
 
 
+def add_labels_individually(repo, number, labels):
+    """Apply labels one at a time so a single unusable one does not strip the others."""
+    for l in labels:
+        try:
+            sh_retry(["gh", "issue", "edit", str(number), "--repo", repo, "--add-label", l])
+        except RuntimeError:
+            print("     could not apply label %r to #%s" % (l, number), file=sys.stderr)
+        time.sleep(0.2)
+
+
 def existing_issues(repo):
     """marker -> issue number, for idempotent re-runs."""
-    out = sh(["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "2000",
-              "--json", "number,body"])
+    out = sh_retry(["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "2000",
+                    "--json", "number,body"])
     found = {}
     for it in json.loads(out or "[]"):
         m = re.search(re.escape(MARKER) + r": ([^\s]+) -->", it.get("body") or "")
@@ -255,18 +265,23 @@ def labels_for(r):
     return out
 
 
+def label_colour(name):
+    if name.startswith("platform: "):
+        return "0052cc"
+    if name.startswith("status: "):
+        return STATUS_COLOUR.get(name[len("status: "):], "cccccc")
+    if name.startswith("group: "):
+        return "1d76db"
+    if name.startswith("blocker: "):
+        return "fbca04"
+    return "c5def5"
+
+
 def ensure_labels(repo, records):
-    want = {}
-    for r in records:
-        want["platform: %s" % r["platform"]] = "0052cc"
-        want["status: %s" % r["status"]] = STATUS_COLOUR.get(r["status"], "cccccc")
-        want["group: %s" % r["group"]] = "1d76db"
-        if r.get("subgroup"):
-            want["blocker: %s" % r["subgroup"][:45]] = "fbca04"
-        if r["status"] in ("playable", "renders") and not r.get("audio_active"):
-            want["no audio"] = "c5def5"
-        if r["group"] == "no-frames":
-            want["needs triage"] = "e99695"
+    # Derived from labels_for() rather than a second hand-written list: when the two drifted, a
+    # label went uncreated, the bulk --label add failed, and the fallback filed those issues with
+    # NO labels at all.
+    want = {name: label_colour(name) for r in records for name in labels_for(r)}
     have = set()
     try:
         for l in json.loads(sh_retry(["gh", "label", "list", "--repo", repo, "--limit", "500",
@@ -337,20 +352,28 @@ def main():
                 try:
                     sh_retry(base + lab)
                 except RuntimeError as e:
-                    # a label that could not be created must not cost us the issue content
+                    # One unusable label must cost us only that label, not the issue content and
+                    # not the other labels: a bulk --add-label is all-or-nothing.
                     if "not found" not in str(e).lower():
                         raise
                     sh_retry(base)
+                    add_labels_individually(a.repo, n, labels)
                 updated += 1
             else:
                 base = ["gh", "issue", "create", "--repo", a.repo, "--title", title, "--body", body]
                 lab = sum([["--label", l] for l in labels], [])
                 try:
-                    sh_retry(base + lab)
+                    out = sh_retry(base + lab)
                 except RuntimeError as e:
                     if "not found" not in str(e).lower():
                         raise
-                    sh_retry(base)
+                    out = sh_retry(base)
+                # gh has been seen exiting 0 without actually filing anything (the run reported
+                # ~160 more creations than the repo ended up with). The new issue's URL is the
+                # only trustworthy proof, so treat a missing one as a failure and let the next
+                # pass pick the title up again.
+                if "github.com/" not in (out or ""):
+                    raise RuntimeError("create returned no issue URL")
                 created += 1
         except RuntimeError as e:
             print("  !! %s: %s" % (r["title"], e), file=sys.stderr)
