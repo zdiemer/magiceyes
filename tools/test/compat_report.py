@@ -209,8 +209,13 @@ def build(results_dir):
             shot = pick_screenshot(v.get("frame_pngs") or [])
             flat = bool(shot and shot.get("colours", 0) <= 2
                         and v.get("status") in ("playable", "renders"))
-            vis = compat_visual.measure(shot["path"]) if shot else None
-            susp = compat_visual.suspicions(vis) if (vis and not flat) else []
+            # Judge the whole run, not just the frame chosen as the screenshot: a title can draw a
+            # clean menu and fall apart once gameplay starts.
+            run = compat_visual.measure_run(v.get("frame_pngs") or []) if not flat else None
+            susp = run["reasons"] if (run and run.get("sustained")) else []
+            # when the picture is wrong, the worst frame is the more honest exhibit
+            if susp and run.get("worst_frame"):
+                shot = dict(shot or {}, path=run["worst_frame"], index=run.get("worst_index"))
             key, gtitle = classify(v, log, fat, flat, susp)
             records.append({
                 "title": v.get("title"),
@@ -238,11 +243,15 @@ def build(results_dir):
                 "fatal": fat,
                 "log_tail": "\n".join(log.strip().splitlines()[-12:]),
                 "screenshot": shot,
+                "frame_pngs": v.get("frame_pngs") or [],   # compat_clips.py stitches these
                 # Frames advancing + audio + 25fps can still mean the title only ever paints one
                 # flat colour. It scores 'playable' but plainly is not, so mark it rather than
                 # letting it sit in the working pile.
                 "flat_fill": flat,
-                "visual": vis,
+                "visual": (run or {}).get("metrics"),
+                "visual_run": {k: run[k] for k in
+                               ("frames", "drawn", "corrupt", "corrupt_ratio", "distinct_frames",
+                                "static")} if run else None,
                 "visual_suspicions": susp,
                 "out_dir": v.get("out_dir"),
             })

@@ -125,18 +125,24 @@ def marker_for(r):
     return "%s/%s" % (r["platform"], slug(r["title"]))
 
 
-def body_for(r, shot_url):
+def body_for(r, shot_url, clip_url=""):
     B = []
     A = B.append
     A("**Platform:** %s  |  **Status:** `%s`  |  **Failure group:** `%s`"
       % (r["platform"], r.get("tier", r["status"]), r["group"]))
     A("")
+    if clip_url:
+        A("![run](%s)" % clip_url)
+        A("")
+        A("*The whole run as a time-lapse, one frame every couple of seconds.*")
+        A("")
     if shot_url:
-        A("![last rendered frame](%s)" % shot_url)
+        A("![representative frame](%s)" % shot_url)
         A("")
-        A("*Most representative frame captured during the run.*")
+        A("*%s*" % ("The frame that looked most wrong." if r.get("visual_suspicions")
+                    else "Most representative frame captured during the run."))
         A("")
-    else:
+    elif not clip_url:
         A("*No screenshot: nothing worth showing was ever drawn.*")
         A("")
 
@@ -342,6 +348,8 @@ def main():
     ap.add_argument("--manifest", default=os.path.join(REPO, "tools", "test", "compat_manifest.json"))
     ap.add_argument("--repo", required=True)
     ap.add_argument("--shots-base-url", default="")
+    ap.add_argument("--clips-base-url", default="")
+    ap.add_argument("--clips-dir", default="", help="local clips dir, to know which ones exist")
     ap.add_argument("--status", default="crashed,incompatible,black,renders,playable")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--sleep", type=float, default=3.0, help="pace GitHub writes")
@@ -370,13 +378,16 @@ def main():
     created = updated = 0
     for i, r in enumerate(records, 1):
         mk = marker_for(r)
-        shot = ""
+        shot = clip = ""
         if a.shots_base_url and r.get("screenshot"):
             # ?raw=true so a github.com/blob/ link renders as an image (and still honours the
             # private repo's auth, which raw.githubusercontent.com would not)
             shot = "%s/%s/%s.png?raw=true" % (a.shots_base_url, r["platform"], slug(r["title"]))
+        if a.clips_base_url and a.clips_dir and os.path.exists(
+                os.path.join(a.clips_dir, r["platform"], slug(r["title"]) + ".gif")):
+            clip = "%s/%s/%s.gif?raw=true" % (a.clips_base_url, r["platform"], slug(r["title"]))
         title = "[%s] %s: %s" % (r["platform"], r["title"], r["group_title"])
-        body = body_for(r, shot)
+        body = body_for(r, shot, clip)
         labels = labels_for(r)
         try:
             if mk in have:

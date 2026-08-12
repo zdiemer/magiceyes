@@ -7,10 +7,10 @@ Every GP2X / Wiz / Caanoo title on the corpus share, booted headlessly through t
 
 | Platform | Titles | Playable | Ingame | Black | Incompatible | Crashed |
 |---|--:|--:|--:|--:|--:|--:|
-| GP2X | 673 | 209 | 91 | 134 | 239 | 0 |
+| GP2X | 673 | 214 | 86 | 134 | 239 | 0 |
 | Wiz | 153 | 25 | 8 | 25 | 95 | 0 |
 | Caanoo | 205 | 18 | 24 | 15 | 148 | 0 |
-| **All** | **1031** | **252** | **123** | **174** | **482** | **0** |
+| **All** | **1031** | **257** | **118** | **174** | **482** | **0** |
 
 ### What the tiers mean
 
@@ -34,38 +34,31 @@ One fix at the top of this table unblocks the whole row.
 | **Never rendered a frame (cause unknown)** (`no-frames`) | 157 | Caanoo, GP2X, Wiz | n/a |
 | **Game data files are missing from the dump** (`missing-game-data`) | 106 | Caanoo, GP2X, Wiz | n/a |
 | **Not a 32-bit ARM ELF** (`not-arm-elf`) | 99 | Caanoo, GP2X, Wiz | n/a |
-| **Renders at speed but no audio** (`no-audio`) | 66 | Caanoo, GP2X, Wiz | n/a |
+| **Renders at speed but no audio** (`no-audio`) | 68 | Caanoo, GP2X, Wiz | n/a |
 | **No .gpe in the dump** (`no-executable`) | 59 | Caanoo, GP2X, Wiz | n/a |
 | **Spins forever polling an MMSP2 register** (`mmio-spin`) | 27 | Caanoo, GP2X, Wiz | `0x90a` ×25, `0x4000` ×1 |
 | **Unknown /dev node** (`unknown-device`) | 26 | Caanoo, GP2X, Wiz | `/dev/input/mouse/0` ×14, `/dev/null` ×4, `/dev/input/mouse0` ×3, `/dev/` ×2 |
 | **Draws only a flat colour** (`flat-fill`) | 24 | Caanoo, GP2X | n/a |
 | **Renders but below 25 fps** (`low-fps`) | 17 | Caanoo, GP2X | n/a |
-| **Renders, but the picture is wrong** (`garbled-visuals`) | 15 | Caanoo, GP2X, Wiz | n/a |
+| **Renders, but the picture is wrong** (`garbled-visuals`) | 8 | Caanoo, GP2X, Wiz | n/a |
 | **Archive extraction failed** (`archive-failed`) | 5 | Caanoo, GP2X | n/a |
 | **Unimplemented syscall** (`unimplemented-syscall`) | 3 | Caanoo, GP2X | `281 (socket)` ×1, `113` ×1, `117` ×1 |
 | **Could not open a display** (`display-init-failed`) | 1 | GP2X | n/a |
 
 ## Renders, but the picture is wrong
 
-These 15 titles pass the running checks (frames advancing, frame rate, audio) while the frame itself is visibly broken, so they are graded `ingame` rather than `playable`. The reasons come from measuring the captured frame: a consistent per-row offset means a stride/pitch mismatch, large-scale repetition means the screen holds more than one copy of itself, and noise far above what dithered artwork reaches means corrupt memory.
+These 8 titles pass the running checks (frames advancing, frame rate, audio) while the frame itself is visibly broken, so they are graded `ingame` rather than `playable`. The reasons come from measuring the captured frame: a consistent per-row offset means a stride/pitch mismatch, large-scale repetition means the screen holds more than one copy of itself, and noise far above what dithered artwork reaches means corrupt memory.
 
 | Title | Platform | fps | What the frame looks like |
 |---|---|--:|---|
 | nuclearchess | Caanoo | 3735.5 | renders at 26x26 instead of 320x240 |
-| 1945_GP2X_0.2b | GP2X | 57.1 | content repeats every 160px across the screen; left and right halves are near-identical; top and bottom halves are near-identical; pixel-to-pixel noise of 96, far above what dithered artwork reaches; the frame looks like corrupt memory |
-| 2xtron-v01 | GP2X | 61.1 | content repeats every 84px across the screen |
-| Beatbox_1.2 | GP2X | 56.7 | content repeats every 160px across the screen; left and right halves are near-identical |
-| BunnyTraps-v11 | GP2X | 60.6 | pixel-to-pixel noise of 89, far above what dithered artwork reaches; the frame looks like corrupt memory |
-| CascadeBeneath v1.0 for GP2X | GP2X | 62.2 | content repeats every 84px across the screen |
-| DontGetCrushed v1.0 for GP2X | GP2X | 61.3 | content repeats every 84px across the screen |
-| FleshChasmer | GP2X | 58.5 | content repeats every 160px across the screen; left and right halves are near-identical |
-| fvc | GP2X | 59.7 | content repeats every 100px across the screen; left and right halves are near-identical; top and bottom halves are near-identical |
-| gemdrop2x_v02 | GP2X | 63.1 | content repeats every 96px across the screen |
-| Life.0.1 | GP2X | 61.5 | pixel-to-pixel noise of 91, far above what dithered artwork reaches; the frame looks like corrupt memory |
-| MoveSweep2X | GP2X | 48.0 | content repeats every 96px across the screen; left and right halves are near-identical |
-| scummvm-kor0.4.2cvs | GP2X | 59.5 | content repeats every 104px across the screen; left and right halves are near-identical |
-| waffle2x | GP2X | 42.3 | content repeats every 160px across the screen; left and right halves are near-identical; top and bottom halves are near-identical |
-| Worship Vector | Wiz | 57.9 | content repeats every 160px across the screen |
+| 1945_GP2X_0.2b | GP2X | 57.1 | pixel-to-pixel noise of 96, far above what dithered artwork reaches; the frame looks like corrupt memory |
+| BunnyTraps-v11 | GP2X | 60.6 | pixel-to-pixel noise of 173, far above what dithered artwork reaches; the frame looks like corrupt memory |
+| FleshChasmer | GP2X | 58.5 | the screen holds a second copy of itself, offset by 160px; left and right halves are near-identical |
+| GF | GP2X | 58.9 | top and bottom halves are near-identical |
+| Life.0.1 | GP2X | 61.5 | pixel-to-pixel noise of 159, far above what dithered artwork reaches; the frame looks like corrupt memory |
+| MoveSweep2X | GP2X | 48.0 | the screen holds a second copy of itself, offset by 96px; left and right halves are near-identical |
+| Worship Vector | Wiz | 57.9 | the screen holds a second copy of itself, offset by 160px; left and right halves are near-identical |
 
 ## Scored as working, but only painting a flat colour
 
@@ -560,28 +553,24 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | xump2x_beta2 | `black` | 12.0 | 6 | – | black-screen |  |
 | yahtzee-v21 | `black` | 59.7 | 1510 | – | black-screen |  |
 | Zelda_roth_US_gp2x | `black` | 21.0 | 47 | ✓ | black-screen |  |
-| 1945_GP2X_0.2b | `ingame` | 57.1 | 400 | ✓ | garbled-visuals | content repeats every 160px across the screen; left and right halves are near-identical; t |
-| 2xtron-v01 | `ingame` | 61.1 | 1542 | ✓ | garbled-visuals | content repeats every 84px across the screen |
+| 1945_GP2X_0.2b | `ingame` | 57.1 | 400 | ✓ | garbled-visuals | pixel-to-pixel noise of 96, far above what dithered artwork reaches; the frame looks like  |
 | 2xZdoom_selector | `ingame` | 2.1 | 5 | ✓ | low-fps |  |
 | a_sn-pong | `ingame` | 38.8 | 1437 | – | no-audio |  |
 | alex | `ingame` | 60.3 | 1522 | – | flat-fill |  |
 | alex4_gp2x | `ingame` | 60.1 | 1518 | – | flat-fill |  |
 | AMazing-3D | `ingame` | 63.0 | 1594 | – | no-audio |  |
 | ASCIIPong2xV0.4 | `ingame` | 35.6 | 898 | ✓ | flat-fill |  |
-| Beatbox_1.2 | `ingame` | 56.7 | 1502 | ✓ | garbled-visuals | content repeats every 160px across the screen; left and right halves are near-identical |
 | Birdshoot | `ingame` | 60.2 | 1512 | – | no-audio |  |
 | Blocked | `ingame` | 3.9 | 100 | ✓ | low-fps |  |
 | bugafactorx-v03-beta | `ingame` | 59.6 | 1517 | – | no-audio |  |
-| BunnyTraps-v11 | `ingame` | 60.6 | 1527 | ✓ | garbled-visuals | pixel-to-pixel noise of 89, far above what dithered artwork reaches; the frame looks like  |
+| BunnyTraps-v11 | `ingame` | 60.6 | 1527 | ✓ | garbled-visuals | pixel-to-pixel noise of 173, far above what dithered artwork reaches; the frame looks like |
 | buscaminas | `ingame` | 59.2 | 1507 | – | no-audio |  |
 | cardm | `ingame` | 59.4 | 1503 | – | no-audio |  |
-| CascadeBeneath v1.0 for GP2X | `ingame` | 62.2 | 1565 | ✓ | garbled-visuals | content repeats every 84px across the screen |
 | cavecopter_gp2x | `ingame` | 60.6 | 1524 | – | no-audio |  |
 | Chopper | `ingame` | 60.2 | 1526 | – | no-audio |  |
 | Clonk2X_1.0 | `ingame` | 16.3 | 412 | – | not-arm-elf | magiceyes: reload of '/bin/sh' failed |
 | ConnyCarrot | `ingame` | 59.5 | 1518 | ✓ | flat-fill |  |
 | Digger | `ingame` | 1.7 | 4 | ✓ | low-fps |  |
-| DontGetCrushed v1.0 for GP2X | `ingame` | 61.3 | 1540 | ✓ | garbled-visuals | content repeats every 84px across the screen |
 | dopewars2x | `ingame` | 59.7 | 1503 | – | no-audio |  |
 | drod-gp2x-1_0 | `ingame` | 51.5 | 1338 | – | no-audio |  |
 | dstroyGP2X1402 | `ingame` | 58.3 | 1507 | – | no-audio |  |
@@ -590,14 +579,13 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | extraterrestres-0 | `ingame` | 57.3 | 1547 | – | no-audio |  |
 | FCRLG | `ingame` | 59.5 | 1500 | – | no-audio |  |
 | Firewhip | `ingame` | 0.6 | 9 | ✓ | low-fps |  |
-| FleshChasmer | `ingame` | 58.5 | 1504 | ✓ | garbled-visuals | content repeats every 160px across the screen; left and right halves are near-identical |
+| FleshChasmer | `ingame` | 58.5 | 1504 | ✓ | garbled-visuals | the screen holds a second copy of itself, offset by 160px; left and right halves are near- |
 | flowflowmania-0_6-gp2x | `ingame` | 41.8 | 312 | – | no-audio |  |
 | freesci | `ingame` | 53.4 | 245 | – | no-audio |  |
 | fruits2x | `ingame` | 46.3 | 99 | – | no-audio |  |
-| fvc | `ingame` | 59.7 | 1501 | ✓ | garbled-visuals | content repeats every 100px across the screen; left and right halves are near-identical; t |
 | gchess-v1.0.1-bin | `ingame` | 59.0 | 1493 | – | no-audio |  |
 | gchess-v1.1.0-bin | `ingame` | 58.9 | 1493 | – | no-audio |  |
-| gemdrop2x_v02 | `ingame` | 63.1 | 1629 | ✓ | garbled-visuals | content repeats every 96px across the screen |
+| GF | `ingame` | 58.9 | 1500 | ✓ | garbled-visuals | top and bottom halves are near-identical |
 | gnugo2x | `ingame` | 60.0 | 1521 | – | no-audio |  |
 | gp2x-ceferino-0.1 | `ingame` | 61.5 | 1498 | – | no-audio |  |
 | gp2xgo-v1.1.0-bin | `ingame` | 58.3 | 1480 | – | no-audio |  |
@@ -612,10 +600,10 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | Knight Lore | `ingame` | 10.5 | 265 | ✓ | flat-fill |  |
 | LABYRINTH | `ingame` | 58.6 | 1487 | – | no-audio |  |
 | las-tres-luces-de-glaurung-remake | `ingame` | 59.8 | 1529 | ✓ | flat-fill |  |
-| Life.0.1 | `ingame` | 61.5 | 1552 | – | garbled-visuals | pixel-to-pixel noise of 91, far above what dithered artwork reaches; the frame looks like  |
+| Life.0.1 | `ingame` | 61.5 | 1552 | – | garbled-visuals | pixel-to-pixel noise of 159, far above what dithered artwork reaches; the frame looks like |
 | masterpiece2x | `ingame` | 58.4 | 1471 | – | no-audio |  |
 | minigolf | `ingame` | 59.2 | 1502 | – | no-audio |  |
-| MoveSweep2X | `ingame` | 48.0 | 102 | – | garbled-visuals | content repeats every 96px across the screen; left and right halves are near-identical |
+| MoveSweep2X | `ingame` | 48.0 | 102 | – | garbled-visuals | the screen holds a second copy of itself, offset by 96px; left and right halves are near-i |
 | Nebulus_gp2x | `ingame` | 58.1 | 1460 | – | no-audio |  |
 | Net-Bubble-gp2x_1-21-06_bin | `ingame` | 52.6 | 368 | – | no-audio |  |
 | Payback | `ingame` | 0.1 | 2 | ✓ | low-fps |  |
@@ -628,7 +616,7 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | prboom-gp2x | `ingame` | 57.5 | 1484 | – | no-audio |  |
 | RevoltOfTheBinaryCouriers GP2X | `ingame` | 58.9 | 1488 | – | no-audio |  |
 | robot-escape | `ingame` | 82.4 | 176 | ✓ | flat-fill |  |
-| scummvm-kor0.4.2cvs | `ingame` | 59.5 | 1513 | – | garbled-visuals | content repeats every 104px across the screen; left and right halves are near-identical |
+| scummvm-kor0.4.2cvs | `ingame` | 59.5 | 1513 | – | no-audio |  |
 | sdlmonkey_0.1 | `ingame` | 60.4 | 1521 | – | no-audio |  |
 | sleuth slots 2x | `ingame` | 9.4 | 220 | ✓ | low-fps |  |
 | snake2x-1.1 | `ingame` | 59.5 | 1527 | – | no-audio |  |
@@ -649,9 +637,10 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | Vektar | `ingame` | 0.1 | 3 | ✓ | low-fps |  |
 | vektar-free | `ingame` | 11.8 | 300 | ✓ | low-fps |  |
 | vexedb1 | `ingame` | 58.8 | 1486 | – | no-audio |  |
-| waffle2x | `ingame` | 42.3 | 92 | – | garbled-visuals | content repeats every 160px across the screen; left and right halves are near-identical; t |
+| waffle2x | `ingame` | 42.3 | 92 | – | no-audio |  |
 | Wiztern Demo | `ingame` | 0.9 | 25 | ✓ | low-fps |  |
 | 2xpong_gp2x | `playable` | 60.0 | 1510 | ✓ |  |  |
+| 2xtron-v01 | `playable` | 61.1 | 1542 | ✓ |  |  |
 | AdamantArmorAffection2x | `playable` | 57.8 | 1470 | ✓ |  |  |
 | airstrike-1.1 | `playable` | 59.8 | 1522 | ✓ |  |  |
 | Akd_BB | `playable` | 60.2 | 1521 | ✓ |  |  |
@@ -661,6 +650,7 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | astrochaos | `playable` | 54.0 | 300 | ✓ |  |  |
 | Batiscafo (versin EXP) | `playable` | 59.4 | 1501 | ✓ |  |  |
 | beat2x-0.5-bin | `playable` | 60.4 | 1532 | ✓ |  |  |
+| Beatbox_1.2 | `playable` | 56.7 | 1502 | ✓ |  |  |
 | biniax-gp2x_v1.2 | `playable` | 60.8 | 1532 | ✓ |  |  |
 | Biniax2_gp2x | `playable` | 59.5 | 1507 | ✓ |  |  |
 | BioShoot GP2X | `playable` | 57.5 | 1475 | ✓ |  |  |
@@ -682,6 +672,7 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | buttongame | `playable` | 44.4 | 95 | ✓ |  |  |
 | BuzzysBadDay-1.0 | `playable` | 59.9 | 1517 | ✓ |  |  |
 | CamelotWarriors-GP2x_v1.0 | `playable` | 59.3 | 1509 | ✓ |  |  |
+| CascadeBeneath v1.0 for GP2X | `playable` | 62.2 | 1565 | ✓ |  |  |
 | ccrg | `playable` | 52.6 | 238 | ✓ |  |  |
 | chaos2x | `playable` | 61.0 | 1535 | ✓ |  |  |
 | checkersgp2x | `playable` | 58.2 | 1545 | ✓ |  |  |
@@ -697,6 +688,7 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | dd2x | `playable` | 101.5 | 467 | ✓ |  |  |
 | debian_vs_pimientos_2x_0.1.2 | `playable` | 59.4 | 1519 | ✓ |  |  |
 | defeatme-gp2x-1.0.1 | `playable` | 60.0 | 1513 | ✓ |  |  |
+| DontGetCrushed v1.0 for GP2X | `playable` | 61.3 | 1540 | ✓ |  |  |
 | dosmugen | `playable` | 59.1 | 1538 | ✓ |  |  |
 | Drill2x_final | `playable` | 57.3 | 1479 | ✓ |  |  |
 | drill2x_xtreme_v1.0.3 | `playable` | 58.5 | 1487 | ✓ |  |  |
@@ -723,7 +715,8 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | formula1gp2x | `playable` | 60.0 | 1530 | ✓ |  |  |
 | friq-beta-07 | `playable` | 59.7 | 1528 | ✓ |  |  |
 | frozen2x-0.1 | `playable` | 66.1 | 465 | ✓ |  |  |
-| GF | `playable` | 58.9 | 1500 | ✓ |  |  |
+| fvc | `playable` | 59.7 | 1501 | ✓ |  |  |
+| gemdrop2x_v02 | `playable` | 63.1 | 1629 | ✓ |  |  |
 | ghostpix_v10_gp2x | `playable` | 64.6 | 1480 | ✓ |  |  |
 | GoitGP | `playable` | 56.8 | 1481 | ✓ |  |  |
 | gp2hanoi_0.8.1_gp2x | `playable` | 60.3 | 1528 | ✓ |  |  |
@@ -992,7 +985,7 @@ These 24 titles advanced frames, kept audio running, and held frame rate, so the
 | wizgo-v1.1.0-bin | `ingame` | 59.4 | 1514 | – | no-audio |  |
 | WizGolf | `ingame` | 59.3 | 1504 | – | no-audio |  |
 | wizmancala-v1.1.2-bin | `ingame` | 59.3 | 1503 | – | no-audio |  |
-| Worship Vector | `ingame` | 57.9 | 1461 | ✓ | garbled-visuals | content repeats every 160px across the screen |
+| Worship Vector | `ingame` | 57.9 | 1461 | ✓ | garbled-visuals | the screen holds a second copy of itself, offset by 160px; left and right halves are near- |
 | AdamantArmorAffectionWiz | `playable` | 58.4 | 1480 | ✓ |  |  |
 | airstrike-wiz-1.01 | `playable` | 59.6 | 1514 | ✓ |  |  |
 | alexsfalldown | `playable` | 59.5 | 1501 | ✓ |  |  |
