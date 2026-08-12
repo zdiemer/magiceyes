@@ -13,31 +13,34 @@ original game data was never in the dump, 99 are not ARM executables, 59 ship no
 
 ---
 
-## 1. VCLKENREG (`0x090a`) is not modelled  — 55 hang, 134 more touch it
+## 1. ~~VCLKENREG (`0x090a`) is not modelled~~ — FIXED 2026-08-12: it was the VSYNC line
 
-**The single highest-leverage item.** 55 titles run the whole 25s window at under 1 fps while
-reading MMSP2 register `0x090a` tens of millions of times a second (4WE_GP2x peaks at **502
-million reads/sec**). 47 of them are stuck specifically on `0x090a`; `0x0910` shows up alongside it
-in 47 of the same runs.
+**Root cause was not `0x090a`.** Live-debugging `4WE_GP2x` under the MCP server showed the spin
+loop busy-waits on a rising edge of **GPIOB bit 4 at `0x1182` — the LCD vertical-sync line**
+(bit 5 is HSYNC). The `unknown_mmio:0x90a`/`0x0910` events in those reports are one-shot *writes*
+(count=1 each): rlyeh-minlib/paeryn-style clock init (`VCLKENREG=0xffff`, FPLL set), which the
+engine already retains fine. The sweep tooling attributed the spin to the only unknown-MMIO events
+it saw; the actual reads were `0x1182`, which never toggled, so the edge never came.
 
-`assets/paeryn-sdl/.../mmsp2_regs.h` names it:
+Fixed in `host/engine/devices.c mmsp2_read_cb`: vsync high ~1ms of each 60Hz period, hsync
+toggling fast. Verified: `9 Lives` boots to an interactive menu at ~23fps; `ADIC2X` reaches its
+animated 60fps menu and gameplay; `4WE_GP2x`/`DangerMouse` run their full init (their remaining
+issues are per-title: missing `smalfont.bmp` in the dump, F200 touchscreen).
 
-```c
-#define VCLKENREG   0x090a>>1
-#define GRPCLK      1<<2
-```
+Two follow-on engine fixes fell out of the same investigation (same commit):
+- **`/mnt/sd` now maps to the game dir in normal runs** (was firmware-mode-only): GLBasic
+  "shoebox" titles unpack their `.sbx` assets to the SD root and read them back; writes are
+  captured by the save overlay so nothing lands in the ROM dir.
+- **Stale guest fds no longer reach host I/O** (EBADF instead): a stale number can alias an
+  engine-internal fd (control socket, log), where a read blocks the guest forever and a
+  close/ftruncate corrupts the engine.
 
-It is the **video clock enable** register, and `GRPCLK` is the graphics clock bit. The obvious
-reading is that these titles set GRPCLK and then poll until it reads back set; `host/common/
-gp2x_device.c` models TCOUNT at `0x0a00` but has nothing at `0x090a`, so the bit never comes back
-and they spin forever.
+Note for the sweep: several GLBasic titles sit on a **"press any button" splash** — a headless
+run with no input parks there at ~0 fps and looks like a hang. The harness should tap a button
+(e.g. B) mid-window before scoring.
 
-Start with: make `0x090a` (and `0x0904` SYSCLKENREG) retain what was written. That alone may be
-the whole fix. Verify against `4WE_GP2x`, `9 Lives`, `ADIC2X`, `DangerMouse`.
-
-Worth checking whether the same register explains part of the black-screen bucket below: 134 of
-those 184 titles also hit `unknown_mmio:0x90a`. If a title skips drawing because it believes the
-graphics clock is off, that is the same root cause presenting differently.
+Still open: whether the 134 black-screen titles that touch `0x90a` were the same population
+(minlib-family titles whose vsync wait sat *after* first draw). Re-sweep will tell.
 
 Filter: `label:"group: mmio-spin"` / `label:"blocker: 0x90a"`
 

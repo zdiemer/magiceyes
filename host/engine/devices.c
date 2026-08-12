@@ -839,6 +839,23 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         uc_mem_write(uc, g_mmsp2_guest + 0x0a00, &us, 4);
         return;
     }
+    /* GPIOB pin-level @ 0x1182: bit 4 is the LCD VSYNC line, bit 5 HSYNC. rlyeh-minlib
+       titles busy-wait for a rising edge of bit 4 as their only frame pacing, so the bit
+       must genuinely toggle or they spin forever (the corpus "mmio-spin" cluster: the
+       0x90a/0x910 writes in those reports are just minlib's one-shot clock init). Model
+       vsync high for ~1ms of each 60Hz period -- the edge cadence is what paces the game,
+       the duty cycle only has to be plausibly short. HSYNC toggles fast (~15.6kHz); any
+       spin loop samples far faster than it flips. Other bits keep their stored value. */
+    if (off == 0x1182) {
+        struct timeval tv; gettimeofday(&tv, NULL);
+        uint64_t us = (uint64_t)tv.tv_sec * 1000000ull + tv.tv_usec;
+        uint16_t v = 0; uc_mem_read(uc, g_mmsp2_guest + off, &v, 2);
+        v &= (uint16_t)~0x30;
+        if (us % 16667u < 1000u) v |= 0x10;   /* in vertical blank */
+        if (us % 64u < 8u)       v |= 0x20;   /* in horizontal blank */
+        uc_mem_write(uc, g_mmsp2_guest + off, &v, 2);
+        return;
+    }
     /* GPIO button registers (active low; canonical GP2X layout, matches our shm enum):
        0x1198 lo = 8-way stick, 0x1184 hi = START/SELECT/L/R/A/B/X/Y, 0x1186 lo = VOL. */
     if (off == 0x1198 || off == 0x1184 || off == 0x1186) {

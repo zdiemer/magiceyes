@@ -234,9 +234,26 @@ static int me_mount_resolve(const char *guest, char *out, size_t cap) {
     return 1;
 }
 
+/* Standalone (non-firmware) runs: treat the device SD/NAND mounts as the game's own directory.
+   Titles hardcode /mnt/sd/... for caches and saves (GLBasic's shoebox runtime unpacks its .sbx
+   assets to the SD root and reads them back); with no mapping those opens fail on the host and
+   the title runs artless or black. Anchoring at g_game_root means the save overlay captures the
+   WRITES (so nothing lands in the ROM dir) and reads fall through overlay -> real dir as usual.
+   Firmware mode keeps the games-root mapping in me_mount_resolve instead. */
+static const char *sd_game_rewrite(const char *guest, char *buf, size_t cap) {
+    if (g_firmware_mode || !g_game_root[0]) return guest;
+    const char *rest = NULL;
+    if (!strncmp(guest, "/mnt/sd", 7) && (guest[7] == 0 || guest[7] == '/')) rest = guest + 7;
+    else if (!strncmp(guest, "/mnt/nand", 9) && (guest[9] == 0 || guest[9] == '/')) rest = guest + 9;
+    if (!rest) return guest;
+    snprintf(buf, cap, "%s%s", g_game_root, rest);
+    return buf;
+}
+
 /* Map a guest path to the host path to actually open/stat: SD/NAND games mount first, then rootfs
    (dynamic libs), then the /mnt/tmp redirect (GPEComp temps on Windows), else identity. */
 static void resolve_path(const char *guest, char *out, size_t cap) {
+    char sdbuf[PATH_MAX]; guest = sd_game_rewrite(guest, sdbuf, sizeof sdbuf);
     /* Some titles use DOS-style backslash separators (BermudaSyndrome opens "..\bermuda.ovr").
        Backslash isn't a separator on the host, so normalise it to '/' before resolving. */
     char norm[PATH_MAX];
@@ -375,8 +392,11 @@ static int save_overlay_resolve(const char *guest, int write_intent, char *out, 
     struct stat s; return (stat(out, &s) == 0 && S_ISREG(s.st_mode)) ? 1 : 0;
 }
 
-/* Resolve a path-based file op to a host path, honouring the save overlay first. */
+/* Resolve a path-based file op to a host path, honouring the save overlay first. The SD-mount
+   rewrite runs before overlay matching so a /mnt/sd write is claimed by the overlay (it becomes
+   an absolute path under g_game_root), not passed through to the real game dir. */
 static void resolve_io(const char *guest, int write_intent, char *out, size_t cap) {
+    char sdbuf[PATH_MAX]; guest = sd_game_rewrite(guest, sdbuf, sizeof sdbuf);
     if (save_overlay_resolve(guest, write_intent, out, cap)) return;
     resolve_path(guest, out, cap);
 }
@@ -694,6 +714,17 @@ static void hostfd_untrack(int fd) {
         return;
     }
 }
+/* Only fds the guest legitimately holds may reach host I/O. Everything virtual (devices,
+   dirfd/memfd, the fake pipe/socket) is dispatched before the host fall-throughs, and every
+   plain-file fd the guest receives is tracked at open/openat/dup time -- so an UNTRACKED
+   number here is a stale fd the guest already closed, which is EBADF on real hardware. It
+   must never pass through: the host may have reassigned the number to an ENGINE fd (control
+   socket, log, audio dump), so the op would block the guest or corrupt engine state.
+   (4WE_GP2x's GLBasic runtime reads a long-stale fd every frame; passed through, it landed
+   on the MCP control socket and hung the title forever. A stale close() is worse.) */
+static int hostfd_guest_owned(int fd) {
+    return (fd >= 0 && fd <= 2) || hostfd_ino(fd) != 0;
+}
 /* Flush every tracked host file to disk (called on quit, and by sync()). Cannot reach buffers
    the guest's own glibc still holds in guest RAM -- only data already write()-en to the host. */
 void syscalls_flush_all(void) {
@@ -836,6 +867,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                                   (no console on a double-click, no ME_LOGFILE) a short/0 return made
                                   the guest's glibc stdio spin retrying -> menu hung -> black screen */
         }
+        if (!hostfd_guest_owned((int)a0)) { free(tmp); return LERR(EBADF); }
         long r = write((int)a0, tmp, a2); free(tmp);
         return r < 0 ? -errno : r;
     }
@@ -854,6 +886,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (dev_type((int)a0) == DEV_INPUT_EV || dev_type((int)a0) == DEV_INPUT_JS)
             return input_read((int)a0, a1, a2);                     /* evdev/js stick + buttons */
         if (dev_type((int)a0)) return 0;   /* other stub devices: EOF (never host-read a fake fd) */
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
         uint8_t *tmp = malloc(a2 ? a2 : 1);
         long r = read((int)a0, tmp, a2);
         if (r > 0) uc_mem_write(g_uc, a1, tmp, r);
@@ -1023,6 +1056,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (mf) { uint32_t base = ((int)a4 == 1) ? mf->pos : ((int)a4 == 2) ? mf->len : 0;
                   mf->pos = base + (uint32_t)off; if (mf->pos > mf->len) mf->pos = mf->len;
                   uint64_t ru = mf->pos; if (a3) uc_mem_write(g_uc, a3, &ru, 8); return 0; }
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
         off_t r = lseek((int)a0, (off_t)off, (int)a4);
         if (r == (off_t)-1) return LERR(errno);
         uint64_t ru = (uint64_t)r;
@@ -1082,8 +1116,22 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         resolve_io(np, 1, nhp, sizeof nhp);
         return rename(ohp, nhp) == 0 ? 0 : LERR(errno);
     }
-    case 41: { int r = dup((int)a0);            return r < 0 ? LERR(errno) : r; }  /* dup  */
-    case 63: { int r = dup2((int)a0, (int)a1);  return r < 0 ? LERR(errno) : r; }  /* dup2 */
+    case 41: { /* dup: guard the source (a stale fd would duplicate an ENGINE fd), track the copy
+                  so hostfd_guest_owned() recognises it. */
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
+        int r = dup((int)a0); if (r < 0) return LERR(errno);
+        uint32_t ino = hostfd_ino((int)a0);
+        hostfd_track_path(r, ino ? ino : 1u, hostfd_path((int)a0));
+        return r; }
+    case 63: {
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
+        /* the TARGET number must also be the guest's to take: on the host it may be an engine
+           fd (dup2 would silently close it). std fds and the guest's own fds are fair game. */
+        if ((int)a1 > 2 && !hostfd_guest_owned((int)a1)) return LERR(EBADF);
+        int r = dup2((int)a0, (int)a1); if (r < 0) return LERR(errno);
+        if (r > 2) { uint32_t ino = hostfd_ino((int)a0);
+                     hostfd_track_path(r, ino ? ino : 1u, hostfd_path((int)a0)); }
+        return r; }
     /* benign no-ops: nothing the engine caches to a guest FS / nothing to schedule. Returning
        success keeps these off the UNIMPLEMENTED log (Vektar calls sync; others appear in titles
        that otherwise spam ENOSYS) without changing behaviour. */
@@ -1207,6 +1255,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         { struct memfile *mf = memfd_get((int)a0);
           if (mf) { free(mf->data); mf->used = 0; mf->data = NULL; return 0; } }
         if (dev_type((int)a0)) { dev_close((int)a0); return 0; }  /* free the device slot */
+        if ((int)a0 > 2 && !hostfd_guest_owned((int)a0)) return LERR(EBADF);  /* stale/engine fd */
         hostfd_untrack((int)a0);
         return close((int)a0) < 0 ? LERR(errno) : 0;
     case 19: { /* lseek */
@@ -1215,13 +1264,16 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         struct memfile *mf = memfd_get((int)a0);
         if (mf) { uint32_t base = ((int)a2 == 1) ? mf->pos : ((int)a2 == 2) ? mf->len : 0;
                   mf->pos = base + a1; if (mf->pos > mf->len) mf->pos = mf->len; return mf->pos; }
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
         long r = lseek((int)a0, (off_t)a1, (int)a2); return r < 0 ? LERR(errno) : r; }
     case 93:   /* ftruncate(fd, len): the shim ftruncates the gp2x_fb shm (a device fd) -> accept;
                   a real host fd is truncated for real. */
         if (dev_type((int)a0) || (int)a0 >= MEMFD_BASE) return 0;
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);   /* stale fd must not truncate engine files */
         return ftruncate((int)a0, (off_t)a1) == 0 ? 0 : LERR(errno);
     case 194:  /* ftruncate64(fd, len_lo, len_hi): EABI shim sizing the shm; high word unused here. */
         if (dev_type((int)a0) || (int)a0 >= MEMFD_BASE) return 0;
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
         return ftruncate((int)a0, (off_t)a1) == 0 ? 0 : LERR(errno);
     case 33: {  /* access(path, mode): exists? (ld.so/glibc probe libs + locale dirs) */
         char p[1024]; read_cstr(a0, p, sizeof p);
@@ -1505,6 +1557,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         struct memfile *mf = memfd_get((int)a0);
         if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
                   ms.st_size = mf->len; fill_oabi_stat(a1, &ms); return 0; }
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
         struct stat s; if (fstat((int)a0, &s)) return LERR(errno); fill_oabi_stat(a1, &s); return 0;
     }
     case 195: case 196: case 197: { /* stat64 / lstat64 / fstat64 */
@@ -1515,6 +1568,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             struct memfile *mf = memfd_get((int)a0);
             if (mf) { struct stat ms; memset(&ms, 0, sizeof ms); ms.st_mode = S_IFREG | 0644;
                       ms.st_size = mf->len; fill_stat64(a1, &ms); return 0; }
+            if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
             ok = fstat((int)a0, &s);
             if (!ok && s.st_ino == 0) s.st_ino = hostfd_ino((int)a0);   /* Win: synth unique inode */
         }
@@ -1535,6 +1589,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         fill_stat64(a1, &s); return 0;
     }
     case 146: { /* writev(fd, iov, cnt) */
+        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
         long tot = 0;
         for (uint32_t i = 0; i < a2; i++) {
             uint32_t io[2]; uc_mem_read(g_uc, a1 + i * 8, io, 8);
