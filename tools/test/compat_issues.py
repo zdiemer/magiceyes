@@ -139,6 +139,11 @@ def body_for(r, shot_url):
     A("## What happens")
     A("")
     A(GROUP_BLURB.get(r["group"], r["group_title"]))
+    if r.get("flat_fill"):
+        A("")
+        A("**The tier overstates this one.** Frames advanced and audio ran, which is what earns "
+          "`%s`, but the framebuffer never held more than a colour or two. Treat it as broken "
+          "rather than working." % r["status"])
     if r["fatal"]:
         A("")
         A("The engine reported:")
@@ -245,6 +250,8 @@ def labels_for(r):
         out.append("no audio")
     if r["group"] == "no-frames":
         out.append("needs triage")
+    if r.get("flat_fill"):
+        out.append("flat fill")
     return out
 
 

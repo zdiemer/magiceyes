@@ -84,11 +84,13 @@ def score_frame(path):
     return nb * 0.6 + variety * 0.4, nb, len(buckets)
 
 
-# A frame has to show SOMETHING to be worth attaching. A title that never drew produces a solid
-# fill, which compresses to a couple of hundred bytes and tells a reader nothing that the "0 frames"
-# metric has not already said.
-MIN_NON_BLACK = 0.01
-MIN_COLOURS = 4
+# A frame has to show SOMETHING to be worth attaching, and "essentially black" is the only thing
+# that qualifies as nothing: the "0 frames" / "black" verdict already says that much.
+#
+# A flat single-colour fill DOES get published. Some titles score playable (frames advancing, audio
+# running, 25fps+) while only ever painting one colour, and seeing that flat fill is exactly how you
+# notice. Hiding it would make those look like ordinary working games.
+MIN_NON_BLACK = 0.02
 
 
 def pick_screenshot(frame_pngs):
@@ -98,7 +100,7 @@ def pick_screenshot(frame_pngs):
     n = len(frame_pngs)
     for i, p in enumerate(frame_pngs):
         score, nb, colours = score_frame(p)
-        if score <= 0.0 or nb < MIN_NON_BLACK or colours < MIN_COLOURS:
+        if score <= 0.0 or nb < MIN_NON_BLACK:
             continue
         # later frames are likelier to be past the splash (the sweep nudges START/A at ~2-10s)
         score *= 1.0 + 0.10 * (i / max(1, n - 1))

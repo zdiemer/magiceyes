@@ -184,6 +184,7 @@ def build(results_dir):
             log = read_log(v)
             fat = fatal_line(log)
             key, gtitle = classify(v, log, fat)
+            shot = pick_screenshot(v.get("frame_pngs") or [])
             records.append({
                 "title": v.get("title"),
                 "platform": label,
@@ -208,7 +209,12 @@ def build(results_dir):
                 "quirks": v.get("quirks", []),
                 "fatal": fat,
                 "log_tail": "\n".join(log.strip().splitlines()[-12:]),
-                "screenshot": pick_screenshot(v.get("frame_pngs") or []),
+                "screenshot": shot,
+                # Frames advancing + audio + 25fps can still mean the title only ever paints one
+                # flat colour. It scores 'playable' but plainly is not, so mark it rather than
+                # letting it sit in the working pile.
+                "flat_fill": bool(shot and shot.get("colours", 0) <= 2
+                                  and v.get("status") in ("playable", "renders")),
                 "out_dir": v.get("out_dir"),
             })
     records.sort(key=lambda r: (STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER
@@ -279,6 +285,18 @@ def write_md(records, path):
         A("| **%s** (`%s`) | %d | %s | %s |" % (g["title"], key, len(g["titles"]),
                                                 ", ".join(plats), subs))
 
+    flat = [r for r in records if r.get("flat_fill")]
+    if flat:
+        A("\n## Scored as working, but only painting a flat colour\n")
+        A("These %d titles advanced frames, kept audio running, and held frame rate, so they land "
+          "in `playable`/`renders`. Their framebuffer never held more than one or two colours, "
+          "which means the tier overstates them. Worth treating as broken.\n" % len(flat))
+        A("| Title | Platform | Status | fps |")
+        A("|---|---|---|--:|")
+        for r in sorted(flat, key=lambda r: (r["platform"], r["title"].lower())):
+            A("| %s | %s | `%s` | %s |" % (r["title"].replace("|", "\\|"), r["platform"],
+                                           r["status"], r["fps"]))
+
     A("\n## Cross-title blockers\n")
     for field, heading in (("unimplemented_named", "Unimplemented syscalls"),
                            ("missing_symbols", "Missing dynamic symbols"),
@@ -320,7 +338,9 @@ def write_md(records, path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
-    ap.add_argument("--out-md", default=os.path.join(REPO, "COMPATIBILITY.md"))
+    # NOT the top-level COMPATIBILITY.md: that one is hand-curated and covers commercial titles
+    # only. This is the generated whole-corpus sweep, so it lives with the harness that makes it.
+    ap.add_argument("--out-md", default=os.path.join(REPO, "tools", "test", "CORPUS_SWEEP.md"))
     ap.add_argument("--out-json", default=os.path.join(REPO, "tools", "test", "compat_manifest.json"))
     a = ap.parse_args()
 

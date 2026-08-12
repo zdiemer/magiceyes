@@ -17,3 +17,7 @@ __pycache__/
 # Claude Code session runtime state (scheduled-wakeup lock, etc.) -- not project config.
 /.claude/scheduled_tasks.lock
 
+# Generated corpus-sweep manifest (~1.6MB of per-title verdicts + log excerpts). Regenerate with
+# tools/test/compat_report.py; the human-readable CORPUS_SWEEP.md is committed instead.
+/tools/test/compat_manifest.json
+

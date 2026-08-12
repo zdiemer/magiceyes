@@ -78,7 +78,7 @@ published compatibility picture: a summary doc, and one tracker issue per title.
 bash   tools/test/run_nas_sweep.sh                      # stage on ext4 + sweep all 3 platforms
 python3 tools/test/compat_report.py  --results ~/me-sweep/results
 python3 tools/test/compat_publish.py --manifest tools/test/compat_manifest.json \
-        --repo-dir ~/me-sweep/compat-repo --summary COMPATIBILITY.md --push
+        --repo-dir ~/me-sweep/compat-repo --summary tools/test/CORPUS_SWEEP.md --push
 python3 tools/test/compat_issues.py  --manifest tools/test/compat_manifest.json \
         --repo zdiemer/magiceyes-compat --shots-base-url <raw url>
 ```
@@ -86,11 +86,15 @@ python3 tools/test/compat_issues.py  --manifest tools/test/compat_manifest.json 
 | Tool | Does |
 |---|---|
 | `run_nas_sweep.sh` | Mounts the corpus share, stages engine+assets on **ext4** (drvfs costs ~20% fps and flips tiers), sweeps GP2X/Wiz/Caanoo with the right `MAGICEYES_DEVICE` |
-| `compat_report.py` | Classifies every title into **one** failure group, ranks groups by titles blocked, writes `COMPATIBILITY.md` + `compat_manifest.json` |
+| `compat_report.py` | Classifies every title into **one** failure group, ranks groups by titles blocked, writes `CORPUS_SWEEP.md` + `compat_manifest.json` |
 | `compat_frames.py` | Picks the most representative captured frame per title (stdlib-only PNG decode) |
 | `compat_syscalls.py` | ARM syscall numbers to names, so a blocker reads `97 (setpriority)` |
 | `compat_publish.py` | Copies chosen screenshots into the tracker repo and pushes them in one commit |
 | `compat_issues.py` | Files/updates one issue per title, keyed by a hidden marker so re-runs update instead of duplicating |
+
+`CORPUS_SWEEP.md` is the generated whole-corpus report (every title, homebrew included). The
+top-level `COMPATIBILITY.md` is a different, hand-curated document covering commercial titles only;
+these tools never write to it.
 
 The grouping is the point: a title lands in exactly one bucket, chosen by what actually stopped it,
 so a group's size is the number of titles one fix would unblock. Blocker lists (unimplemented
