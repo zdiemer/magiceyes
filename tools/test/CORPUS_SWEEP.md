@@ -30,19 +30,19 @@ One fix at the top of this table unblocks the whole row.
 
 | Failure group | Titles | Platforms | Most common specifics |
 |---|--:|---|---|
-| **Boots but renders only black** (`black-screen`) | 185 | Caanoo, GP2X, Wiz | n/a |
-| **Never rendered a frame (cause unknown)** (`no-frames`) | 171 | Caanoo, GP2X, Wiz | n/a |
+| **Boots but renders only black** (`black-screen`) | 184 | Caanoo, GP2X, Wiz | n/a |
+| **Never rendered a frame (cause unknown)** (`no-frames`) | 121 | Caanoo, GP2X, Wiz | n/a |
 | **Game data files are missing from the dump** (`missing-game-data`) | 105 | Caanoo, GP2X, Wiz | n/a |
 | **Not a 32-bit ARM ELF** (`not-arm-elf`) | 99 | Caanoo, GP2X, Wiz | n/a |
 | **Renders at speed but no audio** (`no-audio`) | 69 | Caanoo, GP2X, Wiz | n/a |
 | **No .gpe in the dump** (`no-executable`) | 59 | Caanoo, GP2X, Wiz | n/a |
+| **Spins forever polling an MMSP2 register** (`mmio-spin`) | 55 | Caanoo, GP2X, Wiz | `0x90a` ×47, `0x924` ×1, `0xf16` ×1, `0x3b44` ×1 |
 | **Draws only a flat colour** (`flat-fill`) | 28 | Caanoo, GP2X | n/a |
 | **Unknown /dev node** (`unknown-device`) | 25 | Caanoo, GP2X, Wiz | `/dev/input/mouse/0` ×14, `/dev/null` ×4, `/dev/` ×2, `/dev/input/mouse0` ×2 |
-| **Renders but below 25 fps** (`low-fps`) | 16 | Caanoo, GP2X | n/a |
+| **Renders but below 25 fps** (`low-fps`) | 15 | Caanoo, GP2X | n/a |
 | **Renders, but the picture is wrong** (`garbled-visuals`) | 9 | Caanoo, GP2X, Wiz | n/a |
 | **Archive extraction failed** (`archive-failed`) | 5 | Caanoo, GP2X | n/a |
 | **Unimplemented syscall** (`unimplemented-syscall`) | 3 | Caanoo, GP2X | `281 (socket)` ×1, `113` ×1, `117` ×1 |
-| **Spins forever polling an MMSP2 register** (`mmio-spin`) | 3 | GP2X, Wiz | `0x90a` ×1, `0x4000` ×1 |
 | **Could not open a display** (`display-init-failed`) | 1 | GP2X | n/a |
 
 ## Renders, but the picture is wrong
@@ -191,13 +191,13 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | 2xquake2 | `incompatible` | 0.0 | 0 | ✓ | missing-game-data |  |
 | 2XRally01 | `incompatible` | 0.0 | 0 | – | display-init-failed |  |
 | 2xZdoom_PB1.2 | `incompatible` | 0.0 | 0 | – | unknown-device | /dev/input/mouse/0 |
-| 4WE_GP2x | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| 9 Lives | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| 4WE_GP2x | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| 9 Lives | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | A1GP2XV1_1 | `incompatible` | 0.0 | 0 | – | unknown-device | /dev/ |
 | abduction | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | abe | `incompatible` | 60.2 | 1518 | ✓ | no-frames |  |
 | abuse_1.0 | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/ |
-| ADIC2X | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| ADIC2X | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | airpong4GP2X0.0.4 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/airpong4GP2X0.0.4/airpong022/src/AirPong.gpe' is not an  |
 | albion-v1.0.1-gp2x | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse0 |
 | Alex's Falldown | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse/0 |
@@ -206,7 +206,7 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | animatch_v1.2.zip | `incompatible` | 0.0 | 0 | – | archive-failed | magiceyes: failed to extract '/mnt/s/GP2X/animatch_v1.2.zip' (exit 32512) |
 | AnotherGame2x | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/AnotherGame2x/AnotherGame2x/anothergame2x.gpe' is not an |
 | atris-1.0.7 | `incompatible` | 60.5 | 1572 | ✓ | no-frames |  |
-| B'lox! | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| B'lox! | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | balluz | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/balluz/balluz/balluz.gpe' is not an ARM ELF and no runna |
 | beat2x-05 source | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/beat2x-05 source' |
 | beat2x-pack-C64 | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/beat2x-pack-C64' |
@@ -216,13 +216,13 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | beat2x-pack-tutorial | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/beat2x-pack-tutorial' |
 | beat2x-pack-urban | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/beat2x-pack-urban' |
 | BermudaS_gp2x | `incompatible` | 0.0 | 0 | – | unknown-device | /dev/input/mouse/0 |
-| BisfoG | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| blastriot1.21 | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| BisfoG | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| blastriot1.21 | `incompatible` | 0.0 | 1 | ✓ | mmio-spin |  |
 | Blix2x | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse/0 |
 | blockoid | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse/0 |
 | blocksGP2X-0 | `incompatible` | 0.0 | 0 | – | unimplemented-syscall | 113 |
-| blox | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| Bombs Panic | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| blox | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| Bombs Panic | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Boomshine2x_(java) | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Boomshine2x_(java)/Boomshine2x/Boomshine2x.gpe' is not a |
 | bunkermaster2x04 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | Butterfly | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/Butterfly' |
@@ -232,16 +232,16 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | cdogs2x04 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | Chess2xSkins | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/Chess2xSkins' |
 | chicken-puyopuyo | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
-| Chroma | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Chroma | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Classical | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/Classical' |
 | CloneKeen2X-1.0a | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| Codemaster | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| crocodingusgp2x | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Codemaster | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| crocodingusgp2x | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x924 |
 | d1x-rebirth-gp2x_v0.50a | `incompatible` | 0.0 | 0 | – | unimplemented-syscall | 117 |
-| DangerMouse | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| DangerMouse | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | DeathChase4GP2X-V0.1b | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/DeathChase4GP2X-V0.1b/deathchase3d-0.9/deathchase3d/Deat |
 | default | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/default' |
-| diamant_1_01 | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| diamant_1_01 | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | dkbk2x-0.1 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | doom | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/doom/doom/10sector.gpe' is not an ARM ELF and no runnabl |
 | doom_mod_examples | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/doom_mod_examples/game/interpreters/doom/pwad1/prboom_gm |
@@ -251,37 +251,37 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | duckmaze-gp2x-0.1 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/duckmaze-gp2x-0.1/duckmaze-gp2x-0.1/duckmaze.gpe' is not |
 | duke2x004 | `incompatible` | 0.0 | 0 | – | unknown-device | /dev/input/mouse/0 |
 | duke3d_cheat_patch | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/duke3d_cheat_patch' |
-| dyc_gp2x | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| E-Fighters2x_FIRST_ALPHA_0_0_5_fixedSound | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| EasterQuest | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| dyc_gp2x | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| E-Fighters2x_FIRST_ALPHA_0_0_5_fixedSound | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| EasterQuest | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | exultb4-src | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/exultb4-src' |
 | FFDoom | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| FindMii | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| FindMii | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Fire | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| Flappynerd_GP2X | `incompatible` | 0.0 | 1 | – | no-frames |  |
+| Flappynerd_GP2X | `incompatible` | 0.0 | 1 | – | mmio-spin | 0x90a |
 | FleshChasmer Zero (English Patch) | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/FleshChasmer Zero (English Patch)' |
-| FlipIR_GP2X | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| Football2X | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| FlipIR_GP2X | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| Football2X | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Fore_1_0 | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/Fore_1_0' |
 | FP_Default_2.0 | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/FP_Default_2.0' |
-| freec2x | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| freec2x | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | freedroid2x06 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/freedroid2x06/Freedroid/FreeDroid.gpe' is not an ARM ELF |
 | frotz | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/frotz' |
 | FullBoard (test ver.) | `incompatible` | 51.3 | 107 | ✓ | no-frames |  |
 | garden2x02 | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| Geek 'em up GP2X | `incompatible` | 0.0 | 1 | – | no-frames |  |
-| GeneralPromise | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Geek 'em up GP2X | `incompatible` | 0.0 | 1 | – | mmio-spin | 0x90a |
+| GeneralPromise | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | geoQuiz | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/geoQuiz/geoQuiz.gpe' is not an ARM ELF and no runnable b |
 | glouton | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse/0 |
 | gnurobbo_0.66_open2x | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| gorillaz | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| gorillaz | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0xf16 |
 | gp2x-abrick-0.1 | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/gp2x-abrick-0.1' |
 | gp2x-rogue-v1.0 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | gp2x-tong-v1 | `incompatible` | 0.0 | 1 | – | no-frames |  |
-| gp2x_drench | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| GP2X_Nat2007 | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| GP2X_TLI | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| gp2xbug | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| gp2x_drench | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| GP2X_Nat2007 | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| GP2X_TLI | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| gp2xbug | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | gp2xlib | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/gp2xlib' |
 | gp2xninjas-v06 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/gp2xninjas-v06/Ninjas v0.6 Final GP2X/ninjas.gpe' is not |
 | GPQuakeDistributable3 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/GPQuakeDistributable3/GPQuakeDistributable3/jzspq2.gpe'  |
@@ -298,26 +298,26 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | hexen_mods2 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/hexen_mods2/game/interpreters/hexen/pwad2/Hexen2X_gmenu2 |
 | HigherOrLower-GP2X-v011 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | jump_n_blob_gp2x | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
-| Klaur | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Klaur | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | kobo_deluxe_beta1 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | KQ2X_v3 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | Laser2xVers10 | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
-| Lexeme | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Lexeme | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | lights-out | `incompatible` | 0.0 | 0 | – | mmio-spin |  |
 | Liquid Counter.gp2x | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Liquid Counter.gp2x/LiquidCount/LiquidCount.gpe' is not  |
-| Logoball | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Logoball | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Lottys_Lines.zip | `incompatible` | 0.0 | 0 | – | archive-failed | magiceyes: failed to extract '/mnt/s/GP2X/Lottys_Lines.zip' (exit 32512) |
 | lumix-beta-01 | `incompatible` | 60.4 | 1518 | – | no-frames |  |
-| March of the mini tux | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| March of the mini tux | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | mariodm | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/mariodm' |
-| Marte Necesita Vacas GP2X | `incompatible` | 0.0 | 1 | – | no-frames |  |
-| MazezaMGP2X | `incompatible` | 0.0 | 1 | – | no-frames |  |
+| Marte Necesita Vacas GP2X | `incompatible` | 0.0 | 1 | – | mmio-spin | 0x90a |
+| MazezaMGP2X | `incompatible` | 0.0 | 1 | – | mmio-spin | 0x90a |
 | memory | `incompatible` | 0.0 | 0 | – | mmio-spin | 0x90a |
 | Midnight2x | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Midnight2x/dosbox/midnight/midnight.gpe' is not an ARM E |
 | misterhachi | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/misterhachi/misterhachi/misterhachi.gpe' is not an ARM E |
 | mopesnake-gp2x-0.5 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/mopesnake-gp2x-0.5/mopesnake-gp2x-0.5/mopesnake.gpe' is  |
-| MouthTrap | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| mueppv32 | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| MouthTrap | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| mueppv32 | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | nethack-ascii-3.4.3port1 | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
 | nethack-caduhack.r01 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | nethack06 | `incompatible` | 0.0 | 0 | – | no-frames |  |
@@ -334,19 +334,19 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | PaybackMusicManager | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/PaybackMusicManager' |
 | pc | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | Pentominos | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse/0 |
-| Peuppy_10_GP2X | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Peuppy_10_GP2X | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Phantomas1.8X | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | Pipes2_0 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Pipes2_0/Pipes/Pipes.gpe' is not an ARM ELF and no runna |
 | Pipes_v2.1 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Pipes_v2.1/Pipes/Pipes.gpe' is not an ARM ELF and no run |
-| Poker_Gp2Xv1.0 | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| PPlane | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| PPlane2.GP2X | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Poker_Gp2Xv1.0 | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| PPlane | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| PPlane2.GP2X | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | PrBoom PWAD pack | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| puckman_gp2x | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| puckman_gp2x | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | pykaraoke-0.6-gp2x | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | pySlide | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/pySlide/pySlide/pySlide.gpe' is not an ARM ELF and no ru |
 | pyTetris | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/pyTetris/pyTetris/pyTetris.gpe' is not an ARM ELF and no |
-| Quad | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| Quad | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Quake Mods 5 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Quake Mods 5/2Fact2NS.gpe' is not an ARM ELF and no runn |
 | Quake Mods 6 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Quake Mods 6/pcrr.gpe' is not an ARM ELF and no runnable |
 | quake2x-wii | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
@@ -362,7 +362,7 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | rRootage_v1.0 | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | rubik | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | Sachunsung2_1 | `incompatible` | 50.6 | 108 | ✓ | no-frames |  |
-| santaMania | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| santaMania | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | scummvm-alpha-8a_sky | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | scummVMsaves | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/scummVMsaves' |
 | sdlscav_gp2x_0.2.0 | `incompatible` | 0.0 | 0 | – | no-frames |  |
@@ -377,8 +377,8 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | sopwith_camel_rc3 | `incompatible` | 0.0 | 0 | – | unknown-device | /dev/null |
 | space52_gp2x(oficial) | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/space52_gp2x(oficial)/space_52/space_52_gp2x.gpe' is not |
 | space52_gp2x(open2x) | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/space52_gp2x(open2x)/space_52/space_52_gp2x.gpe' is not  |
-| SpaceSnake | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
-| spacestorm | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| SpaceSnake | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
+| spacestorm | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Sqdef 1.4 | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse/0 |
 | squaregame2xV1 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/squaregame2xV1/squaregame2x.gpe' is not an ARM ELF and n |
 | Starship Soldier.gp2x | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Starship Soldier.gp2x/StarshipSoldier/starship_soldier.g |
@@ -387,10 +387,10 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | strife | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/strife/dosbox/strife/strife.gpe' is not an ARM ELF and n |
 | Supa2x | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/Supa2x/dosbox/supaplex.gpe' is not an ARM ELF and no run |
 | testmem2x | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/testmem2x/testmem2x/testmem2x.gpe' is not an ARM ELF and |
-| TouchGames | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| TouchGames | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | Trap75 | `incompatible` | 0.0 | 0 | ✓ | unknown-device | /dev/input/mouse/0 |
 | ttd2x_020108 | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| TUcS.app(V0.7.0 - GP2X) | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| TUcS.app(V0.7.0 - GP2X) | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | tunar-1.1.0 | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X/tunar-1.1.0/tunar/tunar.gpe' is not an ARM ELF and no ru |
 | TurnOn | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/TurnOn' |
 | Tux_Strikes_Back | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X/Tux_Strikes_Back' |
@@ -412,7 +412,7 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | zcgp2x_211B18_0.4alpha | `incompatible` | 0.0 | 0 | – | unknown-device | /dev/gpmdata |
 | Znumbers | `incompatible` | 50.8 | 108 | ✓ | no-frames |  |
 | Zombiepox2X | `incompatible` | 0.0 | 0 | – | no-frames |  |
-| zooov11 | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| zooov11 | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x3b44 |
 | 2xWargus_PB1.3 | `black` | 48.6 | 1133 | – | black-screen |  |
 | _-The Reversed Preacher 3-_Hack bIld_ | `black` | 59.5 | 1507 | ✓ | black-screen |  |
 | _-the reversed preacher II-_ | `black` | 58.8 | 1489 | ✓ | black-screen |  |
@@ -565,7 +565,7 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | AMazing-3D | `ingame` | 63.4 | 1605 | – | no-audio |  |
 | ASCIIPong2xV0.4 | `ingame` | 36.2 | 909 | ✓ | flat-fill |  |
 | BareFistFighter | `ingame` | 59.5 | 1499 | ✓ | flat-fill |  |
-| battlejewels-gp2x-062-100 | `ingame` | 0.1 | 2 | ✓ | low-fps |  |
+| battlejewels-gp2x-062-100 | `ingame` | 0.1 | 2 | ✓ | mmio-spin | 0x808 |
 | Birdshoot | `ingame` | 61.0 | 1531 | – | no-audio |  |
 | Blocked | `ingame` | 3.8 | 96 | ✓ | low-fps |  |
 | bugafactorx-v03-beta | `ingame` | 59.7 | 1519 | – | no-audio |  |
@@ -922,7 +922,7 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | PEZ | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
 | PhishyWiz | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
 | Powder2X_wiz_114_v01 | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
-| PPlane | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| PPlane | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | prboom-wiz | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | preggo_Wiz | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
 | Propis | `incompatible` | 0.0 | 0 | – | no-frames |  |
@@ -979,7 +979,7 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | Wiz_Blox | `black` | 0.2 | 4 | ✓ | black-screen |  |
 | wiz_drench | `black` | 0.1 | 3 | ✓ | black-screen |  |
 | WIZ_S4S | `black` | 0.2 | 4 | ✓ | black-screen |  |
-| WizSticks | `black` | 0.1 | 4 | ✓ | black-screen |  |
+| WizSticks | `black` | 0.1 | 4 | ✓ | mmio-spin | 0x1988 |
 | xcom1-v1.0.2-wiz | `black` | 73.1 | 160 | ✓ | black-screen |  |
 | xcom2-v1.0.1-wiz | `black` | 119.6 | 3074 | ✓ | black-screen |  |
 | spout | `ingame` | 60.7 | 1529 | – | no-audio |  |
@@ -1113,7 +1113,7 @@ These 28 titles advanced frames, kept audio running, and held frame rate, so the
 | purito_cycling_1.5_Caanoo | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X Caanoo/purito_cycling_1.5_Caanoo/game/purito_cycling_1.5 |
 | pushover-v0.2-bin | `incompatible` | 0.0 | 0 | – | no-frames |  |
 | puzsion | `incompatible` | 0.0 | 0 | – | not-arm-elf | magiceyes: '/mnt/s/GP2X Caanoo/puzsion/puzsion/puzsion.gpe' is not an ARM ELF an |
-| PUZZLEBOARDS | `incompatible` | 0.0 | 1 | ✓ | no-frames |  |
+| PUZZLEBOARDS | `incompatible` | 0.0 | 1 | ✓ | mmio-spin | 0x90a |
 | quake1-caanoo | `incompatible` | 0.0 | 0 | – | missing-game-data |  |
 | QUAKE1.INI AND ICON SET | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X Caanoo/QUAKE1.INI AND ICON SET' |
 | quake1_addons | `incompatible` | 0.0 | 0 | – | no-executable | magiceyes: no .gpe found under '/mnt/s/GP2X Caanoo/quake1_addons' |

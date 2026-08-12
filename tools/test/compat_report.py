@@ -145,11 +145,19 @@ def classify(v, log, fatal, flat_fill=False, suspicions=()):
     # Blocker lists only EXPLAIN a title that never rendered. A title that drew frames and merely
     # probed for, say, /dev/input/mouse/0 (SDL does this on startup) was not stopped by it, and
     # letting that outrank "black screen" would file a pile of misleading issues.
+    # Ran the whole window making no progress while hammering an MMSP2 register: the title is
+    # busy-waiting on a register that never changes. One register fix tends to free every title
+    # doing this.
+    #
+    # Deliberately NOT gated on frames == 0. Whether such a title gets one frame out before it
+    # wedges depends on how fast the harness happens to poll, and that changed when clip recording
+    # arrived: the same titles went from frames=0 to frames=1 and silently fell out of this bucket
+    # into "cause unknown". Judge it on progress (fps), not on an exact frame count.
+    if (v.get("secs", 0) >= 15 and v.get("fps", 0) < 1.0
+            and max_mmio_reads(log) >= 1000000):
+        return "mmio-spin", "Spins forever polling an MMSP2 register"
+
     if v.get("frames", 0) <= 0:
-        # Ran the whole window at 0 fps while hammering an MMSP2 register: the title is busy-waiting
-        # on a register that never changes. One register fix tends to free every title doing this.
-        if v.get("secs", 0) >= 15 and max_mmio_reads(log) >= 1000000:
-            return "mmio-spin", "Spins forever polling an MMSP2 register"
         for pat, key, title in GUEST_RULES:
             if re.search(pat, log):
                 return key, title
