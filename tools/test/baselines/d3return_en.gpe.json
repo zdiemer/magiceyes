@@ -1,9 +1,9 @@
 {
   "title": "d3return_en.gpe",
-  "device": "GP2X",
+  "device": "Wiz",
   "status": "playable",
-  "fps": 45.8,
-  "frames": 969,
+  "fps": 59.5,
+  "frames": 1258,
   "audio_active": 1,
   "allowed_unimplemented": [],
   "frame_hashes": [
@@ -13,25 +13,25 @@
     "0x001735b6ab6b0b00",
     "0x000635b6ab6b0b00",
     "0x000635b6ab6b0b00",
-    "0x000635b6ab6b0b00",
     "0x001735b6ab6b0b00",
     "0x00268f93b1733300",
-    "0x000aaf33b1733300",
-    "0x001b9f2a8c0f0300"
+    "0x001b1f2a8c0f0300",
+    "0x00231bab9c0f0700",
+    "0x0023633b9c1e0f00"
   ],
   "replay": "d3return_en.gpe.rec",
   "replay_hashes": [
     [
       120,
-      "0x000000c4e0000000"
+      "0x0000506858380000"
     ],
     [
       240,
-      "0x001735b6ab6b0b00"
+      "0x000000c4e0000000"
     ],
     [
       360,
-      "0x000635b6ab6b0b00"
+      "0x001735b6ab6b0b00"
     ],
     [
       480,
@@ -43,11 +43,11 @@
     ],
     [
       720,
-      "0x000aab73b1733300"
+      "0x000635b6ab6b0b00"
     ],
     [
       840,
-      "0x0006af3331733300"
+      "0x0006af33b1733300"
     ]
   ],
   "secs": 20.0

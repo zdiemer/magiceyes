@@ -331,6 +331,35 @@ long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) 
     return at;
 }
 
+/* mremap(163): glibc realloc resizes large (mmapped) chunks through this — SDL_mixer and
+   tremor decoders realloc sample buffers constantly, so ENOSYS here killed ~24 titles.
+   Shrink frees the tail; grow extends in place when the space after is free, else (with
+   MREMAP_MAYMOVE) allocates fresh, copies, and frees the old range. */
+long do_mremap(uint32_t olda, uint32_t oldl, uint32_t newl, uint32_t flags) {
+    if (!olda || (olda & (PAGE - 1)) || !newl) return -22 /*EINVAL*/;
+    uint32_t ol = ALIGN_UP(oldl), nl = ALIGN_UP(newl);
+    if (nl == ol) return (long)olda;
+    if (nl < ol) {                       /* shrink in place: recycle the tail */
+        if (g_nmfree < 256) g_mfree[g_nmfree++] = (struct freereg){olda + nl, ol - nl};
+        else uc_mem_unmap(g_uc, olda + nl, ol - nl);
+        return (long)olda;
+    }
+    if (range_free(olda + ol, nl - ol)) { /* grow in place */
+        map_region(olda + ol, nl - ol, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+        return (long)olda;
+    }
+    if (!(flags & 1 /*MREMAP_MAYMOVE*/)) return -12 /*ENOMEM*/;
+    long na = do_mmap(0, nl, GMAP_ANON, -1, 0);
+    if (na <= 0) return -12 /*ENOMEM*/;
+    uint8_t *tmp = malloc(ol);
+    if (tmp && uc_mem_read(g_uc, olda, tmp, ol) == UC_ERR_OK)
+        uc_mem_write(g_uc, (uint32_t)na, tmp, ol);
+    free(tmp);
+    if (g_nmfree < 256) g_mfree[g_nmfree++] = (struct freereg){olda, ol};
+    else uc_mem_unmap(g_uc, olda, ol);
+    return na;
+}
+
 /* device mmap: give RAM, track phys->guest, and hook MMSP2 reg writes for flips. */
 long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys) {
     uint32_t at;

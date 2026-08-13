@@ -213,6 +213,7 @@ static void *helper_thread(void *arg) {
     const char *ac = getenv("ME_AUDIOCLEAR");   /* TEMP: simulate audio-DMA completion by
                                                    periodically clearing a guest "DMA busy" flag */
     uint32_t acaddr = ac ? (uint32_t)strtoul(ac, NULL, 0) : 0;
+    double last_ready = host_now();   /* last frame-synced present (staleness fallback timer) */
     while (!g_shutdown) {   /* survives reloads (g_exit is the transient per-run bail) */
         usleep(g_oadr_driven ? 2000 : 16000);   /* poll faster once frame-driven (low latency) */
         /* Present off the guest render thread: frame-synced to the game's OADR write
@@ -224,11 +225,22 @@ static void *helper_thread(void *arg) {
            pointer that mem_reset would also free. On a present host-fault the guard's recovery
            point is below this frame, so guarded_present() returns -1 normally and the unlock
            still runs (no leak). */
+        double now = host_now();
         pthread_mutex_lock(&g_present_lock);
-        if (!g_reloading && g_fb_guest && (!g_oadr_driven || g_frame_ready)) { g_frame_ready = 0; guarded_present(); }
+        if (!g_reloading && g_fb_guest) {
+            int fresh = (!g_oadr_driven || g_frame_ready);
+            if (fresh) { g_frame_ready = 0; last_ready = now; }
+            /* Staleness fallback: a title can write OADR once at init (locking us to flip-driven
+               present) and then never flip again -- GLBasic shoebox titles draw each frame with a
+               MESG blit straight into the front buffer, no further MLC writes, no syscalls in the
+               loop (TCOUNT paces it). Frame-synced present starved those to a permanent black
+               screen. If no flip has arrived for 250ms, present asynchronously (present_active's
+               own ~60fps cap rate-limits this 2ms loop) until flips resume; a per-frame flipper
+               (Payback) refreshes last_ready every frame and never takes this path. */
+            if (fresh || now - last_ready > 0.25) guarded_present();
+        }
         if (!g_reloading && acaddr) { uint32_t *p = guest_to_host(acaddr); if (p) *p = 0; }
         pthread_mutex_unlock(&g_present_lock);
-        double now = host_now();
         if (run_secs > 0 && !run_stopped && now - run_t0 >= run_secs) {
             run_stopped = 1;
             fprintf(DIAG, "ME_RUN_SECS=%.0f elapsed -> ending run\n", run_secs);

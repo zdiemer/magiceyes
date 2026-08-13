@@ -392,6 +392,60 @@ static int save_overlay_resolve(const char *guest, int write_intent, char *out, 
     struct stat s; return (stat(out, &s) == 0 && S_ISREG(s.st_mode)) ? 1 : 0;
 }
 
+/* FAT-case fallback: the real device ran games off a FAT SD card, which matches names
+   case-insensitively, so titles hardcode asset paths whose case doesn't match their own dump
+   ("grafica/4c_initscr.png" vs "Grafica/"; GLBasic even prints "watch case sensitivity for
+   directory names!"). When the resolved host path doesn't exist, walk it component by
+   component and substitute a case-insensitive directory-entry match. Only runs on the failed-
+   lookup path, so the extra opendir scans cost nothing when paths are correct. Windows hosts
+   are case-insensitive already. */
+#ifndef _WIN32
+static void ci_fixup(char *hp) {
+    struct stat s;
+    if (stat(hp, &s) == 0) return;
+    char fixed[PATH_MAX]; size_t fl = 0;
+    char *comp = hp, *rest = NULL;
+    if (*comp == '/') { fixed[fl++] = '/'; comp++; }
+    fixed[fl] = 0;
+    for (; comp && *comp; comp = rest) {
+        char *slash = strchr(comp, '/');
+        if (slash) { *slash = 0; rest = slash + 1; } else rest = NULL;
+        size_t need = strlen(comp);
+        if (fl + need + 2 >= sizeof fixed) { if (slash) *slash = '/'; return; }
+        size_t mark = fl;
+        if (fl && fixed[fl - 1] != '/') fixed[fl++] = '/';
+        memcpy(fixed + fl, comp, need + 1); fl += need;
+        if (stat(fixed, &s) != 0) {              /* exact miss: scan the parent for a CI match */
+            char parent[PATH_MAX];
+            if (mark) { memcpy(parent, fixed, mark); parent[mark] = 0; }
+            else snprintf(parent, sizeof parent, ".");
+            DIR *d = opendir(parent);
+            int found = 0;
+            if (d) {
+                struct dirent *e;
+                while ((e = readdir(d)))
+                    if (!strcasecmp(e->d_name, comp)) {
+                        size_t el = strlen(e->d_name);
+                        if (mark + el + 2 < sizeof fixed) {
+                            fl = mark;
+                            if (fl && fixed[fl - 1] != '/') fixed[fl++] = '/';
+                            memcpy(fixed + fl, e->d_name, el + 1); fl += el;
+                            found = 1;
+                        }
+                        break;
+                    }
+                closedir(d);
+            }
+            if (slash) *slash = '/';
+            if (!found) return;                  /* genuinely missing: leave hp as-is */
+        } else if (slash) *slash = '/';
+    }
+    snprintf(hp, PATH_MAX, "%s", fixed);
+}
+#else
+static void ci_fixup(char *hp) { (void)hp; }
+#endif
+
 /* Resolve a path-based file op to a host path, honouring the save overlay first. The SD-mount
    rewrite runs before overlay matching so a /mnt/sd write is claimed by the overlay (it becomes
    an absolute path under g_game_root), not passed through to the real game dir. */
@@ -399,6 +453,7 @@ static void resolve_io(const char *guest, int write_intent, char *out, size_t ca
     char sdbuf[PATH_MAX]; guest = sd_game_rewrite(guest, sdbuf, sizeof sdbuf);
     if (save_overlay_resolve(guest, write_intent, out, cap)) return;
     resolve_path(guest, out, cap);
+    if (!write_intent) ci_fixup(out);
 }
 
 /* Guest (Linux/ARM) open() flag bits are the same numeric values on every guest ABI. A write
@@ -778,9 +833,21 @@ static int sysfile_open(const char *p) {
     return 0;
 }
 
+/* alarm(27): pending one-shot SIGALRM (absolute deadline in host µs; 0 = none). Checked at
+   syscall entry below — good-enough latency for the watchdog/tick uses GP2X games have. */
+static uint64_t g_alarm_at = 0;
+static int      g_alarm_tid = 0;
+
 long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
     (void)a5;
+    if (g_alarm_at) {   /* expired alarm -> SIGALRM to the thread that armed it */
+        struct timeval tv; gettimeofday(&tv, NULL);
+        if ((uint64_t)tv.tv_sec * 1000000 + tv.tv_usec >= g_alarm_at) {
+            g_alarm_at = 0;
+            send_sig(g_alarm_tid, 14 /*SIGALRM*/);
+        }
+    }
     /* ME_TRACE_AFTER: enable the syscall trace only AFTER the guest has rendered (frame_seq), to
        capture the input loop without the slow asset-load init drowning it. ~20k syscalls then off. */
     if (getenv("ME_TRACE_AFTER")) { static long lc = -1;
@@ -885,6 +952,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (dev_type((int)a0) == DEV_GPIO) return gpio_read(a1, a2); /* joystick buttons */
         if (dev_type((int)a0) == DEV_INPUT_EV || dev_type((int)a0) == DEV_INPUT_JS)
             return input_read((int)a0, a1, a2);                     /* evdev/js stick + buttons */
+        if (dev_type((int)a0) == DEV_TOUCH) return ts_read(a1, a2); /* F200 touchscreen samples */
         if (dev_type((int)a0)) return 0;   /* other stub devices: EOF (never host-read a fake fd) */
         if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
         uint8_t *tmp = malloc(a2 ? a2 : 1);
@@ -949,6 +1017,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                  else { extern unsigned long g_uc_unmap; g_uc_unmap++; uc_mem_unmap(g_uc, a, l); } }
         return 0;
     }
+    case 163:  /* mremap(old, old_len, new_len, flags, new_addr): glibc realloc of mmapped chunks */
+        return do_mremap(a0, a1, a2, a3);
     case 2: { /* fork.
         Default: DON'T run the child inline. The inline child shares the engine with the
         still-running parent threads, so snapshotting guest memory at fork time and restoring
@@ -1294,6 +1364,33 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 186:  return 0;  /* sigaltstack (libpthread sets one; we run handlers on the guest stack) */
     case 125:  return 0;  /* mprotect (we map RWX) */
+    case 220:  return 0;  /* madvise: advisory only */
+    case 150: case 151: case 152: return 0;  /* mlock/munlock/mlockall: everything is "locked" */
+    case 97:   return 0;  /* setpriority: accept, single-user emulation has no niceness */
+    case 96:   return 20; /* getpriority: kernel encodes nice 0 as 20 - nice = 20 */
+    case 43: { /* times(tms*): elapsed process ticks (USER_HZ=100). SDL_GetTicks on some builds
+                  falls back to times() -- returning ENOSYS froze their game clock at 0. */
+        struct timeval tv; gettimeofday(&tv, NULL);
+        uint32_t ticks = (uint32_t)((uint64_t)tv.tv_sec * 100 + tv.tv_usec / 10000);
+        if (a0) { uint32_t tms[4] = { ticks, 0, 0, 0 }; uc_mem_write(g_uc, a0, tms, 16); }
+        return (long)ticks;
+    }
+    case 242: { /* sched_getaffinity(pid, len, mask): one CPU */
+        if (a1 < 4) return LERR(EINVAL);
+        uint32_t one = 1; uc_mem_write(g_uc, a2, &one, 4);
+        return 4;   /* kernel returns the cpumask size it copied */
+    }
+    case 27: { /* alarm(secs): one-shot SIGALRM, checked at syscall entry (games syscall
+                  constantly, so delivery latency is fine for a watchdog/timer). Returns
+                  seconds remaining on any previously scheduled alarm, like the kernel. */
+        struct timeval tv; gettimeofday(&tv, NULL);
+        uint64_t now = (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+        long left = g_alarm_at ? (long)((g_alarm_at - now + 999999) / 1000000) : 0;
+        if (left < 0) left = 0;
+        g_alarm_at  = a0 ? now + (uint64_t)a0 * 1000000 : 0;
+        g_alarm_tid = g_self ? g_self->tid : 1;
+        return left;
+    }
     case 20:   return g_self->tid;  /* getpid (LinuxThreads: 1 pid per thread) */
     case 224:  return g_self->tid;  /* gettid */
     case 64:   return g_self->ppid;  /* getppid (LinuxThreads orphan check) */
@@ -1381,6 +1478,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             if ((int)fd == PIPEFD_R) { if (g_pipe_w > g_pipe_r) rev |= 1; }  /* POLLIN */
             else if (dt == DEV_GPIO) { if (ev & 1) rev |= 1; }               /* button device: state always ready */
             else if ((dt == DEV_INPUT_EV || dt == DEV_INPUT_JS) && (ev & 1) && input_pending((int)fd)) rev |= 1;
+            else if (dt == DEV_TOUCH && (ev & 1) && ts_pending()) rev |= 1;   /* touch sample ready */
             if (ev & 4) rev |= 4;                                            /* devices/files always writable */
             uc_mem_write(g_uc, a0 + i * 8 + 6, &rev, 2);
             if (rev) ready++;

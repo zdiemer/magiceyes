@@ -26,6 +26,10 @@ int dev_open(const char *path) {
        "MMU hack failed" and exits). We have nothing to accelerate, but a benign stub (open ok,
        ioctl->0, writes discarded) lets the game proceed. */
     else if (!strcmp(path, "/dev/mmuhack"))   t = DEV_OTHER;
+    else if (!strcmp(path, "/dev/null"))      t = DEV_NULL;  /* freopen sink; must not ENOENT */
+    /* GP2X F200 resistive touchscreen (WM9712 codec). Titles read TS_EVENT samples; the viewer's
+       mouse->touch plumbing (gp2xshm touch_x/y/down) is the data source. */
+    else if (!strcmp(path, "/dev/touchscreen/wm97xx")) t = DEV_TOUCH;
     else if (!strcmp(path, "/dev/shm/gp2x_fb")) t = DEV_SHMFB; /* fake-SDL shim's framebuffer shm */
     else if ((t = input_classify(path))) { /* /dev/input/event*, /dev/input/js*: Linux input subsystem */ }
     else {
@@ -411,6 +415,50 @@ long gpio_read(uint32_t gbuf, uint32_t n) {
     uint32_t k = n < 4 ? n : 4;
     if (gbuf && k) uc_mem_write(g_uc, gbuf, &v, k);
     return (long)k;
+}
+
+/* ---- /dev/touchscreen/wm97xx (GP2X F200) ----------------------------------
+   The GPH F200 kernel driver hands out 16-byte samples:
+     struct TS_EVENT { u16 pressure; u16 x; u16 y; u16 pad; struct timeval stamp; }
+   with raw ADC coordinates (the community-standard calibration maps x 200..3750 ->
+   0..319 and y 3860..230 -> 0..239, i.e. raw y grows UPWARD). We synthesise raw
+   coords from the shm touch state through that same mapping so titles using the
+   stock GPH sample transform land on the pixel the viewer's mouse points at.
+   Sample pacing mirrors the real driver: an event whenever the state changes, plus
+   a ~100Hz stream while the pen is down — never an unbounded burst, so a title
+   draining the queue in its frame loop always runs dry. */
+static struct { int16_t x, y; uint32_t down; uint64_t last_us; } g_ts_last;
+static uint64_t ts_now_us(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
+int ts_pending(void) {
+    if (!g_shm) return 0;
+    if (g_shm->touch_down != g_ts_last.down ||
+        (g_shm->touch_down && (g_shm->touch_x != g_ts_last.x || g_shm->touch_y != g_ts_last.y)))
+        return 1;
+    return g_shm->touch_down && ts_now_us() - g_ts_last.last_us >= 10000;  /* ~100Hz stream */
+}
+long ts_read(uint32_t gbuf, uint32_t n) {
+    if (!g_shm || n < 16 || !ts_pending()) return 0;   /* no sample: read returns 0 (poll gates) */
+    int16_t px = g_shm->touch_x, py = g_shm->touch_y;
+    uint32_t down = g_shm->touch_down;
+    if (px < 0) px = 0;
+    if (px > 319) px = 319;
+    if (py < 0) py = 0;
+    if (py > 239) py = 239;
+    uint16_t ev[4];
+    ev[0] = down ? 1000 : 0;                            /* pressure */
+    ev[1] = (uint16_t)(200 + (uint32_t)px * (3750 - 200) / 319);
+    ev[2] = (uint16_t)(3860 - (uint32_t)py * (3860 - 230) / 239);
+    ev[3] = 0;
+    uint64_t now = ts_now_us();
+    uint32_t stamp[2] = { (uint32_t)(now / 1000000), (uint32_t)(now % 1000000) };
+    uc_mem_write(g_uc, gbuf, ev, 8);
+    uc_mem_write(g_uc, gbuf + 8, stamp, 8);
+    g_ts_last.x = g_shm->touch_x; g_ts_last.y = g_shm->touch_y;
+    g_ts_last.down = down; g_ts_last.last_us = now;
+    return 16;
 }
 
 /* ---- MLC 8-bit palette (PALLT_A index @0x2958, PALLT_D data @0x295a) -------

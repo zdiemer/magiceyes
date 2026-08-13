@@ -152,7 +152,11 @@ int  me_firmware_boot_request(const char *device);  /* GUI: pin rootfs + reload 
 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER,
-       DEV_INPUT_EV, DEV_INPUT_JS };   /* Linux input subsystem: /dev/input/event* and /dev/input/js* */
+       DEV_INPUT_EV, DEV_INPUT_JS,     /* Linux input subsystem: /dev/input/event* and /dev/input/js* */
+       DEV_NULL,                       /* /dev/null: read EOF, write discard */
+       DEV_TOUCH };                    /* /dev/touchscreen/wm97xx: F200 resistive panel */
+long ts_read(uint32_t buf, uint32_t len);   /* F200 touchscreen: TS_EVENT samples from shm touch state */
+int  ts_pending(void);
 /* Synthetic guest fds MUST stay below FD_SETSIZE (1024): games put device fds in fd_sets
    (glibc's FD_SET writes bits[fd/32] with no bounds check — an fd like 0x10000002 smashed
    memory 8M words past the stack fd_set, and select() on a device could never be modelled).
@@ -330,6 +334,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
 extern struct freereg g_mfree[256];
 extern int g_nmfree;
 long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off);
+long do_mremap(uint32_t olda, uint32_t oldl, uint32_t newl, uint32_t flags);
 long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys);
 long shmfb_mmap(uint32_t len);   /* alias the shim's gp2x_fb mmap onto the engine's g_shm */
 void mem_register_external(uint32_t guest, uint32_t len, void *host);

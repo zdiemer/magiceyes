@@ -260,6 +260,21 @@ uint32_t setup_stack(int argc, char **argv) {
             envs[nenv] = envbuf[nenv]; nenv++;
         } else
             envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs";
+        /* Preload zlib: the firmware's /lib/libpng.so.3 carries NO DT_NEEDED for libz (on the
+           real device the zlib symbols were already in the process's global namespace), so
+           SDL_image's dlopen("libpng.so.3") dies binding inflateReset -> IMG_Load returns NULL
+           for every PNG -> titles run "perfectly" while drawing pure black (BareFistFighter et
+           al). patchelf --add-needed produces an ELF the glibc-2.3.6 ld.so rejects ("load
+           command not properly aligned"), so recreate the firmware's global zlib the same way
+           the device did: preload it. Gated on the lib existing in the selected rootfs so the
+           EABI rootfs (whose libpng is properly linked) doesn't warn. */
+        {
+            char zhost[PATH_MAX];
+            struct stat zs;
+            if (me_rootfs_resolve("/lib/libz.so.1", zhost, sizeof zhost) &&
+                stat(zhost, &zs) == 0 && S_ISREG(zs.st_mode))
+                envs[nenv++] = "LD_PRELOAD=/lib/libz.so.1";
+        }
         const char *f = getenv("ME_GP2X_FPS");
         snprintf(envbuf[nenv], sizeof envbuf[0], "FAKESDL_FPS=%s", f ? f : "60"); envs[nenv] = envbuf[nenv]; nenv++;
         /* device profile for the shim's per-device joystick map (GP2X/Wiz default vs Caanoo's
