@@ -63,7 +63,9 @@ rm -rf "$STAGE/saves" "$STAGE/cache"
 
 # Generic nudge past splash screens so a captured frame is more often a menu.
 # NONE:<secs> is a no-op gap (shmlib.buttons_mask ignores names it does not know).
-PRESS="START:0.4,NONE:2.0,A:0.4,NONE:2.0,START:0.4,NONE:2.0,A:0.4,NONE:3.0,START:0.4"
+# B is in the rotation because GLBasic's keywait accepts B but ignores START (the vsync-fix
+# revealed a family of shoebox titles parked on a "press any button" splash -- see NEXT_STEPS.md).
+PRESS="START:0.4,NONE:2.0,A:0.4,NONE:2.0,B:0.4,NONE:2.0,START:0.4,NONE:1.6,A:0.4,NONE:1.6,B:0.4,NONE:2.0,UP:0.3,NONE:1.0,B:0.4"
 
 cd "$STAGE"
 {

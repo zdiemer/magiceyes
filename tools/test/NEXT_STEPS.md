@@ -5,7 +5,10 @@ Ranked by how many titles one fix would move. Generated from the 1031-title swee
 `zdiemer/magiceyes-compat`, labelled `group:` and `blocker:` so each cluster below is one label
 filter away.
 
-Current state: **253 playable, 123 ingame, 185 black, 470 incompatible, 0 crashes.**
+Current state (2026-08-12 re-sweep, after the vsync/`/mnt/sd`/stale-fd fixes): **331 playable,
+132 ingame, 120 black, 448 incompatible, 0 crashes** — up from 253/123 with black down 185→120.
+The numbers below this line describe the 2026-08-11 sweep the ranking was built from; item 1 is
+fixed, and the re-swept `CORPUS_SWEEP.md` supersedes the counts in items 2-8.
 
 Of the 470 incompatible, **268 are not our bug**: 105 are engine ports that quit because the
 original game data was never in the dump, 99 are not ARM executables, 59 ship no `.gpe` at all,
