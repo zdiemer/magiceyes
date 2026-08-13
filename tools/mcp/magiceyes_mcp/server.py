@@ -48,7 +48,10 @@ def engine_health() -> dict:
     h = env.health()
     h["mount"] = env.ensure_corpus_mount()
     h["corpus"] = env.corpus_roots()
-    h["active_sessions"] = sorted(MGR.sessions)
+    h["active_sessions"] = sorted(s for s, v in MGR.sessions.items() if v.alive())
+    dead = sorted(s for s, v in MGR.sessions.items() if not v.alive())
+    if dead:
+        h["exited_sessions"] = dead   # engine gone; artifacts still readable, launch to continue
     return h
 
 
@@ -219,16 +222,26 @@ def run_report(session: str | None = None) -> dict:
     return MGR.get(session).read_report()
 
 
-@mcp.tool(description="Tail (and optionally grep) the engine log for this session.")
+@mcp.tool(description="Tail (and optionally grep) the engine's diagnostics for this session. "
+                      "Reads BOTH sinks: the ME_LOGFILE log AND raw stderr -- the loader/device "
+                      "traces (DEV mmap, MMSP2 flip, probe output) go to stderr only. Lines are "
+                      "tagged [log]/[stderr]; the two files are concatenated, not interleaved.")
 def log_tail(session: str | None = None, lines: int = 60, grep: str | None = None) -> dict:
     s = MGR.get(session)
-    try:
-        text = s.log_path.read_text(errors="replace").splitlines()
-    except OSError:
+    merged: list[str] = []
+    paths: list[str] = []
+    for tag, p in (("log", s.log_path), ("stderr", s.stderr_path)):
+        try:
+            txt = p.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        paths.append(str(p))
+        merged.extend("[%s] %s" % (tag, l) for l in txt)
+    if not paths:
         return {"lines": [], "note": "no log yet"}
     if grep:
-        text = [l for l in text if grep.lower() in l.lower()]
-    return {"path": str(s.log_path), "matched": len(text), "lines": text[-lines:]}
+        merged = [l for l in merged if grep.lower() in l.lower()]
+    return {"paths": paths, "matched": len(merged), "lines": merged[-lines:]}
 
 
 @mcp.tool(description="Per-guest-thread state: registers (r0-r15, cpsr), signal masks, the FPA "
