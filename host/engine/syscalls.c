@@ -367,6 +367,12 @@ static int save_overlay_path(const char *guest, char *out, size_t cap) {
         }
     } else {                                         /* absolute -> only if under the game dir */
         rel = path_under(norm, gr);
+        /* A guest path like "<dir>//log.txt" (games concatenate with a trailing slash) leaves a
+           leading '/' on the tail, which the absolute-path guard below then rejected -- so the
+           write fell through the overlay STRAIGHT INTO the read-only/ROM game dir (observed:
+           BareFistFighter appending its log.txt onto the NAS share). Collapse the extra slashes;
+           the guard keeps rejecting genuinely empty/parent-escaping tails. */
+        if (rel) while (rel[0] == '/') rel++;
     }
     if (!rel || !rel[0] || rel[0] == '/' || strstr(rel, "..")) return 0;
     snprintf(out, cap, "%s/%s", g_save_root, rel);
