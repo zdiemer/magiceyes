@@ -23,6 +23,7 @@
 unsigned int gFWver      = 0xffff0101u;   /* firmware version word (cosmetic in the menu) */
 char         gND_Info[44]    = {0};        /* NED device/info struct */
 char         gNEDLicense[100] = {0};       /* NED license blob */
+char         gNED_File[256]  = {0};        /* opaque NED file-state blob (imported by some titles) */
 
 /* Inka "NED" DRM file I/O. Commercial Caanoo titles (Liar, Propis, Rhythmos) read their assets
    through these DRM-transparent wrappers instead of plain stdio. Our targets' assets are

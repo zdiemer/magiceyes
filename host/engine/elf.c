@@ -239,7 +239,7 @@ uint32_t setup_stack(int argc, char **argv) {
        NULL not valid"). These mirror what the GP2X firmware exports; harmless to games that ignore
        env. */
     const char *envs[28]; int nenv = 0;
-    static char envbuf[28][128];
+    static char envbuf[28][512];   /* LD_LIBRARY_PATH can carry a long absolute launcher dir */
     envs[nenv++] = "HOME=/tmp";
     envs[nenv++] = "PWD=.";
     envs[nenv++] = "TERM=linux";
@@ -248,7 +248,18 @@ uint32_t setup_stack(int argc, char **argv) {
     envs[nenv++] = "LANG=C";
     envs[nenv++] = "TMPDIR=/tmp";
     if (g_is_dynamic) {
-        envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib";
+        /* Rootfs first so the shim keeps shadowing libSDL; then the game's own dir + common
+           lib-subdir names. Many titles SHIP satellite libs beside the .gpe (wizpong/uqm ship
+           libmikmod.so.2, jump_n_blob ships lib/libSDL_gfx.so.13) and rely on the launcher
+           script's LD_LIBRARY_PATH=. on real hardware -- without these entries ld.so aborts
+           with "cannot open shared object" -> exit 127. Relative entries resolve against cwd,
+           which main() has already chdir'd to the game root. */
+        if (g_launcher_dir[0]) {
+            snprintf(envbuf[nenv], sizeof envbuf[0],
+                     "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs:%s", g_launcher_dir);
+            envs[nenv] = envbuf[nenv]; nenv++;
+        } else
+            envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs";
         const char *f = getenv("ME_GP2X_FPS");
         snprintf(envbuf[nenv], sizeof envbuf[0], "FAKESDL_FPS=%s", f ? f : "60"); envs[nenv] = envbuf[nenv]; nenv++;
         /* device profile for the shim's per-device joystick map (GP2X/Wiz default vs Caanoo's

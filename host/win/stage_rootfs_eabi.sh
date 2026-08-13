@@ -44,7 +44,8 @@ $CC -shared -fPIC -O2 -march=armv5te -marm -mfloat-abi=soft -fno-stack-protector
    --sysroot="$SYS" -B "$SYS/usr/lib/$MA" -L "$SYS/usr/lib/$MA" -L "$SYS/lib/$MA" \
    -nostdinc -I "$SH/inc/SDL" -I "$SH/inc" -I "$REPO/guest/src" \
    -isystem "$GCCINC" -isystem "$SYS/usr/include/$MA" -isystem "$SYS/usr/include" \
-   -Wl,-soname,libSDL-1.2.so.0 -o "$SH/libSDL-1.2.so.0" "$REPO/guest/src/fakesdl.c" -lrt
+   -Wl,-soname,libSDL-1.2.so.0 -o "$SH/libSDL-1.2.so.0" \
+   "$REPO/guest/src/fakesdl.c" "$REPO/guest/src/inifile.c" -lpthread -lrt
 bad=$(readelf -W --dyn-syms "$SH/libSDL-1.2.so.0" | awk '$7=="UND"{print $8}' \
       | grep -E '__gettimeofday64|__nanosleep64|__dlopen|GLIBC_2\.(1[4-9]|[2-9][0-9])' || true)
 [ -z "$bad" ] || { echo "shim has too-new refs: $bad"; exit 1; }
@@ -66,8 +67,9 @@ ST="$W/stage"; mkdir -p "$ST"
 #   assets (libpng12) + a TTF font (libfreetype); Rhythmos streams MP3 (libmad + libid3tag).
 #   libts (tslib): Caanoo touchscreen lib — Propis NEEDs libts-0.0.so.0 (clean deps: libdl+libc).
 for p in libc6 libgcc1 libstdc++6 zlib1g \
-         libsdl-mixer1.2 libsdl-gfx1.2-4 \
+         libsdl-mixer1.2 libsdl-gfx1.2-4 libsdl-ttf2.0-0 \
          libvorbisfile3 libvorbis0a libogg0 libmikmod2 libmad0 libflac8 \
+         libsmpeg0 libsdl-net1.2 libexpat1 \
          libpng12-0 libfreetype6 libid3tag0 libts-0.0-0; do
   dpkg-deb -x "$(fetch $p)" "$ST"
 done
@@ -103,12 +105,20 @@ else
   echo "   WARNING: no gconv dir in libc6 extraction ($GC) -- iconv text will stay blank"
 fi
 
+echo "== minimal /etc/ts.conf (tslib aborts without a config file) =="
+mkdir -p "$DST/etc"
+printf 'module_raw input\nmodule pthres pmin=1\nmodule dejitter delta=100\nmodule linear\n' > "$DST/etc/ts.conf"
+
 echo "== fake-SDL shim + empty soname stubs (titles NEED these only to LOAD) =="
 for n in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do cp -f "$SH/libSDL-1.2.so.0" "$DST/lib/$n"; done
 echo '' > "$W/empty.c"
-for s in libSDL_ttf-2.0.so.0 libjpeg.so.7 libvorbisidec.so.1; do
+for s in libjpeg.so.7 libvorbisidec.so.1; do
   $CC -shared -nostdlib -march=armv5te -marm -Wl,-soname,$s -o "$DST/lib/$s" "$W/empty.c"
 done
+# SDL_ttf must be REAL (12+ Caanoo titles call TTF_*; an empty stub made ld.so abort with
+# "undefined symbol: TTF_Init" -> exit 127). Wheezy's build is staged with the other SDL
+# satellites above. (The GPH SDK's own copy is unusable here: it carries the firmware's OABI
+# OS-ABI byte, which the Debian EABI ld-linux.so.3 rejects -- same trap as the DRM stubs.)
 # libSDL_image stub: our fakesdl shim provides IMG_Load (decoding PNG via libpng12's weak-bound
 # entrypoints). Give this stub a DT_NEEDED on libpng12 so a title that uses IMG_Load but doesn't
 # link libpng itself (Liar) still pulls libpng into the process -> the weak refs resolve.
@@ -122,9 +132,16 @@ echo "== fake-GLES shim under every Caanoo GL/EGL soname + Pollux driver stubs =
 for n in libGLESv1_CM.so libOpenEGL.so libopengles_lite.so libglport.so.0; do
   cp -f "$SH/libGLESv1_CM.so" "$DST/lib/$n"
 done
-for s in libMesNativeOEM.so libDrv.so libmedia.so librec.so libunicodefont.so libinifile.so; do
+for s in libMesNativeOEM.so libDrv.so libmedia.so librec.so libunicodefont.so; do
   $CC -shared -nostdlib -march=armv5te -marm -Wl,-soname,$s -o "$DST/lib/$s" "$W/empty.c"
 done
+# libinifile is REAL (15+ titles call INI_Open for settings/highscores; it was an empty stub ->
+# "undefined symbol: INI_Open" -> exit 127). Our reimplementation of the GPH API; also compiled
+# into the shim libSDL for titles that expect the fat firmware SDL to export it.
+$CC -shared -fPIC -O2 -march=armv5te -marm -mfloat-abi=soft -fno-stack-protector -D_FORTIFY_SOURCE=0 \
+   --sysroot="$SYS" -B "$SYS/usr/lib/$MA" -L "$SYS/usr/lib/$MA" -L "$SYS/lib/$MA" \
+   -nostdinc -isystem "$GCCINC" -isystem "$SYS/usr/include/$MA" -isystem "$SYS/usr/include" \
+   -Wl,-soname,libinifile.so -o "$DST/lib/libinifile.so" "$REPO/guest/src/inifile.c"
 # DRM gate stubs (Inka "NED") — cross-compile EABI so ld-linux.so.3 accepts the OS ABI.
 # (The GPH-toolchain copies in bin/guest carry the firmware's OABI OS-ABI byte, which the
 # Debian EABI ld-linux.so.3 rejects with "ELF file OS ABI invalid" — hit by Caanoo DRM titles

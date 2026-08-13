@@ -30,6 +30,7 @@ int  g_launch_nargs = 0;
    engine can bring up the second core inline (see me940_load_and_start) before the client game runs.
    Empty when the title doesn't use the 940. */
 char g_940_firmware[PATH_MAX] = {0};
+char g_launcher_dir[PATH_MAX] = {0};   /* the followed launcher script's dir (see resolve_script) */
 static const char *path_base(const char *p);   /* defined below */
 static int file_is_elf(const char *path);      /* defined below */
 static void scan_940_firmware(const char *gpe, const char *dir) {
@@ -138,6 +139,12 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", gpe);
     char *s1 = strrchr(dir, '/'), *s2 = strrchr(dir, '\\'), *s = s1 > s2 ? s1 : s2;
     if (s) *s = 0; else snprintf(dir, sizeof dir, ".");
+
+    /* Remember the launcher's own dir: on device the script cd's here and sets
+       LD_LIBRARY_PATH=. before exec'ing a possibly-nested binary, so titles ship their
+       satellite libs HERE (CDogs: CDogs/libmikmod.so.2 next to CDogs.gpe, binary three dirs
+       down). elf.c appends this to the guest LD_LIBRARY_PATH. */
+    snprintf(g_launcher_dir, sizeof g_launcher_dir, "%s", dir);
 
     scan_940_firmware(gpe, dir);   /* note an ARM940 (load940 gpu940) launch for the engine */
 
@@ -357,6 +364,7 @@ static int extract_zip(const char *zip, char *destbuf, size_t cap) {
 const char *resolve_input(const char *in, char *out, size_t cap) {
     g_launch_nargs = 0;   /* fresh per load; populated if we follow a launcher script with args */
     g_940_firmware[0] = 0;   /* fresh per load; set if the launcher runs load940 */
+    g_launcher_dir[0] = 0;   /* fresh per load; set if we follow a launcher script */
     struct stat st;
     if (stat(in, &st)) { fprintf(stderr, "magiceyes: '%s': %s\n", in, strerror(errno)); return NULL; }
     if (S_ISDIR(st.st_mode)) return resolve_dir(in, out, cap);

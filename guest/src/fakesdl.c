@@ -538,6 +538,47 @@ int SDL_UpperBlit(SDL_Surface *src, SDL_Rect *srcrect,
 int SDL_LowerBlit(SDL_Surface *a, SDL_Rect *ar, SDL_Surface *b, SDL_Rect *br) {
     return SDL_UpperBlit(a, ar, b, br);
 }
+/* Nearest-neighbour stretch between same-format surfaces (what SDL 1.2's software path does
+   for the common case; games use it to scale a low-res canvas to 320x240). C89-style decls:
+   this file also builds with the GPH SDK's gcc-4.0.2 for the OABI shim. */
+int SDL_SoftStretch(SDL_Surface *src, SDL_Rect *srcrect, SDL_Surface *dst, SDL_Rect *dstrect) {
+    SDL_Rect sr, dr;
+    int bpp, x, y;
+    if (!src || !dst || !src->pixels || !dst->pixels) return -1;
+    if (srcrect) sr = *srcrect;
+    else { sr.x = 0; sr.y = 0; sr.w = (Uint16)src->w; sr.h = (Uint16)src->h; }
+    if (dstrect) dr = *dstrect;
+    else { dr.x = 0; dr.y = 0; dr.w = (Uint16)dst->w; dr.h = (Uint16)dst->h; }
+    bpp = src->format->BytesPerPixel;
+    if (bpp != dst->format->BytesPerPixel || !sr.w || !sr.h || !dr.w || !dr.h) return -1;
+    for (y = 0; y < dr.h; y++) {
+        int sy = sr.y + (int)((long)y * sr.h / dr.h);
+        Uint8 *srow, *drow;
+        if (sy < 0 || sy >= src->h || dr.y + y < 0 || dr.y + y >= dst->h) continue;
+        srow = (Uint8 *)src->pixels + (long)sy * src->pitch;
+        drow = (Uint8 *)dst->pixels + (long)(dr.y + y) * dst->pitch;
+        for (x = 0; x < dr.w; x++) {
+            int sx = sr.x + (int)((long)x * sr.w / dr.w);
+            if (sx < 0 || sx >= src->w || dr.x + x < 0 || dr.x + x >= dst->w) continue;
+            memcpy(drow + (long)(dr.x + x) * bpp, srow + (long)sx * bpp, bpp);
+        }
+    }
+    return 0;
+}
+/* App is always active, visible, and focused (no window manager on a handheld). */
+Uint8 SDL_GetAppState(void) { return 0x01 | 0x02 | 0x04; }  /* MOUSEFOCUS|INPUTFOCUS|ACTIVE */
+int SDL_SetGamma(float r, float g, float b) { (void)r; (void)g; (void)b; return 0; }
+int SDL_SetGammaRamp(const Uint16 *r, const Uint16 *g, const Uint16 *b) { (void)r; (void)g; (void)b; return 0; }
+int SDL_GetGammaRamp(Uint16 *r, Uint16 *g, Uint16 *b) { (void)r; (void)g; (void)b; return 0; }
+
+/* libgcc integer-division helpers: a few OABI-era binaries import these dynamically (the
+   firmware libs exported their statically-linked copies). Weak, because static libgcc may be
+   pulled into this link with its own strong copies (same semantics; either def serves).
+   Plain C compiles to the __aeabi_* forms here, so these wrappers don't recurse. */
+__attribute__((weak)) unsigned __udivsi3(unsigned n, unsigned d) { return d ? n / d : 0; }
+__attribute__((weak)) unsigned __umodsi3(unsigned n, unsigned d) { return d ? n % d : 0; }
+__attribute__((weak)) int      __divsi3(int n, int d)            { return d ? n / d : 0; }
+__attribute__((weak)) int      __modsi3(int n, int d)            { return d ? n % d : 0; }
 
 int SDL_SetColors(SDL_Surface *s, SDL_Color *colors, int first, int n) {
     int i;
@@ -553,14 +594,40 @@ char *SDL_VideoDriverName(char *buf, int n) { strncpy(buf, "gp2xshm", n); return
 void SDL_WM_SetCaption(const char *t, const char *i) { (void)t; (void)i; }
 void SDL_WM_SetIcon(SDL_Surface *s, Uint8 *m) { (void)s; (void)m; }
 int SDL_ShowCursor(int toggle) { return toggle; }
+/* No hardware cursor on the handhelds -- keep a current-cursor pointer so Create/Set/Get
+   round-trip (games build cursors at init and crash on a NULL return; nothing is drawn). */
+static SDL_Cursor *g_cursor;
+SDL_Cursor *SDL_CreateCursor(Uint8 *data, Uint8 *mask, int w, int h, int hot_x, int hot_y) {
+    SDL_Cursor *c = calloc(1, sizeof *c);
+    if (!c) return NULL;
+    int n = (w / 8) * h; if (n < 0) n = 0;
+    c->area.w = (Uint16)w; c->area.h = (Uint16)h;
+    c->hot_x = (Sint16)hot_x; c->hot_y = (Sint16)hot_y;
+    c->data = malloc(n ? n : 1); c->mask = malloc(n ? n : 1);
+    if (c->data && data) memcpy(c->data, data, n);
+    if (c->mask && mask) memcpy(c->mask, mask, n);
+    return c;
+}
+void SDL_FreeCursor(SDL_Cursor *cursor) {
+    if (!cursor) return;
+    if (g_cursor == cursor) g_cursor = NULL;
+    free(cursor->data); free(cursor->mask); free(cursor);
+}
+void SDL_SetCursor(SDL_Cursor *cursor) { if (cursor) g_cursor = cursor; }
+SDL_Cursor *SDL_GetCursor(void) { return g_cursor; }
 SDL_GrabMode SDL_WM_GrabInput(SDL_GrabMode mode) { return mode; }
 
 /* ---------------------------------------------------------------- events */
+/* SDL 1.2 event filter: called as each event is queued; returning 0 drops it. */
+static SDL_EventFilter g_evfilter;
 static void push_event(const SDL_Event *e) {
+    if (g_evfilter && g_evfilter((SDL_Event *)e) == 0) return;
     int nt = (g_evq_tail + 1) % EVQ_SIZE;
     if (nt == g_evq_head) return; /* full */
     g_evq[g_evq_tail] = *e; g_evq_tail = nt;
 }
+void SDL_SetEventFilter(SDL_EventFilter filter) { g_evfilter = filter; }
+SDL_EventFilter SDL_GetEventFilter(void) { return g_evfilter; }
 
 /* ---- per-device joystick mapping --------------------------------------------
    GP2X + Wiz games see the GP2X 19-"button" layout (gp2xshm.h order, button index == shm bit;
@@ -831,6 +898,64 @@ void SDL_WaitThread(SDL_Thread *th, int *status) {
     if (status) *status = 0;
     free(th);
 }
+/* Counting semaphore on the mutex+cond pair above (glibc 2.3.6-era sem_t layouts differ
+   between our build sysroots, so avoid <semaphore.h>). */
+struct SDL_semaphore { pthread_mutex_t m; pthread_cond_t c; Uint32 v; };
+SDL_sem *SDL_CreateSemaphore(Uint32 initial) {
+    struct SDL_semaphore *s = malloc(sizeof *s);
+    if (!s) return NULL;
+    pthread_mutex_init(&s->m, NULL); pthread_cond_init(&s->c, NULL); s->v = initial;
+    return (SDL_sem *)s;
+}
+void SDL_DestroySemaphore(SDL_sem *sem) {
+    struct SDL_semaphore *s = (struct SDL_semaphore *)sem;
+    if (!s) return;
+    pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->c); free(s);
+}
+int SDL_SemWait(SDL_sem *sem) {
+    struct SDL_semaphore *s = (struct SDL_semaphore *)sem;
+    if (!s) return -1;
+    pthread_mutex_lock(&s->m);
+    while (s->v == 0) pthread_cond_wait(&s->c, &s->m);
+    s->v--;
+    pthread_mutex_unlock(&s->m);
+    return 0;
+}
+int SDL_SemTryWait(SDL_sem *sem) {
+    struct SDL_semaphore *s = (struct SDL_semaphore *)sem;
+    if (!s) return -1;
+    int r = SDL_MUTEX_TIMEDOUT;
+    pthread_mutex_lock(&s->m);
+    if (s->v > 0) { s->v--; r = 0; }
+    pthread_mutex_unlock(&s->m);
+    return r;
+}
+int SDL_SemWaitTimeout(SDL_sem *sem, Uint32 ms) {
+    struct SDL_semaphore *s = (struct SDL_semaphore *)sem;
+    if (!s) return -1;
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += ms / 1000; ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    int r = 0;
+    pthread_mutex_lock(&s->m);
+    while (s->v == 0 && r != ETIMEDOUT) r = pthread_cond_timedwait(&s->c, &s->m, &ts);
+    if (s->v > 0) { s->v--; r = 0; } else r = SDL_MUTEX_TIMEDOUT;
+    pthread_mutex_unlock(&s->m);
+    return r;
+}
+int SDL_SemPost(SDL_sem *sem) {
+    struct SDL_semaphore *s = (struct SDL_semaphore *)sem;
+    if (!s) return -1;
+    pthread_mutex_lock(&s->m);
+    s->v++;
+    pthread_cond_signal(&s->c);
+    pthread_mutex_unlock(&s->m);
+    return 0;
+}
+Uint32 SDL_SemValue(SDL_sem *sem) {
+    struct SDL_semaphore *s = (struct SDL_semaphore *)sem;
+    return s ? s->v : 0;
+}
 /* Calling thread's id. GPAC compares these to detect re-entrancy, so only
    per-thread consistency matters, not the exact value. */
 Uint32 SDL_ThreadID(void) {
@@ -1020,6 +1145,18 @@ SDL_bool SDL_RemoveTimer(SDL_TimerID id) {
     free(tm);
     return SDL_TRUE;
 }
+/* Legacy single-timer API (SDL_SetTimer(0,NULL) cancels). The old callback takes only the
+   interval; adapt it onto the SDL_AddTimer machinery above. */
+static SDL_TimerID g_legacy_timer;
+static SDL_TimerCallback g_legacy_cb;
+static Uint32 legacy_timer_tramp(Uint32 iv, void *param) { (void)param; return g_legacy_cb ? g_legacy_cb(iv) : 0; }
+int SDL_SetTimer(Uint32 interval, SDL_TimerCallback callback) {
+    if (g_legacy_timer) { SDL_RemoveTimer(g_legacy_timer); g_legacy_timer = NULL; }
+    g_legacy_cb = callback;
+    if (!interval || !callback) return 0;
+    g_legacy_timer = SDL_AddTimer(interval, legacy_timer_tramp, NULL);
+    return g_legacy_timer ? 0 : -1;
+}
 
 /* GPH Wiz device extensions the menu probes (battery / board id / device-iface lifecycle). No
    hardware here -> report a healthy battery + success so the menu neither warns nor auto-powers-off.
@@ -1074,6 +1211,11 @@ static void pump_audio(void) {
     }
 }
 
+char *SDL_AudioDriverName(char *namebuf, int maxlen) {
+    if (!namebuf || maxlen <= 0) return NULL;
+    snprintf(namebuf, (size_t)maxlen, "dsp");   /* what the real GP2X/Wiz SDL reports */
+    return namebuf;
+}
 int SDL_OpenAudio(SDL_AudioSpec *desired, SDL_AudioSpec *obtained) {
     SDL_AudioSpec sp; memset(&sp, 0, sizeof(sp));
     if (desired)
@@ -1479,6 +1621,7 @@ static void png_cb_err(void *png, const char *msg) {
 }
 static void png_cb_warn(void *png, const char *msg) { (void)png; (void)msg; }
 
+SDL_Surface *IMG_LoadPNG_RW(SDL_RWops *src);   /* forward: alias below IMG_Load_RW */
 SDL_Surface *IMG_Load_RW(SDL_RWops *src, int freesrc) {
     if (!src) return NULL;
     /* Dispatch by magic: BMP ("BM") -> our SDL_LoadBMP_RW; PNG -> libpng below. Caanoo titles
@@ -1536,6 +1679,7 @@ SDL_Surface *IMG_Load(const char *file) {
     return IMG_Load_RW(rw, 1);
 }
 int IMG_isPNG(SDL_RWops *src) { (void)src; return 1; }
+SDL_Surface *IMG_LoadPNG_RW(SDL_RWops *src) { return IMG_Load_RW(src, 0); }
 const SDL_version *IMG_Linked_Version(void) {
     static SDL_version v = { 1, 2, 12 }; return &v;
 }

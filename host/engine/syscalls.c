@@ -1635,6 +1635,23 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         default: return 0;
         }
     }
+    /* EABI direct socket syscalls (281..294) -- same fake-socket policy as socketcall(102)
+       above: hand out FAKESOCK_FD, accept config, swallow sends, starve reads. EABI Caanoo
+       titles (Abbaye) open a socket at init and abort if it fails. */
+    case 281: return FAKESOCK_FD;                    /* socket */
+    case 282: case 283: case 284: case 294: return 0; /* bind/connect/listen/setsockopt */
+    case 289: case 290: case 296: {                  /* send/sendto/sendmsg: claim sent */
+        if (getenv("ME_SYSLOG") && nr != 296 && a1 && a2) {   /* glibc abort()/syslog messages */
+            uint32_t len = a2 > 512 ? 512 : a2; char m[513];
+            uc_mem_read(g_uc, a1, m, len); m[len] = 0;
+            fprintf(stderr, "  [syslog] %s\n", m);
+        }
+        return (long)a2;
+    }
+    case 291: case 292: case 297: return 0;          /* recv/recvfrom/recvmsg: nothing */
+    case 285: return LERR(EAGAIN);                   /* accept: never a peer */
+    case 286: case 287: case 288: case 295: return 0; /* getsockname/getpeername/socketpair/getsockopt */
+    case 293: return 0;                              /* shutdown */
     default:
         me_report(MR_UNIMPL_SYSCALL, (long)nr, NULL, g_self ? g_self->last_pc : 0);
         if (g_trace)

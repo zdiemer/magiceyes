@@ -33,6 +33,26 @@ for f in "$W/rfs/usr/gp2x/"*.ttf; do
   [ -e "$f" ] || continue
   sudo cp -Lf "$f" "$DST/$(basename "$f")"; n=$((n+1))
 done
+echo "== stage GPH runtime libs (/usr/lib + /lib) -> assets/caanoo-ref/usr/lib =="
+# DGE titles NEED the firmware's own engine libs (deminor: libdge20.so). These only exist in
+# the firmware image. Some carry the GPH toolchain's ARM OS-ABI byte, which the Debian EABI
+# ld-linux.so.3 rejects ("ELF file OS ABI invalid") -- normalise EI_OSABI/EI_ABIVERSION to
+# SYSV/0 while staging (the code is plain EABI5; only the branding byte differs).
+LDST="$REPO/assets/caanoo-ref/usr/lib"; mkdir -p "$LDST"
+m=0
+# WHITELIST, not a sweep: everything else is either Wheezy-staged (SDL satellites, decoders),
+# shimmed on purpose (libSDL, GLES, Pollux driver stubs), or firmware glibc that must never mix
+# with the Wheezy glibc in the link map.
+for pat in libdg libopenal; do  # DGE family (libdge20/dgx20/dgt20) + GPH OpenAL (libopenal11/alut11)
+  for f in "$W/rfs/usr/lib/$pat"*.so* "$W/rfs/lib/$pat"*.so*; do
+    [ -e "$f" ] || continue
+    b=$(basename "$f")
+    sudo cp -Lf "$f" "$LDST/$b"
+    sudo chmod 644 "$LDST/$b"
+    printf '\0\0' | sudo dd of="$LDST/$b" bs=1 seek=7 count=2 conv=notrunc status=none
+    m=$((m+1))
+  done
+done
 sudo chmod -R a+rX "$REPO/assets/caanoo-ref"
-echo "done: staged $n font(s) into $DST"
+echo "done: staged $n font(s) into $DST, $m runtime lib(s) into $LDST"
 ls -la "$DST"

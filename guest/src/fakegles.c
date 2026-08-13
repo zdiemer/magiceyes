@@ -256,7 +256,7 @@ typedef struct {
 static Tex g_tex[MAXTEX];
 static GLuint g_next_tex = 1;
 
-static float g_mv[16], g_proj[16];   /* column-major, current values (no stack: games don't push/pop) */
+static float g_mv[16], g_proj[16];   /* column-major, current values (stacks: see glPushMatrix) */
 static GLenum g_mmode = GL_MODELVIEW;
 static GLint  g_vp[4] = { 0, 0, 320, 240 };
 
@@ -309,8 +309,7 @@ void glViewport(GLint x, GLint y, GLsizei w, GLsizei h) {
         else fb_resize(w, h);
     }
 }
-void glOrthox(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f) {
-    float L=l/65536.f, R=r/65536.f, B=b/65536.f, T=t/65536.f, N=n/65536.f, F=f/65536.f;
+static void ortho_cur(float L, float R, float B, float T, float N, float F) {
     float o[16]; m_identity(o);
     if (R!=L) o[0]  = 2.0f/(R-L);
     if (T!=B) o[5]  = 2.0f/(T-B);
@@ -318,6 +317,27 @@ void glOrthox(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f) 
     o[12] = -(R+L)/(R-L); o[13] = -(T+B)/(T-B); o[14] = -(F+N)/(F-N);
     mult_cur(o);
 }
+void glOrthox(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f) {
+    ortho_cur(l/65536.f, r/65536.f, b/65536.f, t/65536.f, n/65536.f, f/65536.f);
+}
+void glOrthof(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f) {
+    ortho_cur(l, r, b, t, n, f);
+}
+/* Small per-mode matrix stacks (GLES1.1 minimums are 16/2; most 2.5D titles nest 2-3 deep). */
+static float g_mv_stack[16][16], g_proj_stack[4][16];
+static int g_mv_sp, g_proj_sp;
+void glPushMatrix(void) {
+    if (g_mmode == GL_PROJECTION) {
+        if (g_proj_sp < 4) memcpy(g_proj_stack[g_proj_sp++], g_proj, sizeof g_proj);
+    } else if (g_mv_sp < 16) memcpy(g_mv_stack[g_mv_sp++], g_mv, sizeof g_mv);
+}
+void glPopMatrix(void) {
+    if (g_mmode == GL_PROJECTION) {
+        if (g_proj_sp > 0) memcpy(g_proj, g_proj_stack[--g_proj_sp], sizeof g_proj);
+    } else if (g_mv_sp > 0) memcpy(g_mv, g_mv_stack[--g_mv_sp], sizeof g_mv);
+}
+void glCullFace(GLenum mode) { (void)mode; }   /* rasterizer draws both windings */
+void glFrontFace(GLenum mode) { (void)mode; }
 void glFrustumx(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f) {
     float L=l/65536.f, R=r/65536.f, B=b/65536.f, T=t/65536.f, N=n/65536.f, F=f/65536.f;
     float m[16]; memset(m, 0, sizeof m);
@@ -364,6 +384,17 @@ void glDisable(GLenum c) {
 }
 void glBlendFunc(GLenum s, GLenum d) { g_blend_s=s; g_blend_d=d; }
 void glAlphaFunc(GLenum func, GLclampf ref) { g_atest_func=func; g_atest_ref=ref; }
+void glAlphaFuncx(GLenum func, GLfixed ref) { g_atest_func=func; g_atest_ref=(float)ref/65536.0f; }
+void glPixelStorei(GLenum pname, GLint param) { (void)pname; (void)param; }  /* tightly-packed only */
+const GLubyte *glGetString(GLenum name) {
+    switch (name) {
+    case 0x1F00: return (const GLubyte *)"magiceyes";                 /* GL_VENDOR */
+    case 0x1F01: return (const GLubyte *)"fakegles software";         /* GL_RENDERER */
+    case 0x1F02: return (const GLubyte *)"OpenGL ES-CM 1.1";          /* GL_VERSION */
+    case 0x1F03: return (const GLubyte *)"";                          /* GL_EXTENSIONS */
+    default:     return (const GLubyte *)"";
+    }
+}
 void glShadeModel(GLenum m) { (void)m; }
 void glTextureDither(GLint v) { (void)v; }      /* MES extension: no-op */
 
@@ -471,6 +502,35 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, G
         for(int i=0;i<tot;i+=step){uint32_t p=tx->rgba[i];ns++; if(p&0x00FFFFFF)nz++; if(p&0xFF000000)na++;}
         GLOG("glTexImage2D id=%u %dx%d fmt=%x type=%x  content[rgb=%d/%d a=%d/%d]\n",
              g_bound_tex, w, h, format, type, nz, ns, na, ns); }
+}
+void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff, GLsizei w, GLsizei h,
+                     GLenum format, GLenum type, const GLvoid *pixels) {
+    (void)target;
+    if (level != 0 || !g_bound_tex || g_bound_tex >= MAXTEX || !pixels) return;
+    Tex *tx = &g_tex[g_bound_tex];
+    if (!tx->rgba || xoff < 0 || yoff < 0 || w <= 0 || h <= 0 ||
+        xoff + w > tx->w || yoff + h > tx->h) return;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            tx->rgba[(size_t)(yoff + y) * tx->w + xoff + x] =
+                decode_texel((const uint8_t *)pixels, format, type, y * w + x);
+    if (gl_log()) GLOG("glTexSubImage2D id=%u +%d+%d %dx%d fmt=%x\n", g_bound_tex, xoff, yoff, w, h, format);
+}
+void glTexEnvi(GLenum target, GLenum pname, GLint param) {
+    (void)target; if (pname==GL_TEXTURE_ENV_MODE) g_texenv=(GLenum)param;
+}
+void glTexEnviv(GLenum target, GLenum pname, const GLint *params) {
+    (void)target; if (pname==GL_TEXTURE_ENV_MODE && params) g_texenv=(GLenum)params[0];
+}
+void glGetIntegerv(GLenum pname, GLint *params) {
+    if (!params) return;
+    switch (pname) {
+    case 0x0D33: params[0] = 1024; break;              /* GL_MAX_TEXTURE_SIZE */
+    case 0x0BA2: params[0] = 0; params[1] = 0;         /* GL_VIEWPORT */
+                 params[2] = 320; params[3] = 240; break;
+    case 0x801C: params[0] = 5; break;                 /* GL_SUBPIXEL_BITS-ish default */
+    default:     params[0] = 0; break;
+    }
 }
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei w, GLsizei h,
                             GLint border, GLsizei imageSize, const GLvoid *data) {
@@ -888,6 +948,124 @@ EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read, EGLCon
     GLOG("eglMakeCurrent (GL now owns the framebuffer)\n");
     return EGL_TRUE;
 }
+/* Fog is not rasterized (fixed-function fog on these 2.5D titles is subtle depth-haze);
+   accepting the calls keeps ld.so happy and the picture is fine without it. */
+void glFogf(GLenum pname, GLfloat param)          { (void)pname; (void)param; }
+void glFogfv(GLenum pname, const GLfloat *params) { (void)pname; (void)params; }
+void glFogx(GLenum pname, GLfixed param)          { (void)pname; (void)param; }
+void glFogxv(GLenum pname, const GLfixed *params) { (void)pname; (void)params; }
+EGLint eglGetError(void) { return 0x3000; }   /* EGL_SUCCESS */
+
+/* ---- the rest of the GLES1.1 fixed-function surface -------------------------------------
+   Every entry point a title can NEED must exist or ld.so aborts the whole process with
+   exit 127 (the corpus "no-frames" cluster kept peeling to the next missing gl symbol).
+   Fixed-point (x) variants convert and reuse the float paths; state we don't rasterize
+   (depth, stencil, lighting, hints) is accepted and ignored -- these 2.5D titles read fine
+   without it. glDrawElements is the one honest gap: report it, so a blank-screen title
+   shows the reason in the run report instead of silently no-op'ing. */
+#define X2F(v) ((float)(v) / 65536.0f)
+void glTranslatex(GLfixed x, GLfixed y, GLfixed z) { glTranslatef(X2F(x), X2F(y), X2F(z)); }
+void glScalex(GLfixed x, GLfixed y, GLfixed z)     { glScalef(X2F(x), X2F(y), X2F(z)); }
+void glRotatex(GLfixed a, GLfixed x, GLfixed y, GLfixed z) { glRotatef(X2F(a), X2F(x), X2F(y), X2F(z)); }
+void glFrustumf(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f) {
+    glFrustumx((GLfixed)(l*65536), (GLfixed)(r*65536), (GLfixed)(b*65536),
+               (GLfixed)(t*65536), (GLfixed)(n*65536), (GLfixed)(f*65536));
+}
+void glLoadMatrixf(const GLfloat *m) { if (m) memcpy(cur_matrix(), m, 16 * sizeof(float)); }
+void glLoadMatrixx(const GLfixed *m) {
+    if (!m) return; float *d = cur_matrix(); for (int i = 0; i < 16; i++) d[i] = X2F(m[i]);
+}
+void glMultMatrixf(const GLfloat *m) { if (m) mult_cur(m); }
+void glMultMatrixx(const GLfixed *m) {
+    if (!m) return; float f[16]; for (int i = 0; i < 16; i++) f[i] = X2F(m[i]); mult_cur(f);
+}
+void glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
+    g_cur_color[0]=r; g_cur_color[1]=g; g_cur_color[2]=b; g_cur_color[3]=a;
+}
+void glColor4x(GLfixed r, GLfixed g, GLfixed b, GLfixed a) { glColor4f(X2F(r), X2F(g), X2F(b), X2F(a)); }
+void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) {
+    glColor4f(r/255.0f, g/255.0f, b/255.0f, a/255.0f);
+}
+GLenum glGetError(void) { return 0; }   /* GL_NO_ERROR */
+void glFlush(void)  {}
+void glFinish(void) {}
+void glGetFloatv(GLenum pname, GLfloat *params) {
+    if (!params) return;
+    switch (pname) {
+    case 0x0BA6: memcpy(params, g_mv, sizeof g_mv); break;      /* GL_MODELVIEW_MATRIX */
+    case 0x0BA7: memcpy(params, g_proj, sizeof g_proj); break;  /* GL_PROJECTION_MATRIX */
+    case 0x0B00: memcpy(params, g_cur_color, sizeof g_cur_color); break; /* GL_CURRENT_COLOR */
+    default: params[0] = 0; break;
+    }
+}
+void glGetBooleanv(GLenum pname, GLboolean *params) { (void)pname; if (params) params[0] = 0; }
+void glGetFixedv(GLenum pname, GLfixed *params)     { (void)pname; if (params) params[0] = 0; }
+GLboolean glIsEnabled(GLenum c) {
+    if (c==GL_TEXTURE_2D) return (GLboolean)g_en_tex;
+    if (c==GL_BLEND) return (GLboolean)g_en_blend;
+    if (c==GL_ALPHA_TEST) return (GLboolean)g_en_atest;
+    return 0;
+}
+GLboolean glIsTexture(GLenum t) { return t && t < MAXTEX && g_tex[t].rgba ? 1 : 0; }
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
+    (void)mode; (void)count; (void)type; (void)indices;
+    gl_report(0, "glDrawElements");   /* honest gap: indexed drawing is not rasterized yet */
+}
+void glDepthFunc(GLenum f)               { (void)f; }
+void glDepthMask(GLboolean m)            { (void)m; }
+void glDepthRangef(GLclampf n, GLclampf f) { (void)n; (void)f; }
+void glDepthRangex(GLfixed n, GLfixed f) { (void)n; (void)f; }
+void glClearDepthf(GLclampf d)           { (void)d; }
+void glClearDepthx(GLfixed d)            { (void)d; }
+void glClearColorx(GLfixed r, GLfixed g, GLfixed b, GLfixed a) { glClearColor(X2F(r), X2F(g), X2F(b), X2F(a)); }
+void glClearStencil(GLint s)             { (void)s; }
+void glStencilFunc(GLenum f, GLint r, GLenum m) { (void)f; (void)r; (void)m; }
+void glStencilMask(GLenum m)             { (void)m; }
+void glStencilOp(GLenum a, GLenum b, GLenum c) { (void)a; (void)b; (void)c; }
+void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) { (void)r; (void)g; (void)b; (void)a; }
+void glScissor(GLint x, GLint y, GLsizei w, GLsizei h) { (void)x; (void)y; (void)w; (void)h; }
+void glHint(GLenum t, GLenum m)          { (void)t; (void)m; }
+void glLineWidth(GLfloat w)              { (void)w; }
+void glLineWidthx(GLfixed w)             { (void)w; }
+void glPointSize(GLfloat s)              { (void)s; }
+void glPointSizex(GLfixed s)             { (void)s; }
+void glPolygonOffset(GLfloat f, GLfloat u)  { (void)f; (void)u; }
+void glPolygonOffsetx(GLfixed f, GLfixed u) { (void)f; (void)u; }
+void glLogicOp(GLenum op)                { (void)op; }
+void glPointParameterf(GLenum p, GLfloat v)            { (void)p; (void)v; }
+void glPointParameterfv(GLenum p, const GLfloat *v)    { (void)p; (void)v; }
+void glPointParameterx(GLenum p, GLfixed v)            { (void)p; (void)v; }
+void glPointParameterxv(GLenum p, const GLfixed *v)    { (void)p; (void)v; }
+void glSampleCoverage(GLclampf v, GLboolean inv) { (void)v; (void)inv; }
+void glSampleCoveragex(GLfixed v, GLboolean inv) { (void)v; (void)inv; }
+void glActiveTexture(GLenum u)           { (void)u; }   /* single texture unit */
+void glClientActiveTexture(GLenum u)     { (void)u; }
+void glMultiTexCoord4f(GLenum u, GLfloat s, GLfloat t, GLfloat r, GLfloat q) { (void)u;(void)s;(void)t;(void)r;(void)q; }
+void glMultiTexCoord4x(GLenum u, GLfixed s, GLfixed t, GLfixed r, GLfixed q) { (void)u;(void)s;(void)t;(void)r;(void)q; }
+void glNormal3f(GLfloat x, GLfloat y, GLfloat z) { (void)x; (void)y; (void)z; }
+void glNormal3x(GLfixed x, GLfixed y, GLfixed z) { (void)x; (void)y; (void)z; }
+void glNormalPointer(GLenum t, GLsizei s, const GLvoid *p) { (void)t; (void)s; (void)p; }
+void glLightf(GLenum l, GLenum p, GLfloat v)            { (void)l; (void)p; (void)v; }
+void glLightfv(GLenum l, GLenum p, const GLfloat *v)    { (void)l; (void)p; (void)v; }
+void glLightx(GLenum l, GLenum p, GLfixed v)            { (void)l; (void)p; (void)v; }
+void glLightxv(GLenum l, GLenum p, const GLfixed *v)    { (void)l; (void)p; (void)v; }
+void glLightModelf(GLenum p, GLfloat v)                 { (void)p; (void)v; }
+void glLightModelfv(GLenum p, const GLfloat *v)         { (void)p; (void)v; }
+void glLightModelx(GLenum p, GLfixed v)                 { (void)p; (void)v; }
+void glLightModelxv(GLenum p, const GLfixed *v)         { (void)p; (void)v; }
+void glMaterialf(GLenum f, GLenum p, GLfloat v)         { (void)f; (void)p; (void)v; }
+void glMaterialfv(GLenum f, GLenum p, const GLfloat *v) { (void)f; (void)p; (void)v; }
+void glMaterialx(GLenum f, GLenum p, GLfixed v)         { (void)f; (void)p; (void)v; }
+void glMaterialxv(GLenum f, GLenum p, const GLfixed *v) { (void)f; (void)p; (void)v; }
+void glTexParameterf(GLenum t, GLenum p, GLfloat v)     { glTexParameteri(t, p, (GLint)v); }
+void glTexParameterx(GLenum t, GLenum p, GLfixed v)     { glTexParameteri(t, p, (GLint)v); }
+void glTexParameteriv(GLenum t, GLenum p, const GLint *v)   { if (v) glTexParameteri(t, p, v[0]); }
+void glTexParameterfv(GLenum t, GLenum p, const GLfloat *v) { if (v) glTexParameteri(t, p, (GLint)v[0]); }
+void glTexParameterxv(GLenum t, GLenum p, const GLfixed *v) { if (v) glTexParameteri(t, p, (GLint)v[0]); }
+void glTexEnvx(GLenum t, GLenum p, GLfixed v)           { glTexEnvi(t, p, (GLint)v); }
+void glTexEnvxv(GLenum t, GLenum p, const GLfixed *v)   { if (v) glTexEnvi(t, p, (GLint)v[0]); }
+#undef X2F
+
 /* Present the colour buffer to the shm RGB565 framebuffer + frame-cap like SDL_Flip. */
 EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) {
     (void)d; (void)s;
