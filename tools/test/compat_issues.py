@@ -281,14 +281,15 @@ def is_managed(name):
 
 
 def existing_issues(repo):
-    """marker -> (issue number, set of current labels), for idempotent re-runs."""
+    """marker -> (issue number, set of current labels, state), for idempotent re-runs."""
     out = sh_retry(["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "2000",
-                    "--json", "number,body,labels"])
+                    "--json", "number,body,labels,state"])
     found = {}
     for it in json.loads(out or "[]"):
         m = re.search(re.escape(MARKER) + r": ([^\s]+) -->", it.get("body") or "")
         if m:
-            found[m.group(1)] = (it["number"], {l["name"] for l in it.get("labels", [])})
+            found[m.group(1)] = (it["number"], {l["name"] for l in it.get("labels", [])},
+                                 it.get("state", "OPEN"))
     return found
 
 
@@ -369,7 +370,9 @@ def main():
     a = ap.parse_args()
 
     with open(a.manifest) as f:
-        records = json.load(f)["titles"]
+        manifest = json.load(f)
+    records = manifest["titles"]
+    excluded = manifest.get("excluded_no_executable", [])
     keep = {s.strip() for s in a.status.split(",") if s.strip()}
     records = [r for r in records if r.get("tier", r["status"]) in keep or r["status"] in keep]
     if a.only_file:
@@ -391,6 +394,23 @@ def main():
     have = existing_issues(a.repo)
     print("%d issues already filed" % len(have))
 
+    # Folders with no runnable .gpe are not titles: the sweep no longer grades them, so close
+    # any previously-filed issue for them (idempotent: already-closed ones are skipped).
+    closed = 0
+    for x in excluded:
+        mk = "%s/%s" % (x["platform"], slug(x["title"]))
+        if mk in have and have[mk][2] != "CLOSED":
+            try:
+                sh_retry(["gh", "issue", "close", str(have[mk][0]), "--repo", a.repo,
+                          "--comment", "No runnable `.gpe` in this folder: it is a source/media/"
+                          "data-only dump, not a title, so the sweep no longer grades it."])
+                closed += 1
+            except RuntimeError as e:
+                print("  !! close %s: %s" % (x["title"], e), file=sys.stderr)
+            time.sleep(a.sleep)
+    if closed:
+        print("closed %d no-executable issues" % closed)
+
     created = updated = 0
     for i, r in enumerate(records, 1):
         mk = marker_for(r)
@@ -407,7 +427,7 @@ def main():
         labels = labels_for(r)
         try:
             if mk in have:
-                n, current = have[mk]
+                n, current, _state = have[mk]
                 n = str(n)
                 base = ["gh", "issue", "edit", n, "--repo", a.repo, "--title", title, "--body", body]
                 lab = sum([["--add-label", l] for l in labels], [])

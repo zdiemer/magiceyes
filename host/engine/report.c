@@ -111,7 +111,13 @@ void me_report_scan_write(int guest_fd, const char *buf, size_t len) {
         first_line(tmp, line, sizeof line);
         me_report(MR_MISSING_ROOTFS_LIB, 0, line, 0);
     } else if ((strstr(tmp, "assertion") && strstr(tmp, "failed")) ||
-               strstr(tmp, "*** ") /* glibc fortify/heap aborts */) {
+               /* glibc fortify/heap aborts -- match the specific banners, NOT a bare "*** ":
+                  games love decorating benign stderr ("*** INIT SOUND ***", penguin-command)
+                  and one false guest_fatal demotes a fine title to `incompatible`. */
+               strstr(tmp, "*** glibc detected") ||
+               strstr(tmp, "*** stack smashing detected") ||
+               strstr(tmp, "*** buffer overflow detected") ||
+               strstr(tmp, "*** longjmp causes uninitialized stack")) {
         first_line(tmp, line, sizeof line);
         me_report(MR_GUEST_FATAL, 0, line, 0);
     }

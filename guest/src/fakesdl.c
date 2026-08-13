@@ -24,6 +24,7 @@
 #include "SDL_version.h"
 #include "SDL_mutex.h"
 #include "SDL_thread.h"
+#include "SDL_cdrom.h"
 #include "SDL_wiz_dev.h"
 
 #include <stdio.h>
@@ -727,6 +728,34 @@ int SDL_WaitEvent(SDL_Event *event) {
     for (;;) { if (SDL_PollEvent(event)) return 1; usleep(2000); }
 }
 int SDL_PushEvent(SDL_Event *event) { push_event(event); return 0; }
+/* BennuGD's libsdlhandler drives the whole event loop through SDL_PeepEvents; without this
+   export every mod_*.so dlopen fails ("undefined symbol: SDL_PeepEvents") and the game dies
+   before main. Mask is the SDL_EVENTMASK(type) bitmap. */
+int SDL_PeepEvents(SDL_Event *events, int numevents, SDL_eventaction action, Uint32 mask) {
+    int n = 0, idx;
+    if (action == SDL_ADDEVENT) {
+        for (n = 0; n < numevents; n++) push_event(&events[n]);
+        return numevents;
+    }
+    pump(); scanout_maybe();
+    idx = g_evq_head;
+    while (idx != g_evq_tail && n < numevents) {
+        SDL_Event *e = &g_evq[idx];
+        if (mask & SDL_EVENTMASK(e->type)) {
+            if (events) events[n] = *e;
+            n++;
+            if (action == SDL_GETEVENT) {
+                /* remove this slot: compact the tail end of the ring over it */
+                int j = idx, k = (idx + 1) % EVQ_SIZE;
+                while (k != g_evq_tail) { g_evq[j] = g_evq[k]; j = k; k = (k + 1) % EVQ_SIZE; }
+                g_evq_tail = j;
+                continue;   /* idx now holds the next (shifted) event */
+            }
+        }
+        idx = (idx + 1) % EVQ_SIZE;
+    }
+    return n;
+}
 Uint8 SDL_EventState(Uint8 type, int state) { (void)type; (void)state; return 1; }
 Uint8 *SDL_GetKeyState(int *n) { static Uint8 ks[512]; if (n) *n = 512; return ks; }
 SDLMod SDL_GetModState(void) { return KMOD_NONE; }
@@ -771,6 +800,29 @@ Sint16 SDL_JoystickGetAxis(SDL_Joystick *j, int axis) {
     return joymap_caanoo() ? caanoo_axis(axis) : 0;
 }
 Uint8 SDL_JoystickGetHat(SDL_Joystick *j, int hat) { (void)j; (void)hat; return 0; }
+int SDL_JoystickGetBall(SDL_Joystick *j, int ball, int *dx, int *dy) {
+    (void)j; (void)ball;
+    if (dx) *dx = 0;
+    if (dy) *dy = 0;
+    return 0;
+}
+
+/* SDL 1.2 CD-ROM API: BennuGD's mod_cd.so links the whole family (its dlopen fails on any
+   missing symbol, killing the game before main). There is no drive: zero drives, opens fail. */
+int SDL_CDNumDrives(void) { return 0; }
+const char *SDL_CDName(int drive) { (void)drive; return NULL; }
+SDL_CD *SDL_CDOpen(int drive) { (void)drive; return NULL; }
+CDstatus SDL_CDStatus(SDL_CD *cdrom) { (void)cdrom; return CD_ERROR; }
+int SDL_CDPlayTracks(SDL_CD *c, int st, int sf, int nt, int nf) {
+    (void)c; (void)st; (void)sf; (void)nt; (void)nf; return -1;
+}
+int SDL_CDPause(SDL_CD *c) { (void)c; return -1; }
+int SDL_CDResume(SDL_CD *c) { (void)c; return -1; }
+int SDL_CDStop(SDL_CD *c) { (void)c; return -1; }
+int SDL_CDEject(SDL_CD *c) { (void)c; return -1; }
+void SDL_CDClose(SDL_CD *c) { (void)c; }
+
+int SDL_WM_IconifyWindow(void) { return 0; }   /* mod_wm.so: nothing to iconify */
 
 /* ----------------------------------------------- GP2X/Wiz SDL extensions
  * The GPH fork of SDL 1.2 adds device-specific entry points (LCD update mode,
@@ -1679,6 +1731,32 @@ SDL_Surface *IMG_Load(const char *file) {
     return IMG_Load_RW(rw, 1);
 }
 int IMG_isPNG(SDL_RWops *src) { (void)src; return 1; }
+/* sdl-instead probes the format before loading; answer from the real magic bytes (seek back so
+   the subsequent IMG_Load_RW starts where it did). */
+int IMG_isBMP(SDL_RWops *src) {
+    if (!src) return 0;
+    int pos = src->seek(src, 0, SEEK_CUR);
+    char m[2] = {0, 0};
+    int ok = src->read(src, m, 1, 2) == 2 && m[0] == 'B' && m[1] == 'M';
+    src->seek(src, pos, SEEK_SET);
+    return ok;
+}
+int IMG_isJPG(SDL_RWops *src) {
+    if (!src) return 0;
+    int pos = src->seek(src, 0, SEEK_CUR);
+    unsigned char m[2] = {0, 0};
+    int ok = src->read(src, m, 1, 2) == 2 && m[0] == 0xFF && m[1] == 0xD8;
+    src->seek(src, pos, SEEK_SET);
+    return ok;
+}
+int IMG_isGIF(SDL_RWops *src) {
+    if (!src) return 0;
+    int pos = src->seek(src, 0, SEEK_CUR);
+    char m[3] = {0, 0, 0};
+    int ok = src->read(src, m, 1, 3) == 3 && m[0] == 'G' && m[1] == 'I' && m[2] == 'F';
+    src->seek(src, pos, SEEK_SET);
+    return ok;
+}
 SDL_Surface *IMG_LoadPNG_RW(SDL_RWops *src) { return IMG_Load_RW(src, 0); }
 const SDL_version *IMG_Linked_Version(void) {
     static SDL_version v = { 1, 2, 12 }; return &v;

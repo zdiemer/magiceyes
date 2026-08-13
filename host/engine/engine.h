@@ -117,6 +117,8 @@ void me940_selftest(const char *fw);               /* ME_940_SELFTEST standalone
 void me940_scan_fb(void);                           /* ME_940_SCANFB: locate gpu940's video buffer */
 extern char g_940_firmware[];                      /* set by the loader if a title runs load940 */
 extern char g_launcher_dir[];                      /* followed launcher script's dir (lib search) */
+extern char g_launch_cwd[];                        /* followed script's effective run dir */
+extern char g_script_libdirs[];                    /* runtime dirs from script LD_LIBRARY_PATH= */
 uint32_t gread(uint32_t reg);
 void gwrite(uint32_t reg, uint32_t v);
 

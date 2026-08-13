@@ -152,7 +152,14 @@ int me_rootfs_select(const char *interp) {
    Caanoo title would pull the firmware's glibc-2.3.6 under the Debian ld-linux.so.3 it's linked to
    -> ABI breakage. */
 static int caanoo_font_overlay(const char *guest, char *out, size_t cap) {
-    if (g_device != 2 || strncmp(guest, "/usr/gp2x/", 10)) return 0;
+    if (strncmp(guest, "/usr/gp2x/", 10)) return 0;
+    if (g_device == 1) {
+        /* Wiz QType4 titles (Propis) open the same GPH fonts, sometimes by the unversioned
+           name (HYUni_GPH_B.ttf) the Wiz firmware never shipped. Serve *.ttf only: anything
+           else under /usr/gp2x (gp2xmenu!) must keep resolving from the Wiz rootfs. */
+        size_t n = strlen(guest);
+        if (n < 4 || strcasecmp(guest + n - 4, ".ttf")) return 0;
+    } else if (g_device != 2) return 0;
     char hp[PATH_MAX], wr[PATH_MAX]; struct stat s;
     /* 1. an installed Caanoo firmware (e.g. the user booted the firmware menu) wins. */
     if (me_writable_root(wr, sizeof wr)) {
@@ -374,8 +381,31 @@ static int save_overlay_path(const char *guest, char *out, size_t cap) {
            the guard keeps rejecting genuinely empty/parent-escaping tails. */
         if (rel) while (rel[0] == '/') rel++;
     }
-    if (!rel || !rel[0] || rel[0] == '/' || strstr(rel, "..")) return 0;
-    snprintf(out, cap, "%s/%s", g_save_root, rel);
+    if (!rel || !rel[0]) return 0;
+    /* Collapse "." and interior ".." components ("data/../log.txt", "./cfg/x.ini"): games build
+       paths by concatenation, and rejecting them outright sent the WRITE through to the real
+       (ROM/NAS) game dir -- the same escape class as the "//" one above. A path that still
+       starts with ".." after collapsing genuinely climbs out of the game dir and is refused
+       (it falls through to the normal resolver, matching device behaviour). */
+    char cl[PATH_MAX]; snprintf(cl, sizeof cl, "%s", rel);
+    {
+        char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s", cl);
+        char *comps[128]; int n = 0; char *sv = NULL;
+        for (char *c = strtok_r(tmp, "/", &sv); c; c = strtok_r(NULL, "/", &sv)) {
+            if (!strcmp(c, ".")) continue;
+            if (!strcmp(c, "..") && n > 0 && strcmp(comps[n - 1], "..")) { n--; continue; }
+            if (n < 128) comps[n++] = c;
+        }
+        size_t o = 0; cl[0] = 0;
+        for (int i = 0; i < n; i++) {
+            int w = snprintf(cl + o, sizeof cl - o, "%s%s", i ? "/" : "", comps[i]);
+            if (w < 0 || (size_t)w >= sizeof cl - o) break;
+            o += (size_t)w;
+        }
+    }
+    if (!cl[0] || cl[0] == '/' ||
+        (cl[0] == '.' && cl[1] == '.' && (cl[2] == 0 || cl[2] == '/'))) return 0;
+    snprintf(out, cap, "%s/%s", g_save_root, cl);
     return 1;
 }
 
@@ -1358,8 +1388,20 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         struct stat s; return stat(hp, &s) == 0 ? 0 : LERR(ENOENT);
     }
     case 85: {  /* readlink(path, buf, bufsiz): we don't expose host symlinks; report "not a
-                   symlink" so glibc path-canonicalisation falls back to the literal path. */
-        (void)a1; (void)a2; return LERR(EINVAL);
+                   symlink" so glibc path-canonicalisation falls back to the literal path.
+                   EXCEPT /proc/self/exe: games use it to locate their data dir relative to
+                   the binary (supertux prints "Couldn't read /proc/self/exe" and falls back
+                   to cwd-relative "data/"); answer with the running binary's path. */
+        char p[256]; read_cstr(a0, p, sizeof p);
+        if (!strcmp(p, "/proc/self/exe") || !strcmp(p, "/proc/curproc/file")) {
+            const char *exe = g_cur_game[0] ? g_cur_game : NULL;
+            if (exe && a1 && a2) {
+                size_t n = strlen(exe);
+                if (n > a2) n = a2;                  /* readlink truncates, no NUL */
+                if (uc_mem_write(g_uc, a1, exe, n) == UC_ERR_OK) return (long)n;
+            }
+        }
+        return LERR(EINVAL);
     }
     case 263:   /* clock_gettime(clk, ts) */
     case 266: { /* clock_gettime64 */

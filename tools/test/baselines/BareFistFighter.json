@@ -1,0 +1,24 @@
+{
+  "title": "BareFistFighter",
+  "device": "GP2X",
+  "status": "playable",
+  "fps": 59.9,
+  "frames": 1210,
+  "audio_active": 1,
+  "allowed_unimplemented": [],
+  "frame_hashes": [
+    "0x1e0c5b00d4666280",
+    "0x1e0c5b00d4666280",
+    "0x1e0c5b00d4666280",
+    "0x161e0c0000000000",
+    "0x1051b1554d888e6b",
+    "0x1051b1554d888e6b",
+    "0x1051b1554d888e6b",
+    "0x1051b1554d888e6b",
+    "0x1051b1554d888e6b",
+    "0x1051b1554d888e6b"
+  ],
+  "replay": null,
+  "replay_hashes": [],
+  "secs": 20.0
+}

@@ -1,0 +1,24 @@
+{
+  "title": "4WE_GP2x",
+  "device": "GP2X",
+  "status": "playable",
+  "fps": 114.6,
+  "frames": 2320,
+  "audio_active": 1,
+  "allowed_unimplemented": [],
+  "frame_hashes": [
+    "0x0000000400000000",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02",
+    "0x142a2e290a5f0b02"
+  ],
+  "replay": null,
+  "replay_hashes": [],
+  "secs": 20.0
+}

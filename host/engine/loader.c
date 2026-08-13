@@ -24,7 +24,16 @@
    pushed after argv[0] by engine_load_game. Reset per resolve_input. */
 char g_launch_args[8][256];
 int  g_launch_nargs = 0;
-#define ME_SCRIPT_SEP " \t\r\n;|&\"'"
+#define ME_SCRIPT_SEP " \t\r\n;|&\"'`"
+
+/* The dir the launcher script would run the game FROM on device: the script's own dir plus any
+   relative `cd` lines before the exec. Pins g_game_root (cwd + save overlay) for script-followed
+   titles -- a BennuGD game's bgdi lives in ../bgd-runtime, but game.dcb sits beside the SCRIPT. */
+char g_launch_cwd[PATH_MAX] = {0};
+
+/* Host dirs harvested from the script's LD_LIBRARY_PATH=/PATH= assignments (":"-joined). The
+   BennuGD runtime dir is outside the default guest lib search; elf.c appends these. */
+char g_script_libdirs[512] = {0};
 
 /* If a launcher runs `load940 <firmware>` (the GP2X ARM940 loader), record the firmware path so the
    engine can bring up the second core inline (see me940_load_and_start) before the client game runs.
@@ -127,10 +136,143 @@ static void scan_runnable_elf(const char *dir, int depth, struct gpelist *gl) {
     closedir(d);
 }
 
+/* Device/tool commands a launcher script runs AROUND the game: never the game itself. Latching
+   onto one of these (pollux_dpc_set prints "usage:" and exits) was the whole usage-print failure
+   family. bgdc is the BennuGD COMPILER: the shipped .dcb is prebuilt, so the runnable game step
+   is the bgdi line that follows. */
+static int is_util_cmd(const char *base) {
+    static const char *deny[] = {"pollux_dpc_set", "pollux_set", "pollux_fpu", "cpu_speed",
+        "cpuspeed", "gp2xmenu", "bgdc", "load940", "stop940", "sync", "mount", "umount",
+        "sh", "bash", "echo", "rm", "chmod", "sleep", "killall", 0};
+    for (int i = 0; deny[i]; i++) if (!strcasecmp(base, deny[i])) return 1;
+    return 0;
+}
+
+/* Comment or redirection token: nothing after it on the line is a real argument
+   ("./game > log.txt 2>&1", "./penguin-command # > pc.log"). */
+static int tok_ends_cmdline(const char *t) {
+    return *t == '#' || *t == '>' || *t == '<' ||
+           (isdigit((unsigned char)*t) && t[1] == '>');
+}
+
+/* "LD_LIBRARY_PATH=../bgd-runtime:$LD_LIBRARY_PATH" -> resolve the concrete relative components
+   against the script's cwd; existing dirs are scanned for runnable ELFs (that's where the
+   BennuGD bgdi runtime lives) and recorded for the guest LD_LIBRARY_PATH (g_script_libdirs). */
+static void note_libdir_assign(const char *tok, const char *cwd, struct gpelist *elf) {
+    const char *val;
+    if (!strncmp(tok, "LD_LIBRARY_PATH=", 16)) val = tok + 16;
+    else if (!strncmp(tok, "PATH=", 5)) val = tok + 5;
+    else return;
+    char comps[256]; snprintf(comps, sizeof comps, "%s", val);
+    char *save = NULL;
+    for (char *c = strtok_r(comps, ":", &save); c; c = strtok_r(NULL, ":", &save)) {
+        if (!*c || strchr(c, '$') || *c == '/') continue;   /* $VAR refs + device-absolute dirs */
+        char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", cwd, c);
+        struct stat st;
+        if (stat(cand, &st) || !S_ISDIR(st.st_mode)) continue;
+        scan_runnable_elf(cand, 0, elf);
+        size_t used = strlen(g_script_libdirs);
+        if (!strstr(g_script_libdirs, cand) &&
+            used + strlen(cand) + 2 < sizeof g_script_libdirs)
+            snprintf(g_script_libdirs + used, sizeof g_script_libdirs - used,
+                     "%s%s", used ? ":" : "", cand);
+    }
+}
+
+/* If the matched binary is BennuGD's bgdi and the script's args were all shell variables we
+   can't expand ("for prg in *.prg; do bgdi $name"), point it at the one prebuilt .dcb beside
+   the script. */
+static void bgdi_default_dcb(const char *cwd) {
+    DIR *d = opendir(cwd); if (!d) return;
+    struct dirent *de; char found[256] = {0}; int n = 0;
+    while ((de = readdir(d))) {
+        const char *ext = strrchr(de->d_name, '.');
+        if (ext && !strcasecmp(ext, ".dcb")) { n++; snprintf(found, sizeof found, "%s", de->d_name); }
+    }
+    closedir(d);
+    if (n == 1) snprintf(g_launch_args[g_launch_nargs++], sizeof g_launch_args[0], "%s", found);
+}
+
+/* One pass over one script file: track relative `cd`s, harvest lib-dir assignments, and follow
+   the first referenced token that resolves to a runnable ARM ELF (exact path against the current
+   cwd, else by basename in the collected candidate set). Recurses one level into a referenced
+   sub-script ("./run.gpe" -> "./run-wiz"). Returns out or NULL. cwd is updated in place so a
+   parent script's later lines continue from where the sub-script left the state. */
+static const char *scan_script_file(const char *gpe, char *cwd, struct gpelist *elf,
+                                    int depth, char *out, size_t cap) {
+    FILE *f = fopen(gpe, "r");
+    if (!f) return NULL;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char *save = NULL;
+        int was_cd = 0;
+        for (char *tok = strtok_r(line, ME_SCRIPT_SEP, &save); tok;
+             tok = strtok_r(NULL, ME_SCRIPT_SEP, &save)) {
+            if (*tok == '#') break;                    /* comment: rest of line is dead */
+            if (was_cd) {                              /* the dir operand of a `cd` */
+                was_cd = 0;
+                if (*tok != '/' && !strchr(tok, '$')) {  /* relative only; device paths stay */
+                    char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", cwd, tok);
+                    struct stat st;
+                    if (!stat(cand, &st) && S_ISDIR(st.st_mode))
+                        snprintf(cwd, PATH_MAX, "%s", cand);
+                }
+                continue;
+            }
+            if (!strcmp(tok, "cd")) { was_cd = 1; continue; }
+            note_libdir_assign(tok, cwd, elf);
+            if (strchr(tok, '$')) continue;   /* unexpandable shell variable ($prg, $HOSTNAME) */
+            const char *name = tok;
+            while (*name == '.' || *name == '/' || *name == '\\') name++;   /* strip ./ ../ */
+            if (!*name) continue;
+            if (is_util_cmd(path_base(name))) continue;
+            char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", cwd, name);
+            int hit = file_is_runnable_elf(cand);
+            if (hit) snprintf(out, cap, "%s", cand);
+            else {
+                const char *tb = path_base(name);
+                for (int i = 0; i < elf->n; i++)
+                    if (!strcasecmp(path_base(elf->paths[i]), tb)) {
+                        snprintf(out, cap, "%s", elf->paths[i]); hit = 1; break;
+                    }
+            }
+            if (!hit && depth > 0) {
+                /* a referenced sibling that is itself a "#!" script: follow it (run.gpe ->
+                   run-wiz). The sub-script starts from OUR cwd, matching sh semantics. */
+                FILE *sf = fopen(cand, "rb");
+                if (sf) {
+                    char shebang[2] = {0, 0};
+                    size_t got = fread(shebang, 1, 2, sf); fclose(sf);
+                    if (got == 2 && shebang[0] == '#' && shebang[1] == '!') {
+                        const char *sub = scan_script_file(cand, cwd, elf, depth - 1, out, cap);
+                        if (sub) { fclose(f); return sub; }
+                    }
+                }
+            }
+            if (hit) {   /* forward the binary's own args from this line (--datapath=./DATA ...) */
+                for (char *a = strtok_r(NULL, ME_SCRIPT_SEP, &save); a && g_launch_nargs < 8;
+                     a = strtok_r(NULL, ME_SCRIPT_SEP, &save)) {
+                    if (tok_ends_cmdline(a)) break;    /* redirection/comment: args are over */
+                    if (strchr(a, '$')) continue;      /* unexpandable shell variable */
+                    snprintf(g_launch_args[g_launch_nargs++], sizeof g_launch_args[0], "%s", a);
+                }
+                if (g_launch_nargs == 0 && !strcasecmp(path_base(out), "bgdi"))
+                    bgdi_default_dcb(cwd);
+                snprintf(g_launch_cwd, PATH_MAX, "%s", cwd);
+                fclose(f);
+                return out;
+            }
+        }
+    }
+    fclose(f);
+    return NULL;
+}
+
 /* A GP2X .gpe is often a tiny shell-script launcher ("#!/bin/sh\n./Game\ncd /usr/gp2x\n...")
    rather than the binary itself. Follow it to the real ARM executable:
      1. scan the script for a referenced filename that resolves to a runnable ARM ELF beside it
-        (same dir or an immediate subdir, e.g. "cd runtime; ./fxi");
+        (same dir or an immediate subdir, e.g. "cd runtime; ./fxi"), skipping device utilities
+        and tracking relative `cd`s + LD_LIBRARY_PATH runtime dirs;
      2. if the script names nothing usable (e.g. it `exec`s a name that isn't an ELF, or just
         re-invokes itself), fall back to the runnable executable(s) sitting beside it -- picking
         the one whose name matches the folder, else the largest.
@@ -145,6 +287,7 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
        satellite libs HERE (CDogs: CDogs/libmikmod.so.2 next to CDogs.gpe, binary three dirs
        down). elf.c appends this to the guest LD_LIBRARY_PATH. */
     snprintf(g_launcher_dir, sizeof g_launcher_dir, "%s", dir);
+    snprintf(g_launch_cwd, PATH_MAX, "%s", dir);   /* default: the game runs from the script dir */
 
     scan_940_firmware(gpe, dir);   /* note an ARM940 (load940 gpu940) launch for the engine */
 
@@ -152,35 +295,12 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     struct gpelist elf; elf.n = 0;
     scan_runnable_elf(dir, 1, &elf);
 
-    /* (1) follow a referenced token to a runnable ELF (prefer an exact path beside the script,
-           else match by basename anywhere in the collected set). */
-    FILE *f = fopen(gpe, "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof line, f)) {
-            for (char *tok = strtok(line, ME_SCRIPT_SEP); tok; tok = strtok(NULL, ME_SCRIPT_SEP)) {
-                const char *name = tok;
-                while (*name == '.' || *name == '/' || *name == '\\') name++;   /* strip ./ ../ */
-                if (!*name) continue;
-                char cand[PATH_MAX]; snprintf(cand, sizeof cand, "%s/%s", dir, name);
-                int hit = file_is_runnable_elf(cand);
-                if (hit) snprintf(out, cap, "%s", cand);
-                else {
-                    const char *tb = path_base(name);
-                    for (int i = 0; i < elf.n; i++)
-                        if (!strcasecmp(path_base(elf.paths[i]), tb)) { snprintf(out, cap, "%s", elf.paths[i]); hit = 1; break; }
-                }
-                if (hit) {   /* forward the binary's own args from this line (--datapath=./DATA ...) */
-                    for (char *a = strtok(NULL, ME_SCRIPT_SEP); a && g_launch_nargs < 8; a = strtok(NULL, ME_SCRIPT_SEP))
-                        snprintf(g_launch_args[g_launch_nargs++], sizeof g_launch_args[0], "%s", a);
-                    fclose(f); return out;
-                }
-            }
-        }
-        fclose(f);
-    }
+    /* (1) follow the script (cwd tracked; may recurse one level into a sub-script). */
+    char cwd[PATH_MAX]; snprintf(cwd, sizeof cwd, "%s", dir);
+    if (scan_script_file(gpe, cwd, &elf, 1, out, cap)) return out;
 
     /* (2) fallback: pick the best runnable executable beside the launcher. */
+    snprintf(g_launch_cwd, PATH_MAX, "%s", dir);   /* the wandering cwd doesn't apply */
     if (elf.n == 0) return NULL;
     char base[PATH_MAX]; snprintf(base, sizeof base, "%s", path_base(dir));
     char *dot = strrchr(base, '.'); if (dot) *dot = 0;
@@ -268,6 +388,7 @@ static int gpecomp_to_tmp(const char *elf, char *out, size_t cap) {
    GPEComp self-extractor to its static payload. */
 static const char *finalize(const char *path, char *out, size_t cap) {
     char elfbuf[PATH_MAX]; const char *elf;
+    int followed = 0;
     if (file_is_elf(path)) { snprintf(elfbuf, sizeof elfbuf, "%s", path); elf = elfbuf; }
     else {
         elf = resolve_script(path, elfbuf, sizeof elfbuf);
@@ -275,10 +396,34 @@ static const char *finalize(const char *path, char *out, size_t cap) {
             fprintf(stderr, "magiceyes: '%s' is not an ARM ELF and no runnable binary was found beside it\n", path);
             return NULL;
         }
+        followed = 1;
     }
-    /* Pin the title's REAL asset dir + per-game save overlay off the .gpe/ELF path, BEFORE
-       GPEComp decompression (which may write the runnable payload to %TEMP%, away from Data/). */
-    me_save_set_game(elf);
+    /* Pin the title's REAL asset dir + per-game save overlay, BEFORE GPEComp decompression
+       (which may write the runnable payload to %TEMP%, away from Data/). For a followed
+       launcher script that's the dir the SCRIPT would run the game from (script dir + its
+       relative cd's) keyed by the script's stem -- a BennuGD bgdi lives in ../bgd-runtime,
+       but game.dcb and the save dir belong beside the script. */
+    if (followed && g_launch_cwd[0]) {
+        char pin[PATH_MAX];
+        snprintf(pin, sizeof pin, "%s/%s", g_launch_cwd, path_base(path));
+        me_save_set_game(pin);
+        /* The resolved binary may live in a runtime dir that is neither the run cwd nor the
+           launcher dir (BennuGD's bgdi in bgd-runtime/, with libbgdrtm.so + module .so
+           satellites beside it). Put that dir on the guest lib path too. */
+        char bindir[PATH_MAX]; snprintf(bindir, sizeof bindir, "%s", elf);
+        char *b1 = strrchr(bindir, '/'), *b2 = strrchr(bindir, '\\'), *b = b1 > b2 ? b1 : b2;
+        if (b) {
+            *b = 0;
+            if (strcmp(bindir, g_launcher_dir) && strcmp(bindir, g_launch_cwd) &&
+                !strstr(g_script_libdirs, bindir)) {
+                size_t used = strlen(g_script_libdirs);
+                if (used + strlen(bindir) + 2 < sizeof g_script_libdirs)
+                    snprintf(g_script_libdirs + used, sizeof g_script_libdirs - used, "%s%s",
+                             used ? ":" : "", bindir);
+            }
+        }
+    } else
+        me_save_set_game(elf);
     if (gpecomp_to_tmp(elf, out, cap)) return out;   /* GPEComp stub -> decompressed static game */
     snprintf(out, cap, "%s", elf);
     return out;
@@ -365,6 +510,8 @@ const char *resolve_input(const char *in, char *out, size_t cap) {
     g_launch_nargs = 0;   /* fresh per load; populated if we follow a launcher script with args */
     g_940_firmware[0] = 0;   /* fresh per load; set if the launcher runs load940 */
     g_launcher_dir[0] = 0;   /* fresh per load; set if we follow a launcher script */
+    g_launch_cwd[0] = 0;     /* fresh per load; the followed script's effective run dir */
+    g_script_libdirs[0] = 0; /* fresh per load; runtime dirs from script LD_LIBRARY_PATH lines */
     struct stat st;
     if (stat(in, &st)) { fprintf(stderr, "magiceyes: '%s': %s\n", in, strerror(errno)); return NULL; }
     if (S_ISDIR(st.st_mode)) return resolve_dir(in, out, cap);

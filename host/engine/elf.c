@@ -239,7 +239,7 @@ uint32_t setup_stack(int argc, char **argv) {
        NULL not valid"). These mirror what the GP2X firmware exports; harmless to games that ignore
        env. */
     const char *envs[28]; int nenv = 0;
-    static char envbuf[28][512];   /* LD_LIBRARY_PATH can carry a long absolute launcher dir */
+    static char envbuf[28][1024];  /* LD_LIBRARY_PATH can carry launcher + script runtime dirs */
     envs[nenv++] = "HOME=/tmp";
     envs[nenv++] = "PWD=.";
     envs[nenv++] = "TERM=linux";
@@ -253,13 +253,24 @@ uint32_t setup_stack(int argc, char **argv) {
            libmikmod.so.2, jump_n_blob ships lib/libSDL_gfx.so.13) and rely on the launcher
            script's LD_LIBRARY_PATH=. on real hardware -- without these entries ld.so aborts
            with "cannot open shared object" -> exit 127. Relative entries resolve against cwd,
-           which main() has already chdir'd to the game root. */
-        if (g_launcher_dir[0]) {
+           which main() has already chdir'd to the game root. g_script_libdirs carries extra
+           runtime dirs the launcher script named or the loader resolved into (a BennuGD
+           bgdi's own dir, so its libbgdrtm.so and module .so satellites resolve).
+           NOTE the Wiz "GCC_4.2.0 not found" cluster is NOT solved by reordering game dirs
+           first (tried: it fixes those 12 but silently breaks titles that need the rootfs
+           SDL family to win, e.g. instead's IMG_isBMP); it is solved by upgrading the staged
+           rootfs libgcc_s/libstdc++ themselves (see tools/gp2x/upgrade_wiz_gcclibs.sh). */
+        {
+            char extra[PATH_MAX + 600] = "";
+            size_t off = 0;
+            if (g_launcher_dir[0])
+                off += snprintf(extra + off, sizeof extra - off, ":%s", g_launcher_dir);
+            if (g_script_libdirs[0])
+                snprintf(extra + off, sizeof extra - off, ":%s", g_script_libdirs);
             snprintf(envbuf[nenv], sizeof envbuf[0],
-                     "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs:%s", g_launcher_dir);
+                     "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs%s", extra);
             envs[nenv] = envbuf[nenv]; nenv++;
-        } else
-            envs[nenv++] = "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs";
+        }
         /* Preload zlib: the firmware's /lib/libpng.so.3 carries NO DT_NEEDED for libz (on the
            real device the zlib symbols were already in the process's global namespace), so
            SDL_image's dlopen("libpng.so.3") dies binding inflateReset -> IMG_Load returns NULL

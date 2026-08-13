@@ -278,7 +278,12 @@ def build(results_dir):
             })
     records.sort(key=lambda r: (TIER_ORDER.index(r["tier"]) if r["tier"] in TIER_ORDER else 99,
                                 r["platform"], r["title"].lower()))
-    return records
+    # A folder with no .gpe at all is not a title: there is no game to grade playable or
+    # unplayable, so it is excluded from the report entirely (counted in a footnote so the
+    # corpus size is still explained).
+    dropped = [r for r in records if r["group"] == "no-executable"]
+    records = [r for r in records if r["group"] != "no-executable"]
+    return records, dropped
 
 
 def _tally(records, field):
@@ -288,7 +293,7 @@ def _tally(records, field):
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
 
-def write_md(records, path):
+def write_md(records, path, ndropped=0):
     by_plat = {}
     for r in records:
         by_plat.setdefault(r["platform"], []).append(r)
@@ -315,6 +320,10 @@ def write_md(records, path):
     A("| **All** | **%d** | **%d** | **%d** | **%d** | **%d** | **%d** |" % (
         len(records), c.get("playable", 0), c.get("ingame", 0), c.get("black", 0),
         c.get("incompatible", 0), c.get("crashed", 0)))
+    if ndropped:
+        A("\n%d corpus folders held no `.gpe` at all (source dumps, skin packs, data-only "
+          "add-ons): with nothing to run they are not titles and are excluded from every count "
+          "above." % ndropped)
 
     A("\n### What the tiers mean\n")
     A("| Tier | Meaning |")
@@ -425,14 +434,17 @@ def main():
     ap.add_argument("--out-json", default=os.path.join(REPO, "tools", "test", "compat_manifest.json"))
     a = ap.parse_args()
 
-    records = build(a.results)
+    records, dropped = build(a.results)
     if not records:
         print("no results found under %s" % a.results, file=sys.stderr)
         return 1
-    write_md(records, a.out_md)
+    write_md(records, a.out_md, ndropped=len(dropped))
     with open(a.out_json, "w", encoding="utf-8") as f:
-        json.dump({"titles": records}, f, indent=2)
-    print("wrote %s (%d titles)" % (a.out_json, len(records)))
+        json.dump({"titles": records,
+                   "excluded_no_executable": [{"title": r["title"], "platform": r["platform"]}
+                                              for r in dropped]}, f, indent=2)
+    print("wrote %s (%d titles, %d no-executable folders excluded)"
+          % (a.out_json, len(records), len(dropped)))
     c = _tally(records, "status")
     print("  " + "  ".join("%s=%d" % (k, v) for k, v in c.items()))
     return 0

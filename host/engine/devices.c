@@ -26,6 +26,12 @@ int dev_open(const char *path) {
        "MMU hack failed" and exits). We have nothing to accelerate, but a benign stub (open ok,
        ioctl->0, writes discarded) lets the game proceed. */
     else if (!strcmp(path, "/dev/mmuhack"))   t = DEV_OTHER;
+    /* OSS MIDI sequencer: 22 corpus titles open it for background music and treat a failed
+       open as "no music" at best, a fatal at worst. Accept-and-discard (open ok, ioctl->0,
+       writes swallowed) gets them past init; real MIDI synthesis is a separate project. */
+    else if (!strcmp(path, "/dev/sequencer") ||
+             !strcmp(path, "/dev/sequencer2") ||
+             !strcmp(path, "/dev/music"))     t = DEV_OTHER;
     else if (!strcmp(path, "/dev/null"))      t = DEV_NULL;  /* freopen sink; must not ENOENT */
     /* GP2X F200 resistive touchscreen (WM9712 codec). Titles read TS_EVENT samples; the viewer's
        mouse->touch plumbing (gp2xshm touch_x/y/down) is the data source. */

@@ -21,3 +21,6 @@ __pycache__/
 # tools/test/compat_report.py; the human-readable CORPUS_SWEEP.md is committed instead.
 /tools/test/compat_manifest.json
 
+# ad-hoc triage scripts a session writes while debugging (not part of the harness)
+/tools/test/scratch/
+
