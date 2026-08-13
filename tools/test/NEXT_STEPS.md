@@ -47,22 +47,33 @@ Still open: whether the 134 black-screen titles that touch `0x90a` were the same
 
 Filter: `label:"group: mmio-spin"` / `label:"blocker: 0x90a"`
 
-## 2. Black screen while running at full speed — 184 titles
+## 2. Black screen while running at full speed — two root causes found 2026-08-13, both fixed
 
-The biggest bucket, and the one with the most upside. These are **not** dead: median frame rate is
-**56.5 fps**, frames are advancing, audio often runs. The game is playing; we are just not
-presenting what it drew. 179 of 184 are on the framebuffer path (5 on SDL).
+Live-debugging the bucket (alex4 + falldown under the MCP server) split it into two mechanisms,
+neither of which was a presentation lead from the table below:
 
-Leads, in order of how many titles share them:
+- **minlib class** — on real GP2X, `/dev/fb0`'s memory IS upper RAM at phys `0x03101000` (the
+  kernel's boot-time MLC scanout). Titles mmap `/dev/mem` there and draw, never writing OADR/EADR.
+  Our fbdev was a separate anon buffer, so the game drew into pram while present read an empty fb.
+  Fixed: fbdev is pram-backed at its real phys (fb1 at +0x25800, sub-page offset handled), real
+  `smem_start` reported, plus a default-scanout fallback for titles that never open fbdev.
+  Verified: `alex4_gp2x`, `alex`, `Volleyball` black→playable.
+- **DSP fill-loop class** (the bigger one) — main loop is "while GETOSPACE reports free space:
+  mix+write `/dev/dsp`; then render". GETOSPACE answered from our huge transport ring (never
+  full) while write pacing capped the producer at real time, so the fill loop never exited and
+  the game **never reached its render code**. The "56.5 fps median" was the engine's async
+  present cadence, not game draws. Fixed: a virtual OSS buffer (SETFRAGMENT-sized, default
+  8×4096) now backs GETOSPACE/GETODELAY/write-pacing in both engines. Verified: `falldown_gp2x`,
+  `othello_v1.0`, `tileworld2x` black→playable.
+- A third engine bug fell out of the same session: **synthetic guest fds were above FD_SETSIZE**
+  (`DEVFD_BASE 0x10000000`), so a game's `FD_SET(devfd)` smashed guest memory 8M words past the
+  stack fd_set (silently absorbed by the lazy fault-mapper) and `select()` on a device was
+  unmodellable. All synthetic fd families renumbered below 1024.
 
-| Signal | Titles | Thought |
-|---|--:|---|
-| `unknown_mmio:0x90a` | 134 | See item 1; may be the same root cause |
-| `unknown_ioctl:fb` | 36 | An fbdev ioctl we reject; games may be panning/flipping through it |
-| `unknown_mmio:0x4058/0x405c/0x4060` | 35 | A consecutive triple, so one block we do not model. Not in paeryn's header; needs identifying |
-
-Pick one title and watch it under the MCP server (`screenshot` + `decode_mmio`) rather than
-guessing. Samples: `aquaVenture`, `arcadevol1`, `Arcadevol2`, `Arcadevol3`.
+Sample re-test of 16 black titles: 6 → playable. The remaining 10 (`BareFistFighter`, `Pong`,
+`PowerSlide`, `GPrina`, `freecell_1`, `openggs`, `xcom1/2`, `omok`, `supertux`, `SmashGp2x02`)
+are further mechanisms — same MCP method applies (check *where pixels actually land* via
+`memory_read`/watchpoints before trusting any quirk-table lead). Re-sweep to fold in.
 
 Filter: `label:"group: black-screen"`
 
