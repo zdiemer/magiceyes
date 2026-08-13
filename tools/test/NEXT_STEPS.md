@@ -5,10 +5,14 @@ Ranked by how many titles one fix would move. Generated from the 1031-title swee
 `zdiemer/magiceyes-compat`, labelled `group:` and `blocker:` so each cluster below is one label
 filter away.
 
-Current state (2026-08-12 re-sweep, after the vsync/`/mnt/sd`/stale-fd fixes): **331 playable,
-132 ingame, 120 black, 448 incompatible, 0 crashes** — up from 253/123 with black down 185→120.
-The numbers below this line describe the 2026-08-11 sweep the ranking was built from; item 1 is
-fixed, and the re-swept `CORPUS_SWEEP.md` supersedes the counts in items 2-8.
+Current state (2026-08-13 re-sweep, after the exit-127 staging fixes + the black-screen cluster
+fixes in a6f8ffa): **404 playable, 154 ingame, 152 black, 321 incompatible, 0 crashes** — up from
+331/132 playable/ingame with incompatible down 448→321. Black *grew* 120→152 because titles that
+previously died in the loader now run far enough to land there — the funnel is moving; it is now
+the top-ranked failure group. `missing-game-data` collapsed 105→9 (the `/mnt/sd` mapping +
+library-path fixes let those titles find their data). The numbers below this line describe the
+2026-08-11 sweep the ranking was built from; items 1-3 are fixed, and the re-swept
+`CORPUS_SWEEP.md` supersedes the counts in the rest.
 
 Of the 470 incompatible, **268 are not our bug**: 105 are engine ports that quit because the
 original game data was never in the dump, 99 are not ARM executables, 59 ship no `.gpe` at all,
