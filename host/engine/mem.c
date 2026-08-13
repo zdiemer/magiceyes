@@ -287,6 +287,18 @@ long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) 
     if ((flags & GMAP_FIXED) && addr) {
         at = ALIGN_DN(addr);
         map_region(at, l, UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+        /* Linux MAP_FIXED REPLACES the previous mapping: the range must read as zero (anon) or as
+           file content (file-backed, pread below). Keeping old bytes broke ld.so's .bss setup: it
+           first maps the whole library FILE, then maps anon zero pages over the memsz>filesz tail
+           -- with the old bytes kept, .bss started as the file's string/symbol tables (an
+           UNSTRIPPED bundled libSDL gave openjazz-wiz garbage SDL_threads at the first SDL call;
+           stripped firmware libs survived only because their .bss span fell past EOF). Zero
+           page-by-page: a FIXED range can span multiple host-backed gregions. */
+        for (uint32_t o = 0; o < l; o += PAGE) {
+            void *hp = guest_to_host(at + o);
+            uint32_t chunk = (l - o) < PAGE ? (l - o) : PAGE;
+            if (hp) memset(hp, 0, chunk);
+        }
     } else {
         /* Honor a non-FIXED address hint when the range is free (Linux mmap semantics). glibc's
            malloc arena allocator and LinuxThreads stack placement probe DESCENDING hint addresses
@@ -439,6 +451,19 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
                         at, at + len - 1);
             uc_hook_add(g_uc, &hr, UC_HOOK_MEM_READ, mmsp2_read_cb, NULL,
                         at, at + len - 1);
+            /* Pollux reset state: hardware-takeover SDLs (the open2x-wiz "gp2xwiz" driver) READ
+               the current video state from the register window instead of fbdev. All-zero
+               registers made GP2XWIZ_VideoInit decide NO display engine is enabled (it tests
+               bit15 of DPC0 @0x308c / DPC1 @0x348c) and return a wrong-size surface ->
+               SDL_video.c "Video mode smaller than requested". Pre-set the primary-LCD DPC
+               as ENABLED and both MLCSCREENSIZEs to the 320x240 panel. */
+            if (g_device != 0 || g_is_dynamic) {
+                uint32_t scr = ((240u - 1) << 16) | (320u - 1);
+                uint16_t dpc_on = 0x8000;
+                if (len >= 0x4008) uc_mem_write(g_uc, at + 0x4004, &scr, 4);
+                if (len >= 0x4408) uc_mem_write(g_uc, at + 0x4404, &scr, 4);
+                if (len >= 0x3090) uc_mem_write(g_uc, at + 0x308c, &dpc_on, 2);
+            }
         }
         if (phys == 0xE0020000u && !getenv("ME_GP2X_NOBLIT")) {   /* MMSP2 2D blitter window: trap
                                         writes -> run blits; reads -> serve STATUS=idle (synchronous) */

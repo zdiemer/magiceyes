@@ -267,8 +267,28 @@ uint32_t setup_stack(int argc, char **argv) {
                 off += snprintf(extra + off, sizeof extra - off, ":%s", g_launcher_dir);
             if (g_script_libdirs[0])
                 snprintf(extra + off, sizeof extra - off, ":%s", g_script_libdirs);
+            /* A port that ships its OWN libSDL-1.2.so.0 beside the game (supertux/openjazz bundle
+               a full SDL+libpng14+libjpeg stack) must get that stack wholesale: with /lib first the
+               process mixes firmware SDL_image with bundled libpng14 and every image load dies
+               ("Incompatible libpng version" -> exits to menu -> graded black). Only a bundled
+               libSDL promotes the game dirs; satellite-only bundles (instead's SDL_image) keep the
+               rootfs family first, which the wave-3 reorder experiment showed they need. */
+            int bundled_sdl = 0;
+            {
+                const char *dirs[] = { ".", "lib", "libs",
+                                       g_launcher_dir[0] ? g_launcher_dir : NULL,
+                                       g_launch_cwd[0] ? g_launch_cwd : NULL };
+                char p[PATH_MAX + 32];
+                struct stat st;
+                for (int i = 0; i < (int)(sizeof dirs / sizeof dirs[0]); i++)
+                    if (dirs[i]) {
+                        snprintf(p, sizeof p, "%s/libSDL-1.2.so.0", dirs[i]);
+                        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) { bundled_sdl = 1; break; }
+                    }
+            }
             snprintf(envbuf[nenv], sizeof envbuf[0],
-                     "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs%s", extra);
+                     bundled_sdl ? "LD_LIBRARY_PATH=.:lib:libs%s:/lib:/usr/lib"
+                                 : "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs%s", extra);
             envs[nenv] = envbuf[nenv]; nenv++;
         }
         /* Preload zlib: the firmware's /lib/libpng.so.3 carries NO DT_NEEDED for libz (on the
@@ -279,12 +299,33 @@ uint32_t setup_stack(int argc, char **argv) {
            command not properly aligned"), so recreate the firmware's global zlib the same way
            the device did: preload it. Gated on the lib existing in the selected rootfs so the
            EABI rootfs (whose libpng is properly linked) doesn't warn. */
+        /* Also preload libgcc_s: on the real GP2X the firmware libSDL was linked so the libgcc
+           integer-division helpers (__divsi3/__udivsi3/...) sat in the process's global namespace,
+           and community ports reference them UNDEFINED with no DT_NEEDED for libgcc_s at all
+           (sopwith_camel: lazy PLT bind of __divsi3 mid-game -> "symbol lookup error" after the
+           first frames drew, graded "black"). The staged Wiz libSDL neither needs libgcc_s nor
+           exports the helpers, so recreate the device's global scope the same way as zlib. */
         {
-            char zhost[PATH_MAX];
-            struct stat zs;
-            if (me_rootfs_resolve("/lib/libz.so.1", zhost, sizeof zhost) &&
-                stat(zhost, &zs) == 0 && S_ISREG(zs.st_mode))
-                envs[nenv++] = "LD_PRELOAD=/lib/libz.so.1";
+            static const char *pre[] = { "/lib/libz.so.1", "/lib/libgcc_s.so.1" };
+            char phost[PATH_MAX];
+            struct stat ps;
+            size_t off = (size_t)snprintf(envbuf[nenv], sizeof envbuf[0], "LD_PRELOAD=");
+            int have = 0;
+            for (int i = 0; i < (int)(sizeof pre / sizeof pre[0]); i++)
+                if (me_rootfs_resolve(pre[i], phost, sizeof phost) &&
+                    stat(phost, &ps) == 0 && S_ISREG(ps.st_mode)) {
+                    off += (size_t)snprintf(envbuf[nenv] + off, sizeof envbuf[0] - off,
+                                            "%s%s", have ? " " : "", pre[i]);
+                    have = 1;
+                }
+            if (have) { envs[nenv] = envbuf[nenv]; nenv++; }
+        }
+        /* ld.so diagnosis: ME_LD_DEBUG=libs (or =all) forwards as the guest's LD_DEBUG, so the
+           glibc dynamic linker narrates its search/binding onto the captured stderr. */
+        const char *ldd = getenv("ME_LD_DEBUG");
+        if (ldd && nenv < 27) {
+            snprintf(envbuf[nenv], sizeof envbuf[0], "LD_DEBUG=%s", ldd);
+            envs[nenv] = envbuf[nenv]; nenv++;
         }
         const char *f = getenv("ME_GP2X_FPS");
         snprintf(envbuf[nenv], sizeof envbuf[0], "FAKESDL_FPS=%s", f ? f : "60"); envs[nenv] = envbuf[nenv]; nenv++;

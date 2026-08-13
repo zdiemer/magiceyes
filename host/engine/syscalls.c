@@ -954,6 +954,15 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             }
             BIGLOCK_LOCK();
             return r; }
+        if (dev_type((int)a0) == DEV_TTY) {
+            /* glibc's __libc_message (heap corruption, C++ terminate, assert) writes the fatal
+               text to /dev/tty, not stderr -- discarding it made those deaths silent. Surface it
+               like guest stderr (log sink + the ld.so/abort scanner). */
+            me_report_scan_write(2, (const char *)tmp, a2);
+            FILE *s = g_log ? g_log : stderr;
+            if (a2) { fwrite(tmp, 1, a2, s); fflush(s); }
+            free(tmp); return a2;
+        }
         if (dev_type((int)a0)) { free(tmp); return a2; }  /* other devices: accept + discard */
         /* route guest stdout/stderr through the C streams so they follow ME_LOGFILE's freopen
            (on the -mwindows bundle a raw write(2,..) doesn't reach the redirected stderr, so
@@ -1735,7 +1744,26 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         fill_stat64(a1, &s); return 0;
     }
     case 146: { /* writev(fd, iov, cnt) */
-        if (!hostfd_guest_owned((int)a0)) return LERR(EBADF);
+        if (!hostfd_guest_owned((int)a0)) {
+            /* Device vfds: glibc's fatal-message path writev()s to /dev/tty; EBADF here swallowed
+               the message AND make glibc fall back to syslog. Mirror the write() semantics: tty
+               content is surfaced, other devices accept + discard. */
+            int dt = dev_type((int)a0);
+            if (!dt) return LERR(EBADF);
+            long tot = 0;
+            for (uint32_t i = 0; i < a2; i++) {
+                uint32_t io[2]; uc_mem_read(g_uc, a1 + i * 8, io, 8);
+                if (!io[1]) continue;
+                if (dt == DEV_TTY) {
+                    uint8_t *t = malloc(io[1]); uc_mem_read(g_uc, io[0], t, io[1]);
+                    me_report_scan_write(2, (const char *)t, io[1]);
+                    FILE *s = g_log ? g_log : stderr;
+                    fwrite(t, 1, io[1], s); fflush(s); free(t);
+                }
+                tot += io[1];
+            }
+            return tot;
+        }
         long tot = 0;
         for (uint32_t i = 0; i < a2; i++) {
             uint32_t io[2]; uc_mem_read(g_uc, a1 + i * 8, io, 8);

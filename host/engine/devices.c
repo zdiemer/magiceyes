@@ -120,6 +120,21 @@ uint32_t g_fb_xoff = 0;       /* x pixel offset into each row (gpu940 centers 32
    Capture HSTRIDE (bytes/pixel) + VSTRIDE (pitch) from the MLC layer so present can convert. */
 int g_caanoo_bpp = 0;         /* MLCHSTRIDE (bytes/pixel): 0 = unset (use RGB565), 2/3/4 */
 uint32_t g_caanoo_pitch = 0;  /* MLCVSTRIDE (bytes/row) */
+int g_fb8_mode = 0;           /* title showed 8bpp evidence (MLC HSTRIDE=1 or PUT_VSCREENINFO bpp=8):
+                                 gates FBIOPUTCMAP flipping present to the 8-bit indexed path */
+/* fbdev virtual mode from PUT_VSCREENINFO. The shim/firmware SDL honours whatever geometry the
+   title asks for (EEEEK/Metal Slug Zombies run 640x480, Skull 320x200, openjazz-wiz 640x480 via
+   the Wiz hardware scaler) but present used to assume 320x240 -- shear/duplication. Track the
+   accepted mode; GET_VSCREENINFO/GET_FSCREENINFO reflect it and present_guest reads + publishes
+   frames at this size (the shm contract carries width/height up to 1024x768; the viewer scales). */
+int g_fbv_w = 320, g_fbv_h = 240;
+/* Pollux PORTRAIT scanout (the Wiz LCD is physically 240x320 rotated): the open2x-wiz SDL
+   programs MLCSCREENSIZE as 240x320 and rotate-blits the app's landscape frame into the portrait
+   buffer. Detected from the SCREENSIZE write (h > w); present un-rotates. */
+int g_mlc_rot = 0;            /* portrait SCREENSIZE seen (rotation candidate) */
+uint32_t g_mlc_rot_w = 240, g_mlc_rot_h = 320;   /* portrait buffer geometry */
+uint32_t g_mlc_rot_pitch = 0;                    /* bytes/row of the portrait buffer (captured) */
+uint32_t g_mlc_rot_bypp = 2;                     /* bytes/pixel (MLCHSTRIDE) */
 void record_memmap(uint32_t phys, uint32_t guest, uint32_t len) {
     if (g_nmem < 64) { g_mem[g_nmem] = (struct memmap){phys, guest, len}; g_nmem++; }
 }
@@ -164,17 +179,55 @@ void present_guest(uint32_t g) {
         g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
         return;
     }
+    if (g_mlc_rot && g_mlc_rot_pitch &&
+        g_mlc_rot_pitch == g_mlc_rot_w * g_mlc_rot_bypp) {  /* Pollux portrait scanout -> un-rotate.
+            Portrait buffer: g_mlc_rot_w x g_mlc_rot_h (240x320), pitch g_mlc_rot_pitch. Landscape
+            frame: w = portrait h, h = portrait w. Each portrait row becomes one landscape column
+            (x = prt_h-1-yp, y = xp). 16bpp direct; 8bpp through the captured palette. */
+        uint32_t pw = g_mlc_rot_w, ph = g_mlc_rot_h, pitch = g_mlc_rot_pitch;
+        if (ph > GP2XSHM_MAXW) ph = GP2XSHM_MAXW;
+        if (pw > GP2XSHM_MAXH) pw = GP2XSHM_MAXH;
+        uint16_t *dst = (uint16_t *)g_shm->pixels;
+        uint16_t lut[256];
+        if (g_mlc_rot_bypp == 1) {
+            for (int i = 0; i < 256; i++)
+                lut[i] = g_pal_have ? (uint16_t)(((g_pal[i][0] >> 3) << 11) |
+                                                 ((g_pal[i][1] >> 2) << 5) | (g_pal[i][2] >> 3))
+                                    : (uint16_t)((((i >> 5) & 7) << 13) | (((i >> 2) & 7) << 8) |
+                                                 ((i & 3) << 3));
+        }
+        for (uint32_t yp = 0; yp < ph; yp++) {
+            uint8_t *src = guest_to_host(g + yp * pitch); if (!src) break;
+            uint32_t x = ph - 1 - yp;                    /* landscape column */
+            if (g_mlc_rot_bypp == 1) {
+                for (uint32_t xp = 0; xp < pw; xp++) {
+                    dst[(size_t)xp * GP2XSHM_MAXW + x] = lut[src[xp]];
+                    if (src[xp]) { nz = 1; nzc++; }
+                }
+            } else {
+                const uint16_t *s16 = (const uint16_t *)src;
+                for (uint32_t xp = 0; xp < pw; xp++) {
+                    dst[(size_t)xp * GP2XSHM_MAXW + x] = s16[xp];
+                    if (s16[xp]) { nz = 1; nzc++; }
+                }
+            }
+        }
+        g_shm->width = (int)ph; g_shm->height = (int)pw; g_shm->frame_seq++;
+        goto presented;
+    }
     if (g_pal_have) {                       /* 8-bit indexed -> RGB565 via the captured palette */
         uint16_t lut[256];
         for (int i = 0; i < 256; i++)
             lut[i] = (uint16_t)(((g_pal[i][0] >> 3) << 11) |
                                 ((g_pal[i][1] >> 2) << 5)  | (g_pal[i][2] >> 3));
         uint16_t *dst = (uint16_t *)g_shm->pixels;
-        for (int y = 0; y < 240; y++) {
-            uint8_t *src = guest_to_host(g + (uint32_t)y * 320); if (!src) break;
+        for (int y = 0; y < g_fbv_h; y++) {
+            uint8_t *src = guest_to_host(g + (uint32_t)y * (uint32_t)g_fbv_w); if (!src) break;
             uint16_t *dp = dst + (size_t)y * GP2XSHM_MAXW;
-            for (int x = 0; x < 320; x++) { dp[x] = lut[src[x]]; if (src[x]) { nz = 1; nzc++; } }
+            for (int x = 0; x < g_fbv_w; x++) { dp[x] = lut[src[x]]; if (src[x]) { nz = 1; nzc++; } }
         }
+        g_shm->width = g_fbv_w; g_shm->height = g_fbv_h; g_shm->frame_seq++;
+        goto presented;
     } else if (g_fb_bpp == 32) {            /* gpu940 output: XRGB8888, g_fb_stride bytes/row */
         for (int y = 0; y < 240; y++) {
             uint32_t *src = (uint32_t *)guest_to_host(g + (uint32_t)y * g_fb_stride);
@@ -188,16 +241,21 @@ void present_guest(uint32_t g) {
             }
         }
     } else {                                /* native RGB565 (g_fb_stride bytes/row; 640 normally,
-                                               but gpu940 video buffers are power-of-2 wide) */
-        uint8_t row[320 * 2];
-        for (int y = 0; y < 240; y++) {
+                                               but gpu940 video buffers are power-of-2 wide and a
+                                               PUT_VSCREENINFO mode sets its own width) */
+        uint32_t rowb = (uint32_t)g_fbv_w * 2;
+        uint8_t row[GP2XSHM_MAXW * 2];
+        for (int y = 0; y < g_fbv_h; y++) {
             { uint8_t *src = guest_to_host(g + (uint32_t)y * g_fb_stride); if (!src) break;
-              memcpy(row, src, sizeof row); }
-            memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, sizeof row);
-            if (!nz) for (int i = 0; i < 640; i++) if (row[i]) { nz = 1; break; }
+              memcpy(row, src, rowb); }
+            memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, rowb);
+            if (!nz) for (uint32_t i = 0; i < rowb; i++) if (row[i]) { nz = 1; break; }
         }
+        g_shm->width = g_fbv_w; g_shm->height = g_fbv_h; g_shm->frame_seq++;
+        goto presented;
     }
     g_shm->width = 320; g_shm->height = 240; g_shm->frame_seq++;
+presented:;
     if (getenv("ME_GP2X_PRESENTLOG")) {   /* diagnose black-screen: black frames vs viewer issue */
         static int n = 0, nb = 0; n++; if (!nz) nb++;
         if (n % 60 == 0) fprintf(stderr, "PRESENT %d frames (%d black) guest=%08x seq=%u nz_px=%ld\n",
@@ -298,14 +356,23 @@ void gp2x_cacheflush(uint32_t guest) {
 static void fill_vscreeninfo(uint32_t gbuf) {
     uint8_t b[160]; memset(b, 0, sizeof b);
     int c = (g_device == 2);                                    /* Caanoo menu: 24bpp BGR888 */
-    *(uint32_t *)(b + 0)  = 320; *(uint32_t *)(b + 4)  = 240;   /* xres / yres */
-    *(uint32_t *)(b + 8)  = 320; *(uint32_t *)(b + 12) = 480;   /* xres_v / yres_v (2 pages) */
-    *(uint32_t *)(b + 24) = c ? 24 : 16;                        /* bits_per_pixel */
-    if (c) {  /* BGR888: blue in the low byte, red in the high byte (matches present_guest B,G,R) */
+    uint32_t w = (uint32_t)g_fbv_w, h = (uint32_t)g_fbv_h;
+    *(uint32_t *)(b + 0)  = w;   *(uint32_t *)(b + 4)  = h;     /* xres / yres */
+    *(uint32_t *)(b + 8)  = w;   *(uint32_t *)(b + 12) = h * 2; /* xres_v / yres_v (2 pages) */
+    if (g_fb8_mode) {
+        /* The title established an 8bpp screen (PUT_VSCREENINFO bpp=8 or MLC HSTRIDE=1). Report it
+           back: SDL's fbcon grants SDL_HWPALETTE from this read-back, and without the flag it drops
+           SDL_SetColors before FBIOPUTCMAP is ever called (Sopwith stayed in init-ramp colours). */
+        *(uint32_t *)(b + 24) = 8;                              /* bits_per_pixel */
+        *(uint32_t *)(b + 36) = 8; *(uint32_t *)(b + 48) = 8;   /* r/g/b len 8, offsets 0 (indexed) */
+        *(uint32_t *)(b + 60) = 8;
+    } else if (c) {  /* BGR888: blue in the low byte, red in the high byte (present_guest B,G,R) */
+        *(uint32_t *)(b + 24) = 24;
         *(uint32_t *)(b + 32) = 16; *(uint32_t *)(b + 36) = 8;  /* red   offset/len */
         *(uint32_t *)(b + 44) = 8;  *(uint32_t *)(b + 48) = 8;  /* green offset/len */
         *(uint32_t *)(b + 56) = 0;  *(uint32_t *)(b + 60) = 8;  /* blue  offset/len */
     } else {  /* RGB565 */
+        *(uint32_t *)(b + 24) = 16;
         *(uint32_t *)(b + 32) = 11; *(uint32_t *)(b + 36) = 5;
         *(uint32_t *)(b + 44) = 5;  *(uint32_t *)(b + 48) = 6;
         *(uint32_t *)(b + 56) = 0;  *(uint32_t *)(b + 60) = 5;
@@ -314,13 +381,13 @@ static void fill_vscreeninfo(uint32_t gbuf) {
 }
 static void fill_fscreeninfo(uint32_t gbuf, uint32_t smem_start) {
     uint8_t b[80]; memset(b, 0, sizeof b);
-    uint32_t bypp = (g_device == 2) ? 3 : 2;       /* Caanoo menu draws 24bpp; GP2X 16bpp */
+    uint32_t bypp = g_fb8_mode ? 1 : (g_device == 2) ? 3 : 2;  /* Caanoo menu 24bpp; GP2X 16bpp */
     memcpy(b + 0, "MagicEyes-MLC", 13);            /* id[16] */
     *(uint32_t *)(b + 16) = smem_start;            /* smem_start (phys base) */
-    *(uint32_t *)(b + 20) = (uint32_t)320 * 240 * bypp * 2; /* smem_len (2 pages) */
+    *(uint32_t *)(b + 20) = (uint32_t)g_fbv_w * (uint32_t)g_fbv_h * bypp * 2; /* smem_len (2 pages) */
     *(uint32_t *)(b + 24) = 0;                      /* FB_TYPE_PACKED_PIXELS */
-    *(uint32_t *)(b + 32) = 2;                      /* FB_VISUAL_TRUECOLOR */
-    *(uint32_t *)(b + 44) = 320 * bypp;             /* line_length (640 for 16bpp, 960 for 24bpp) */
+    *(uint32_t *)(b + 32) = g_fb8_mode ? 3 : 2;     /* FB_VISUAL_PSEUDOCOLOR : TRUECOLOR */
+    *(uint32_t *)(b + 44) = (uint32_t)g_fbv_w * bypp; /* line_length */
     uc_mem_write(g_uc, gbuf, b, sizeof b);
 }
 /* FBIOPAN_DISPLAY: select the visible page by yoffset. Reuse the OADR flip-lock path
@@ -328,7 +395,7 @@ static void fill_fscreeninfo(uint32_t gbuf, uint32_t smem_start) {
 static void fb_pan(uint32_t yoffset) {
     if (!g_fb_guest) return;
     g_oadr_driven = 1; g_flip_active = 1;
-    g_flip_guest = g_fb_guest + yoffset * 640;     /* stride 640; page 1 = yoffset 240 */
+    g_flip_guest = g_fb_guest + yoffset * g_fb_stride;   /* page 1 = yoffset of one screen */
     g_frame_ready = 1;
 }
 long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
@@ -338,11 +405,54 @@ long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
     case 0x4602: if (arg) fill_fscreeninfo(arg, g_device == 0 ? (fbno ? GP2X_FB1_PHYS : GP2X_FB0_PHYS)
                                                               : (fbno ? FB1_PHYS : FB0_PHYS));
                  return 0;                                              /* GET_FSCREENINFO */
-    case 0x4601: {                                                          /* PUT_VSCREENINFO: accept */
+    case 0x4601: {                                                          /* PUT_VSCREENINFO: accept
+            but NEVER track: SDL fbcon's FB_CheckMode probes every standard mode (1600x1200 down,
+            8bpp) with plain PUTs -- old GPH builds don't even set FB_ACTIVATE_TEST -- so a PUT
+            carries no signal about the live mode (trusting it broke Deicide 3 two different ways).
+            The live mode is inferred from the MLC writes (HSTRIDE/VSTRIDE/PALETTE) instead. */
         if (arg && getenv("ME_GP2X_FLIPLOG")) {
             uint32_t v[9]; memset(v, 0, sizeof v); uc_mem_read(g_uc, arg, v, sizeof v);
             fprintf(stderr, "PUT_VSCREENINFO xres=%u yres=%u xv=%u yv=%u xoff=%u yoff=%u bpp=%u\n",
                     v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+        }
+        return 0; }
+    /* FBIOPUT/GETCMAP: the fbdev palette. The Wiz firmware libSDL's fbcon driver delivers
+       SDL_SetColors here (its MLC writes at init only load an all-black + RGB332 ramp), so
+       dropping the cmap leaves 8bpp titles (Sopwith) in wrong colours. struct fb_cmap:
+       u32 start, len; ptr red, green, blue, transp -- 16-bit intensity arrays. Feed the shared
+       MLC palette; only mark it live (g_pal_have -> 8-bit present) when the title has shown
+       8bpp evidence (MLC HSTRIDE=1 or a PUT_VSCREENINFO bpp=8): fbcon also PUTCMAPs a
+       console-restore palette on 16bpp titles, which must not flip the present path. */
+    case 0x4605: {                                                          /* FBIOPUTCMAP */
+        if (!arg) return 0;
+        uint32_t c[6]; memset(c, 0, sizeof c); uc_mem_read(g_uc, arg, c, sizeof c);
+        uint32_t start = c[0], len = c[1];
+        if (start > 255) return 0;
+        if (len > 256 - start) len = 256 - start;
+        for (uint32_t i = 0; i < len; i++) {
+            uint16_t r = 0, gg = 0, b = 0;
+            if (c[2]) uc_mem_read(g_uc, c[2] + i * 2, &r, 2);
+            if (c[3]) uc_mem_read(g_uc, c[3] + i * 2, &gg, 2);
+            if (c[4]) uc_mem_read(g_uc, c[4] + i * 2, &b, 2);
+            g_pal[start + i][0] = (uint8_t)(r >> 8);
+            g_pal[start + i][1] = (uint8_t)(gg >> 8);
+            g_pal[start + i][2] = (uint8_t)(b >> 8);
+        }
+        if (len && (g_fb8_mode || g_pal_have)) g_pal_have = 1;
+        return 0; }
+    case 0x4604: {                                                          /* FBIOGETCMAP */
+        if (!arg) return 0;
+        uint32_t c[6]; memset(c, 0, sizeof c); uc_mem_read(g_uc, arg, c, sizeof c);
+        uint32_t start = c[0], len = c[1];
+        if (start > 255) return 0;
+        if (len > 256 - start) len = 256 - start;
+        for (uint32_t i = 0; i < len; i++) {
+            uint16_t r = (uint16_t)(g_pal[start + i][0] << 8);
+            uint16_t gg = (uint16_t)(g_pal[start + i][1] << 8);
+            uint16_t b = (uint16_t)(g_pal[start + i][2] << 8);
+            if (c[2]) uc_mem_write(g_uc, c[2] + i * 2, &r, 2);
+            if (c[3]) uc_mem_write(g_uc, c[3] + i * 2, &gg, 2);
+            if (c[4]) uc_mem_write(g_uc, c[4] + i * 2, &b, 2);
         }
         return 0; }
     case 0x4606: { uint32_t yoff = 0; if (arg) uc_mem_read(g_uc, arg + 20, &yoff, 4);
@@ -812,34 +922,77 @@ static int mlc_config_write(uint32_t off, uint32_t val) {
     return 1;                                               /* known display config, not "unknown" */
 }
 
-/* Caanoo (Pollux) MLC layer registers in the 0xC0000000 block (polluxregs.h): capture the
+/* Pollux (Wiz + Caanoo) MLC layer registers in the 0xC0000000 block (polluxregs.h): capture the
    framebuffer geometry + scanout so present_guest shows the right buffer at the right depth.
-   layer0: HSTRIDE0=0x4028 VSTRIDE0=0x402c ADDRESS0=0x4038; layer1: HSTRIDE1=0x405c VSTRIDE1=0x4060
-   ADDRESS1=0x406c (the firmware menu uses layer 1, 24bpp RGB888). */
-static void caanoo_mlc_write(uint32_t off, uint32_t val) {
+   layer0: HSTRIDE0=0x4028 VSTRIDE0=0x402c ADDRESS0=0x4038 PALETTE0=0x403c; layer1: HSTRIDE1=0x405c
+   VSTRIDE1=0x4060 ADDRESS1=0x406c PALETTE1=0x4070 (the Caanoo firmware menu uses layer 1, 24bpp
+   RGB888; Wiz 8bpp titles like Sopwith run layer 1 in P8 palette mode, CONTROL1=0x443AD030). */
+static void pollux_mlc_write(uint32_t off, uint32_t val) {
     if (getenv("ME_MLCLOG")) {   /* trace MLC layer-register programming to read off the real format */
         const char *nm = off==0x4004?"SCREENSIZE": off==0x4024?"CONTROL0": off==0x4028?"HSTRIDE0":
             off==0x402c?"VSTRIDE0": off==0x4038?"ADDRESS0": off==0x400c?"LEFTRIGHT0": off==0x4010?"TOPBOTTOM0":
             off==0x4058?"CONTROL1": off==0x405c?"HSTRIDE1": off==0x4060?"VSTRIDE1": off==0x406c?"ADDRESS1":
-            off==0x4040?"LEFTRIGHT1": off==0x4044?"TOPBOTTOM1": off==0x4000?"CONTROLT": "";
+            off==0x4040?"LEFTRIGHT1": off==0x4044?"TOPBOTTOM1": off==0x4000?"CONTROLT":
+            off==0x403c?"PALETTE0": off==0x4070?"PALETTE1": "";
         if (*nm || off==0x4028||off==0x402c||off==0x4038||off==0x405c||off==0x4060||off==0x406c)
             fprintf(stderr, "[mlc] %04x %-11s = %08x (%u)\n", off, nm, val, val);
     }
     switch (off) {
+    /* MLCSCREENSIZE = ((h-1)<<16)|(w-1). A PORTRAIT setting (h > w, the 240x320 Wiz panel) means
+       the title rotate-blits into the scanout buffer; present must un-rotate. */
+    case 0x4004: {
+        /* NOTE: on the Wiz SCREENSIZE is ALWAYS the physical 240x320 panel -- even the GPH SDL
+           whose layer content is landscape (Deicide 3) writes it. A portrait SCREENSIZE is only a
+           rotation CANDIDATE; present rotates only when the captured layer pitch also matches a
+           portrait row (pitch == prt_w * bypp, e.g. 480 = 240*2), which landscape-content titles
+           never program (their pitch is 640 or absent). */
+        uint32_t w = (val & 0xffff) + 1, h = (val >> 16) + 1;
+        if (w >= 64 && h >= 64 && w <= 1024 && h <= 1024) {
+            g_mlc_rot = (h > w);
+            if (g_mlc_rot) { g_mlc_rot_w = w; g_mlc_rot_h = h; }
+        }
+        break; }
     /* MLCHSTRIDE/VSTRIDE: capture only LAYER 0 (the primary RGB surface). Layer 1 (0x405c/0x4060) is
        an OVERLAY -- the firmware menu programs it as a 24bpp video plane while its UI lives on the
        16bpp /dev/fb0 buffer; letting layer-1's format drive present_guest read the 16bpp UI as
-       24bpp/960 -> tripled/washed garbage. (ME_MLCL1 re-enables layer-1 capture for diagnosis.) */
-    case 0x4028: g_caanoo_bpp = (int)val; break;                  /* MLCHSTRIDE0 = bytes/pixel */
-    case 0x402c: g_caanoo_pitch = val; break;                     /* MLCVSTRIDE0 = pitch (bytes/row) */
-    case 0x405c: if (getenv("ME_MLCL1")) g_caanoo_bpp = (int)val; break;
-    case 0x4060: if (getenv("ME_MLCL1")) g_caanoo_pitch = val; break;
+       24bpp/960 -> tripled/washed garbage. (ME_MLCL1 re-enables layer-1 capture for diagnosis.)
+       In portrait mode either layer's stride describes the rotated scanout buffer. */
+    case 0x4028: g_caanoo_bpp = (int)val; if (val == 1) g_fb8_mode = 1;   /* MLCHSTRIDE0 */
+        if (g_mlc_rot && val >= 1 && val <= 4) g_mlc_rot_bypp = val;
+        break;
+    case 0x402c: g_caanoo_pitch = val;                            /* MLCVSTRIDE0 = pitch (bytes/row) */
+        if (g_mlc_rot && val) g_mlc_rot_pitch = val;
+        break;
+    case 0x405c:                                                  /* MLCHSTRIDE1 */
+        if (val == 1) g_fb8_mode = 1;                             /* 8bpp layer (Sopwith layer 1) */
+        if (g_mlc_rot && val >= 1 && val <= 4) g_mlc_rot_bypp = val;
+        if (getenv("ME_MLCL1")) g_caanoo_bpp = (int)val;
+        break;
+    case 0x4060:                                                  /* MLCVSTRIDE1 */
+        if (g_mlc_rot && val) g_mlc_rot_pitch = val;
+        if (getenv("ME_MLCL1")) g_caanoo_pitch = val;
+        break;
+    /* MLCPALETTE0/1: one 32-bit write per entry, index in [31:24], R5G6B5 colour in [15:0]
+       (LF1000 databook). Feed the shared MLC palette: a captured palette is what flips
+       present_guest to the 8-bit indexed path (same contract as the MMSP2 PALLT capture). */
+    case 0x403c: case 0x4070: {
+        uint8_t e = (uint8_t)(val >> 24);
+        uint16_t c = (uint16_t)(val & 0xffff);
+        uint8_t r5 = (c >> 11) & 0x1f, g6 = (c >> 5) & 0x3f, b5 = c & 0x1f;
+        g_pal[e][0] = (uint8_t)((r5 << 3) | (r5 >> 2));
+        g_pal[e][1] = (uint8_t)((g6 << 2) | (g6 >> 4));
+        g_pal[e][2] = (uint8_t)((b5 << 3) | (b5 >> 2));
+        g_pal_have = 1;
+        break; }
     /* MLC layer scanout base (flip). 0x4038/0x406c are MLCADDRESS0/1; the Caanoo firmware menu writes
-       the base to its layer's 0x4058 register instead. The value may be a PHYSICAL address (titles
-       that poke /dev/mem) OR a GUEST address (the menu's mmap'd 24bpp surface, e.g. 0x4653d020) -- try
-       both. Guard on >=0x40000000 so a genuine CONTROL-register flag write to 0x4058 isn't mistaken
-       for an address. */
-    case 0x4038: case 0x406c: case 0x4058: {
+       the base to its layer's 0x4058 register instead (0x4058 is CONTROL1 -- keep that quirk
+       Caanoo-only: Wiz titles write real control values there, e.g. Sopwith's 0x443AD030, which the
+       >=0x40000000 guard alone can't tell from a guest address). The value may be a PHYSICAL address
+       (titles that poke /dev/mem) OR a GUEST address (the menu's mmap'd 24bpp surface, e.g.
+       0x4653d020) -- try both. */
+    case 0x4058: if (g_device != 2) break; /* fall through on Caanoo only */
+        /* FALLTHRU */
+    case 0x4038: case 0x406c: {
         uint32_t g = 0, gg;
         if (val >= 0x40000000u && val < 0x80000000u && guest_to_host(val)) g = val;   /* already guest */
         else if (val && phys_to_guest(val, &gg)) g = gg;                               /* physical */
@@ -856,8 +1009,13 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     uint32_t off = (uint32_t)addr - g_mmsp2_guest;
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  MMSP2 wr %04x sz%d=%08x\n", off, size, (uint32_t)value); }
-    if (g_device == 2 && off >= 0x4000 && off <= 0x44b8) {   /* Pollux MLC (Caanoo) */
-        caanoo_mlc_write(off, (uint32_t)value); return;
+    /* Pollux MLC range. Wiz + Caanoo silicon, but also any DYNAMIC title regardless of the badge:
+       every OABI dynamic title runs against the staged Wiz rootfs libSDL, whose fbcon driver pokes
+       the Pollux MLC (a "GP2X"-classified port like sopwith_camel still programs an 8bpp layer +
+       palette here). Static GP2X titles never touch this range (they use the 0x2800 MLC + PALLT),
+       so they keep the plain unknown-register path. */
+    if ((g_device != 0 || g_is_dynamic) && off >= 0x4000 && off <= 0x44b8) {
+        pollux_mlc_write(off, (uint32_t)value); return;
     }
     /* ARM940 second-core control (clock 0x904, DualCPU ctrl/int 0x3b40-0x3b48). The value is also
        stored in the mapped MMSP2 RAM (so the game can read it back); here we just act on it. */
@@ -980,7 +1138,8 @@ void devices_reset(void) {
     g_blit_guest = 0; memset(&g_blt, 0, sizeof g_blt);
     g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0;
     g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0; g_fb_from_devmem = 0;
-    g_caanoo_bpp = 0; g_caanoo_pitch = 0;
+    g_caanoo_bpp = 0; g_caanoo_pitch = 0; g_fb8_mode = 0; g_fbv_w = 320; g_fbv_h = 240;
+    g_mlc_rot = 0; g_mlc_rot_w = 240; g_mlc_rot_h = 320; g_mlc_rot_pitch = 0; g_mlc_rot_bypp = 2;
     g_flip_active = 0; g_flip_guest = 0;
     g_oadr_driven = 0; g_frame_ready = 0;
     g_aud_freq = 44100; g_aud_ch = 2; g_aud_bits = 16;
