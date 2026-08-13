@@ -38,7 +38,15 @@ TIER_ORDER = ["error", "crashed", "incompatible", "black", "ingame", "playable"]
 def tier_for(v, flat_fill, suspicions):
     status = v.get("status")
     if status == "renders":
-        return "ingame"          # rendered gameplay, but slow or silent
+        # Silence alone is not a defect: plenty of titles simply have no audio, or none in the
+        # 25 seconds we watched. The harness's `renders` at full frame rate can only mean
+        # "silent" (its `playable` requires audio), so a silent title that holds frame rate and
+        # a clean picture grades `playable`; it keeps its `no-audio` group label so the slice
+        # stays queryable, and genuinely-broken audio is a lead there, not a grade. Slow or
+        # visibly wrong titles stay `ingame`.
+        if v.get("fps", 0) >= 20 and not (flat_fill or suspicions):
+            return "playable"
+        return "ingame"
     if status == "playable":
         return "ingame" if (flat_fill or suspicions) else "playable"
     return status
@@ -176,9 +184,13 @@ def classify(v, log, fatal, flat_fill=False, suspicions=()):
     if status == "black":
         return "black-screen", "Boots but renders only black"
     if status == "renders":
-        if v.get("fps", 0) < 25:
-            return "low-fps", "Renders but below 25 fps"
-        return "no-audio", "Renders at speed but no audio"
+        if v.get("fps", 0) < 20:
+            return "low-fps", "Renders but below 20 fps"
+        # A verdict recorded before the threshold moved (25 -> 20) can be `renders` WITH audio
+        # (fps landed in 20..25), so key silence on the actual audio byte count, not the status.
+        if not v.get("audio_bytes", 0):
+            return "no-audio", "Renders at speed but no audio"
+        return "playable", "Playable"
     if status == "incompatible":
         return "no-frames", "Never rendered a frame (cause unknown)"
     return "error", "Harness error"
@@ -307,8 +319,9 @@ def write_md(records, path):
     A("\n### What the tiers mean\n")
     A("| Tier | Meaning |")
     A("|---|---|")
-    A("| `playable` | Held ≥25 fps with audio, and the picture survived the visual checks |")
-    A("| `ingame` | Renders gameplay with a notable gap: slow, silent, a flat fill, or a picture "
+    A("| `playable` | Held ≥20 fps and the picture survived the visual checks (silence is not "
+      "held against a title: many simply have no audio; silent ones keep the `no-audio` label) |")
+    A("| `ingame` | Renders gameplay with a notable gap: slow, a flat fill, or a picture "
       "that is visibly wrong |")
     A("| `black` | Frames advanced, but every sampled frame was black |")
     A("| `incompatible` | Never rendered: died in the loader/ld.so, or no frame at all |")

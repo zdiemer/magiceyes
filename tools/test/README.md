@@ -50,7 +50,7 @@ Each immediate child of the directory becomes a title (firmware/SDK/lib bundles 
 | `crashed` | host fault after booting (engine exit code 70) | #1 |
 | `black` | frames advanced but every captured frame was black | #1/#2 |
 | `renders` | rendered non-black frames, but low fps or no audio | #2 playability |
-| `playable` | sustained ≥25 fps, non-black, audio active | #2 |
+| `playable` | sustained ≥20 fps, non-black, audio active | #2 |
 
 The verdict's `quirks` list (unknown ioctls/registers, unsupported GLES/blit/audio) is the
 ironing-tweaks bucket (goal #3) — present even on `playable` titles.

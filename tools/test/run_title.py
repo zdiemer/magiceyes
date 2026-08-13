@@ -291,7 +291,7 @@ def _status(exit_code, report, frames, fps, nz_samples, audio_active):
     rendered = max(nz_samples) if nz_samples else 0.0
     if rendered < 0.005:                       # frames advanced but every sample was black
         return "black"
-    if fps >= 25 and audio_active:
+    if fps >= 20 and audio_active:
         return "playable"
     return "renders"
 

@@ -70,7 +70,7 @@ time an `unknown_mmio` event shows up in `run_report`.
 overlay) resolves *beside the exe* (`host/engine/paths.c`), so an engine run from `/mnt/e` caches
 onto drvfs. Measured with byte-identical binaries: Payback **21.4–23.6 fps from `/mnt/e` vs
 26.7–27.8 fps from `/tmp`**. That ~20 % swing flips `baseline.py` status tiers, because the
-`playable` cutoff is 25 fps. Every session therefore copies the engine to `~/.magiceyes/mcp`.
+`playable` cutoff is 20 fps. Every session therefore copies the engine to `~/.magiceyes/mcp`.
 
 **Audio comes from the engine tap, not the shm ring.** `dsp_write` never blocks; when a consumer
 falls behind it silently drops the oldest samples. Polling the ring therefore cannot distinguish

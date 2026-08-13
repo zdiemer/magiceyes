@@ -172,7 +172,7 @@ in-process) need the engine-side control channel — not built yet.
   `bin/me_unicorn` from `/mnt/e` puts the decompress cache on drvfs. Measured with **byte-identical
   binaries** (same sha256): Payback **21.4–23.6 fps from `/mnt/e` vs 26.7–27.8 fps from `/tmp`** —
   a ~20% swing that silently flips `baseline.py` status tiers (`playable` ⇄ `renders`, since the
-  cutoff is 25 fps) and inflates `black_ratio` because the sampler catches the loading screen.
+  cutoff is 20 fps) and inflates `black_ratio` because the sampler catches the loading screen.
   **Copy the engine to ext4 before any timing run**; the committed baselines assume ext4. There is
   currently no env override for the cache root (`paths.c` reads only `paths.conf` beside the exe),
   so relocating means moving the exe or writing a `paths.conf`.

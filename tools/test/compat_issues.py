@@ -27,7 +27,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MARKER = "magiceyes-compat-id"
 
 GROUP_BLURB = {
-    "playable":             "This title runs. It held at or above 25 fps, rendered real frames, and "
+    "playable":             "This title runs. It held at or above 20 fps, rendered real frames, and "
                             "produced audio for the whole sampled run. Tracked here so regressions "
                             "have somewhere to land.",
     "garbled-visuals":      "The title runs by every measure the harness takes, but the picture is "
@@ -76,8 +76,11 @@ GROUP_BLURB = {
                             "a blit the engine skips) rather than a dead game.",
     "no-frames":            "The title never advanced a frame and the engine reported no specific "
                             "cause. Needs a manual look.",
-    "low-fps":              "The title renders real frames but stays under 25 fps.",
-    "no-audio":             "The title renders at full speed but produced no audio.",
+    "low-fps":              "The title renders real frames but stays under 20 fps.",
+    "no-audio":             "The title renders at full speed but produced no audio. Silence alone "
+                            "does not cost the `playable` grade (some titles simply have none, or "
+                            "none in the window watched), but a title that should have sound and "
+                            "doesn't is still a bug, which is what this label is for.",
 }
 
 
