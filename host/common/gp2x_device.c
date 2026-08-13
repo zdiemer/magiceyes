@@ -37,6 +37,7 @@ struct gp2x_dev {
     /* audio (OSS /dev/dsp) */
     uint32_t    aud_freq, aud_ch, aud_bits;
     uint32_t    aud_fmt;          /* SDL audio format word for the viewer */
+    uint32_t    dsp_fragsz, dsp_frags;   /* virtual OSS output buffer (SETFRAGMENT) */
     double      prod_t0;          /* wall-clock epoch for producer real-time pacing */
     uint64_t    prod_bytes;       /* bytes the game has written since prod_t0 */
     int         prod_on;
@@ -449,10 +450,26 @@ void gp2x_tick(gp2x_dev_t *d) {
    rendering. gp2x_dsp_write therefore NEVER blocks — if the ring is full (the
    viewer stalled) it drops the oldest audio to make room, keeping the game running
    and the viewer current once it recovers. */
-static uint32_t aud_free(gp2x_dev_t *d) {
-    if (!d->shm) return 0;
-    uint32_t used = d->shm->a_write - d->shm->a_read;
-    return used < GP2XSHM_ARING ? GP2XSHM_ARING - used : 0;
+/* Virtual OSS output buffer — what the GAME sees as its DSP queue (the transport ring above is
+   deliberately much deeper). GETOSPACE answered from the ring made a "fill until no free space,
+   then render" main loop (falldown-class) run forever: the ring never looked full, so the game
+   never left its audio loop — black screen at full speed with perfect audio. Size from
+   SETFRAGMENT, else 8 x 4096. */
+static uint32_t dsp_vbuf(gp2x_dev_t *d) {
+    if (!d->dsp_fragsz) { d->dsp_fragsz = 4096; d->dsp_frags = 8; }
+    return d->dsp_fragsz * d->dsp_frags;
+}
+static uint32_t dsp_vqueued(gp2x_dev_t *d) {
+    uint32_t bps = d->aud_freq * d->aud_ch * (d->aud_bits / 8);
+    if (!bps) return 0;
+    double now = host_now();
+    if (!d->prod_on) { d->prod_on = 1; d->prod_t0 = now; d->prod_bytes = 0; }
+    double played = (now - d->prod_t0) * bps;
+    if (played >= (double)d->prod_bytes) {
+        if (played > (double)d->prod_bytes + bps * 0.25) { d->prod_t0 = now; d->prod_bytes = 0; }
+        return 0;
+    }
+    return (uint32_t)((double)d->prod_bytes - played);
 }
 
 uint32_t gp2x_dsp_write(gp2x_dev_t *d, const void *pcm, uint32_t n) {
@@ -482,16 +499,11 @@ uint32_t gp2x_dsp_write(gp2x_dev_t *d, const void *pcm, uint32_t n) {
 uint32_t gp2x_dsp_pace_us(gp2x_dev_t *d) {
     uint32_t bps = d->aud_freq * d->aud_ch * (d->aud_bits / 8);
     if (!bps) return 0;
-    double now = host_now();
-    if (!d->prod_on) { d->prod_on = 1; d->prod_t0 = now; d->prod_bytes = 0; }
-    double allowed = (now - d->prod_t0) * bps;
-    if ((double)d->prod_bytes > allowed) {
-        return (uint32_t)(((double)d->prod_bytes - allowed) / bps * 1e6);
-    }
-    if (allowed > (double)d->prod_bytes + bps * 0.25) {   /* long idle: restart clock */
-        d->prod_t0 = now; d->prod_bytes = 0;
-    }
-    return 0;
+    /* Blocking-write semantics against the VIRTUAL buffer: writes are instant while it has
+       room (the game may run ahead by the buffer depth); sleep only for the overflow. */
+    uint32_t q = dsp_vqueued(d), vb = dsp_vbuf(d);
+    if (q <= vb) return 0;
+    return (uint32_t)((double)(q - vb) / bps * 1e6);
 }
 
 /* ---- /dev/fb0,fb1 screeninfo (Linux fbdev ABI, 32-bit ARM target) ---- */
@@ -532,16 +544,22 @@ int gp2x_dsp_ioctl(gp2x_dev_t *d, uint32_t cmd, void *arg, uint32_t *outlen) {
         else if (v == 32 /*S16_BE*/)   { d->aud_bits = 16; d->aud_fmt = 0x9010; } /* S16MSB */
         else /* 16 = AFMT_S16_LE */    { d->aud_bits = 16; d->aud_fmt = 0x8010; } /* S16LSB */
         break;
-    case GP2X_DSP_GETBLKSIZE: v = 4096; break;
-    case GP2X_DSP_SETFRAGMENT: break;                 /* accept as-is */
+    case GP2X_DSP_GETBLKSIZE: v = d->dsp_fragsz ? d->dsp_fragsz : 4096; break;
+    case GP2X_DSP_SETFRAGMENT: {  /* 0xCCCCSSSS = count frags of 1<<S bytes -> virtual buffer */
+        uint32_t e = v & 0xffff, ct = (v >> 16) & 0x7fff;
+        if (e >= 8 && e <= 16) d->dsp_fragsz = 1u << e;
+        if (ct >= 2 && ct <= 64) d->dsp_frags = ct;
+        break; }
     case GP2X_DSP_GETFMTS:  v = 0x18; break;           /* S16_LE | U8 */
     case GP2X_DSP_GETCAPS:  v = 0; break;
     case GP2X_DSP_GETODELAY:
-        v = d->shm ? (d->shm->a_write - d->shm->a_read) : 0;
+        v = dsp_vqueued(d);
         break;
-    case GP2X_DSP_GETOSPACE: {  /* audio_buf_info{fragments,fragstotal,fragsize,bytes} */
-        uint32_t freeb = aud_free(d), fsz = 4096;
-        uint32_t info[4] = { freeb / fsz, GP2XSHM_ARING / fsz, fsz, freeb };
+    case GP2X_DSP_GETOSPACE: {  /* audio_buf_info{fragments,fragstotal,fragsize,bytes}: answer
+                                   from the virtual buffer so a fill-until-full loop terminates */
+        uint32_t vb = dsp_vbuf(d), q = dsp_vqueued(d);
+        uint32_t freeb = q < vb ? vb - q : 0;
+        uint32_t info[4] = { freeb / d->dsp_fragsz, d->dsp_frags, d->dsp_fragsz, freeb };
         if (arg) memcpy(arg, info, 16);
         if (outlen) *outlen = 16;
         return 0;

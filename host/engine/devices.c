@@ -100,6 +100,7 @@ struct memmap g_mem[64]; int g_nmem = 0;
 uint32_t g_mmsp2_guest = 0;   /* guest addr of the 0xC0000000 reg block */
 uint32_t g_fb_guest = 0;      /* guest addr of the /dev/fb0 framebuffer */
 uint32_t g_fb_guest2 = 0;     /* /dev/fb1 (double-buffering: present the active one) */
+int g_fb_from_devmem = 0;     /* g_fb_guest came from a /dev/mem map of the default scanout */
 uint32_t g_fb_stride = 640;   /* present row stride in bytes (320*2; gpu940 sets its pow2 width) */
 int      g_fb_bpp = 16;       /* present source depth: 16 = RGB565, 32 = XRGB8888 (gpu940 output) */
 uint32_t g_fb_xoff = 0;       /* x pixel offset into each row (gpu940 centers 320 in a pow2 buffer) */
@@ -276,9 +277,11 @@ void gp2x_cacheflush(uint32_t guest) {
    geometry via FBIOGET_VSCREENINFO/FSCREENINFO before mmap'ing it; if the engine
    returns a zeroed struct they decide the framebuffer is unusable and bail back to
    `gp2xmenu` (execve) without ever drawing. We advertise a 320x240 RGB565 fbdev,
-   with a yres_virtual of 480 so a game can double-buffer via FBIOPAN_DISPLAY. Each
-   fb mmap is given a synthetic phys (FB0_PHYS/FB1_PHYS, also reported as smem_start)
-   and recorded so an MLC OADR flip to that phys resolves back to the surface. */
+   with a yres_virtual of 480 so a game can double-buffer via FBIOPAN_DISPLAY.
+   On GP2X the fb is pram-backed at its REAL phys (GP2X_FB0/1_PHYS, engine.h) and that
+   is what smem_start reports -- titles mix fbdev with /dev/mem views of the same RAM.
+   Other devices keep a synthetic phys (FB0_PHYS/FB1_PHYS); either way the phys is
+   recorded so an MLC OADR flip to it resolves back to the surface. */
 #define FB0_PHYS 0x04000000u
 #define FB1_PHYS 0x04040000u
 #define FB_LEN_  (320 * 240 * 2)
@@ -322,8 +325,16 @@ long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
     int i = fd - DEVFD_BASE, fbno = (i >= 0 && i < 64) ? g_fbnum[i] : 0;
     switch (cmd) {
     case 0x4600: if (arg) fill_vscreeninfo(arg); return 0;                 /* GET_VSCREENINFO */
-    case 0x4602: if (arg) fill_fscreeninfo(arg, fbno ? FB1_PHYS : FB0_PHYS); return 0; /* GET_FSCREENINFO */
-    case 0x4601: return 0;                                                  /* PUT_VSCREENINFO: accept */
+    case 0x4602: if (arg) fill_fscreeninfo(arg, g_device == 0 ? (fbno ? GP2X_FB1_PHYS : GP2X_FB0_PHYS)
+                                                              : (fbno ? FB1_PHYS : FB0_PHYS));
+                 return 0;                                              /* GET_FSCREENINFO */
+    case 0x4601: {                                                          /* PUT_VSCREENINFO: accept */
+        if (arg && getenv("ME_GP2X_FLIPLOG")) {
+            uint32_t v[9]; memset(v, 0, sizeof v); uc_mem_read(g_uc, arg, v, sizeof v);
+            fprintf(stderr, "PUT_VSCREENINFO xres=%u yres=%u xv=%u yv=%u xoff=%u yoff=%u bpp=%u\n",
+                    v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+        }
+        return 0; }
     case 0x4606: { uint32_t yoff = 0; if (arg) uc_mem_read(g_uc, arg + 20, &yoff, 4);
                    fb_pan(yoff); return 0; }                                /* PAN_DISPLAY (yoffset@20) */
     case 0x4611: return 0;                                                  /* FBIOBLANK: accept */
@@ -644,23 +655,40 @@ long dsp_write(uint32_t gbuf, uint32_t n) {
     g_shm->a_write += n; g_prod_bytes += n; free(tmp);
     return n;
 }
-/* Microseconds the DSP-write caller should sleep so audio tracks real time (the OSS
-   blocking-write pacing). 0 = on time/behind; rebases on a long idle gap. */
-uint32_t dsp_pace_us(void) {
+/* ---- virtual OSS output buffer (the game-visible DSP queue) ----
+   Real hardware has a SMALL output buffer (fragments); games pace two ways: blocking writes
+   (Payback — write stalls once the buffer is full) or a GETOSPACE fill loop ("while free >=
+   chunk: mix+write", THEN render a frame — falldown-class). Reporting free space from our big
+   transport ring made that fill loop infinite: the ring never looked full, GETOSPACE always
+   said "plenty free", and the game's main thread stayed in its audio loop forever — black
+   screen at full speed with perfect audio. Model the queue the game actually sees: writes are
+   instant while the virtual buffer has room (the producer may run ahead by the buffer depth,
+   which also replaces the old flat 80ms streaming cushion), the syscall layer sleeps only once
+   it is full, and GETOSPACE/GETODELAY answer from the same model. Depth = SETFRAGMENT when the
+   game sets one, else 8 x 4096 (~186ms at 44.1k stereo). */
+uint32_t g_dsp_fragsz = 4096, g_dsp_frags = 8;
+static uint32_t dsp_vbuf(void) { return g_dsp_fragsz * g_dsp_frags; }
+static uint32_t dsp_vqueued(void) {
     uint32_t bps = g_aud_freq * g_aud_ch * (g_aud_bits / 8);
     if (!bps) return 0;
     double now = host_now();
     if (!g_prod_on) { g_prod_on = 1; g_prod_t0 = now; g_prod_bytes = 0; }
-    double allowed = (now - g_prod_t0) * bps;
-    /* Allow the producer to run ~80ms ahead of real time before throttling, so a small-chunk
-       streamer (Blazar/Quartz2 write ~20ms chunks) banks a real-audio cushion in the ring; the
-       viewer then keeps a deep REAL queue instead of staying ~1 chunk ahead and underrunning
-       into silence/static. (Big-chunk producers like Payback already bank a chunk's worth.) */
-    double lead = bps * 0.08;
-    if ((double)g_prod_bytes > allowed + lead)
-        return (uint32_t)(((double)g_prod_bytes - allowed - lead) / bps * 1e6);
-    if (allowed > (double)g_prod_bytes + bps * 0.25) { g_prod_t0 = now; g_prod_bytes = 0; }
-    return 0;
+    double played = (now - g_prod_t0) * bps;
+    if (played >= (double)g_prod_bytes) {
+        /* idle gap: rebase so a fresh burst isn't instantly "late" */
+        if (played > (double)g_prod_bytes + bps * 0.25) { g_prod_t0 = now; g_prod_bytes = 0; }
+        return 0;
+    }
+    return (uint32_t)((double)g_prod_bytes - played);
+}
+/* Microseconds the DSP-write caller should sleep so audio tracks real time (the OSS
+   blocking-write pacing): sleep only for the part of the queue that overflows the buffer. */
+uint32_t dsp_pace_us(void) {
+    uint32_t bps = g_aud_freq * g_aud_ch * (g_aud_bits / 8);
+    if (!bps) return 0;
+    uint32_t q = dsp_vqueued(), vb = dsp_vbuf();
+    if (q <= vb) return 0;
+    return (uint32_t)((double)(q - vb) / bps * 1e6);
 }
 /* OSS dsp ioctl (type 'P' == 0x50); arg usually points to an int (in/out). */
 long dsp_ioctl(uint32_t cmd, uint32_t arg) {
@@ -670,14 +698,21 @@ long dsp_ioctl(uint32_t cmd, uint32_t arg) {
     case 0x03: /* STEREO  */ g_aud_ch = v ? 2 : 1; break;
     case 0x06: /* CHANNELS*/ if (v) g_aud_ch = v; break;
     case 0x05: /* SETFMT  */ g_aud_bits = (v == 8 /*AFMT_U8*/) ? 8 : 16; break;
-    case 0x04: /* GETBLKSIZE */ v = 4096; break;
-    case 0x0a: /* SETFRAGMENT: accept the request as-is */ break;
+    case 0x04: /* GETBLKSIZE */ v = g_dsp_fragsz; break;
+    case 0x0a: { /* SETFRAGMENT: 0xCCCCSSSS = count frags of 1<<S bytes -> size the virtual buffer */
+        uint32_t e = v & 0xffff, ct = (v >> 16) & 0x7fff;
+        if (e >= 8 && e <= 16) g_dsp_fragsz = 1u << e;
+        if (ct >= 2 && ct <= 64) g_dsp_frags = ct;
+        break; }
     case 0x0b: /* GETFMTS  */ v = 0x18; /* AFMT_S16_LE|AFMT_U8 */ break;
     case 0x0f: /* GETCAPS  */ v = 0; break;
-    case 0x17: /* GETODELAY*/ aud_drain(); v = g_shm ? (g_shm->a_write - g_shm->a_read) : 0; break;
-    case 0x0c: /* GETOSPACE -> audio_buf_info{fragments,fragstotal,fragsize,bytes} */ {
-        uint32_t freeb = aud_free(), fsz = 4096;
-        uint32_t info[4] = { freeb / fsz, GP2XSHM_ARING / fsz, fsz, freeb };
+    case 0x17: /* GETODELAY*/ v = dsp_vqueued(); break;
+    case 0x0c: /* GETOSPACE -> audio_buf_info{fragments,fragstotal,fragsize,bytes}. Answers from
+                  the virtual buffer: once the game has written ~a buffer's depth ahead of real
+                  time, free space reads 0 and its fill loop exits (falldown-class main loops). */ {
+        uint32_t vb = dsp_vbuf(), q = dsp_vqueued();
+        uint32_t freeb = q < vb ? vb - q : 0;
+        uint32_t info[4] = { freeb / g_dsp_fragsz, g_dsp_frags, g_dsp_fragsz, freeb };
         if (arg) uc_mem_write(g_uc, arg, info, 16);
         return 0;
     }
@@ -890,13 +925,14 @@ void devices_reset(void) {
     memset(g_mem, 0, sizeof g_mem); g_nmem = 0;
     g_blit_guest = 0; memset(&g_blt, 0, sizeof g_blt);
     g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0;
-    g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0;
+    g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0; g_fb_from_devmem = 0;
     g_caanoo_bpp = 0; g_caanoo_pitch = 0;
     g_flip_active = 0; g_flip_guest = 0;
     g_oadr_driven = 0; g_frame_ready = 0;
     g_aud_freq = 44100; g_aud_ch = 2; g_aud_bits = 16;
     g_aud_t0 = 0; g_aud_on = 0;
     g_prod_on = 0; g_prod_t0 = 0; g_prod_bytes = 0;
+    g_dsp_fragsz = 4096; g_dsp_frags = 8;
     g_tcount_t0 = 0;
 }
 

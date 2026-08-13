@@ -334,11 +334,26 @@ long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off) 
 /* device mmap: give RAM, track phys->guest, and hook MMSP2 reg writes for flips. */
 long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys) {
     uint32_t at;
+    /* fb0 vs fb1 for an fbdev mmap: first fbdev mmap is fb0. A g_fb_guest set only by the
+       /dev/mem default-scanout fallback below doesn't count — that title never touched fbdev. */
+    int fb1 = (type == DEV_FB) && g_fb_guest && !g_fb_from_devmem;
+    uint32_t fbphys = (fb1 ? GP2X_FB1_PHYS : GP2X_FB0_PHYS) + phys;   /* phys = mmap offset here */
+    /* fb1's phys is NOT page-aligned (0x25800 apart, real kernel layout). Real fbdev mmap maps
+       the containing page and the client adds smem_start's sub-page offset itself; mirror that:
+       map the aligned page, return the aligned guest addr, track the pixel base at +delta. */
+    uint32_t fbpa = ALIGN_DN(fbphys), fbdelta = fbphys - fbpa;
     /* /dev/mem mapping of GP2X upper RAM -> a window into the shared physical-RAM backing, so the
        920, repeat mappings, and the ARM940 all alias the same bytes. MMSP2 reg windows
        (phys 0xC0000000 / 0xE0020000) are NOT RAM and keep the per-mapping anon path below. */
     uint32_t alias0, alias1;
-    if (type == DEV_MEM && phys != 0xC0000000u && phys != 0xE0020000u &&
+    if (type == DEV_FB && g_device == 0 && phys_in_pram(fbpa, len + fbdelta)) {
+        /* On the real GP2X, fbdev memory IS upper physical RAM (fb0 at 0x03101000, the kernel's
+           boot-time MLC scanout; fb1 the page after). minlib-style titles mmap /dev/mem at that
+           phys and draw, never writing OADR/EADR — the hardware already scans there. Back the
+           fbdev mmap with the shared pram at its real phys so the fbdev view and any /dev/mem
+           view alias the same bytes, and present shows what either drew. */
+        at = (uint32_t)pram_map(fbpa, len + fbdelta, addr);
+    } else if (type == DEV_MEM && phys != 0xC0000000u && phys != 0xE0020000u &&
         phys_to_guest(phys, &alias0) && phys_to_guest(phys + len - 1, &alias1) &&
         alias1 - alias0 == len - 1) {
         /* A previously-mapped /dev/mem phys: alias the SAME guest pages (one physical RAM = one set
@@ -354,10 +369,18 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
     fprintf(stderr, "  DEV mmap type=%d phys=%08x -> guest=%08x len=%08x%s\n",
             type, phys, at, len, (type == DEV_MEM && phys_in_pram(phys, len)) ? " [pram]" : "");
     if (type == DEV_FB) {                                 /* track up to 2 fb buffers */
-        /* Advertise/record a synthetic phys per fb (matches FBIOGET_FSCREENINFO.smem_start)
-           so an MLC OADR flip — or a blitter dst — that targets that phys resolves back here. */
-        if (!g_fb_guest)       { g_fb_guest  = at; record_memmap(0x04000000u, at, len); }
-        else if (!g_fb_guest2 && at != g_fb_guest) { g_fb_guest2 = at; record_memmap(0x04040000u, at, len); }
+        /* Record each fb's phys (matches FBIOGET_FSCREENINFO.smem_start) so an MLC OADR flip —
+           or a blitter dst — that targets that phys resolves back here. GP2X records the real
+           phys (the pram backing above) with the pixel base at +delta past the aligned mapping;
+           other devices a synthetic aligned one. */
+        uint32_t base = at, rec = fb1 ? 0x04040000u : 0x04000000u;
+        if (g_device == 0) { base = at + fbdelta; rec = fbphys; }
+        if (!fb1) {
+            if (g_fb_from_devmem) { g_fb_guest = base; g_fb_from_devmem = 0; } /* fbdev view takes over */
+            else if (!g_fb_guest) g_fb_guest = base;
+            record_memmap(rec, base, len);
+        }
+        else if (!g_fb_guest2 && base != g_fb_guest) { g_fb_guest2 = base; record_memmap(rec, base, len); }
         /* Caanoo (Pollux) firmware menu draws 24bpp BGR into /dev/fb0. We advertise the fbdev as
            24bpp (line_length 960) so its libSDL renders a full 320px-wide surface; present it via the
            Caanoo 24bpp path (reads B,G,R at pitch 960 = 320 px/row, no scaling). */
@@ -370,6 +393,16 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
     }
     if (type == DEV_MEM) {
         record_memmap(phys, at, len);
+        /* Default MLC scanout: a GP2X title that maps upper RAM over GP2X_FB0_PHYS and never
+           opens fbdev nor writes OADR/EADR is drawing straight to the boot-time scanout address
+           (minlib single-buffer). Present from there until something more specific — an fbdev
+           mmap (which replaces this, aliasing the same pram bytes) or an OADR/EADR write —
+           says otherwise. */
+        if (g_device == 0 && !g_fb_guest && GP2X_FB0_PHYS >= phys &&
+            (uint64_t)GP2X_FB0_PHYS + 320u * 240u * 2u <= (uint64_t)phys + len) {
+            g_fb_guest = at + (GP2X_FB0_PHYS - phys);
+            g_fb_from_devmem = 1;
+        }
         if (phys == 0xC0000000u) {
             g_mmsp2_guest = at;
             static uc_hook hh, hr;

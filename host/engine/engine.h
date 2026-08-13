@@ -39,6 +39,11 @@
 #define PAGE        0x1000u
 #define PRAM_BASE   0x02000000u           /* GP2X upper physical RAM (shared 920/940 area) */
 #define PRAM_SIZE   0x02000000u           /* 32MB: phys 0x02000000 .. 0x04000000 */
+/* The GP2X kernel's fbdev memory lives in upper RAM: fb0 at 0x03101000 (also the boot-time MLC
+   scanout address), fb1 the page after (0x25800 = 320*240*2). minlib-style titles hard-code these
+   and draw via /dev/mem, so fbdev must be backed by pram at the REAL phys (one physical RAM). */
+#define GP2X_FB0_PHYS 0x03101000u
+#define GP2X_FB1_PHYS (GP2X_FB0_PHYS + 320u * 240u * 2u)
 #define ALIGN_DN(x) ((x) & ~(PAGE - 1))
 #define ALIGN_UP(x) (((x) + PAGE - 1) & ~(PAGE - 1))
 
@@ -148,7 +153,12 @@ int  me_firmware_boot_request(const char *device);  /* GUI: pin rootfs + reload 
 /* ---- devices.c: GP2X/Wiz device model + shm bridge ---- */
 enum { DEV_FB = 1, DEV_MEM, DEV_GPIO, DEV_DSP, DEV_MIXER, DEV_TTY, DEV_I2C, DEV_SHMFB, DEV_OTHER,
        DEV_INPUT_EV, DEV_INPUT_JS };   /* Linux input subsystem: /dev/input/event* and /dev/input/js* */
-#define DEVFD_BASE 0x10000000   /* far above real host fds (avoid aliasing) */
+/* Synthetic guest fds MUST stay below FD_SETSIZE (1024): games put device fds in fd_sets
+   (glibc's FD_SET writes bits[fd/32] with no bounds check — an fd like 0x10000002 smashed
+   memory 8M words past the stack fd_set, and select() on a device could never be modelled).
+   Real GP2X fds are tiny. Kept well above any realistic host fd (guest files pass through
+   host fds; HOSTFD_MAX is 512) so the ranges cannot alias. */
+#define DEVFD_BASE 900          /* 64 device slots: 900..963 */
 struct memmap { uint32_t phys, guest, len; };
 
 extern gp2x_shm_t *g_shm;
@@ -157,6 +167,8 @@ extern int g_fbnum[64];   /* per-slot fb index for DEV_FB fds */
 extern struct memmap g_mem[64];
 extern int g_nmem;
 extern uint32_t g_mmsp2_guest, g_fb_guest, g_fb_guest2;
+extern int g_fb_from_devmem;   /* g_fb_guest is the /dev/mem window over the default scanout
+                                  (GP2X_FB0_PHYS), not an fbdev mmap -- an fbdev mmap replaces it */
 extern int g_flip_active; extern uint32_t g_flip_guest;   /* present lock (set by 940 MLC scanout too) */
 extern uint32_t g_fb_stride;   /* present row stride in bytes (gpu940 video buffers are pow2-wide) */
 extern int g_fb_bpp;           /* present source depth: 16 RGB565 (default) or 32 XRGB (gpu940) */
@@ -222,9 +234,11 @@ enum { BLK_NONE = 0, BLK_FUTEX, BLK_SIG };
 #define ME_CLONE_CHILD_SETTID  0x01000000
 #define ME_CLONE_SETTLS        0x00080000
 #define SIG_TRAMP 0xffff0f00u   /* restorer trampoline in the kuser page */
-#define PIPEFD_R 0x10000100
-#define PIPEFD_W 0x10000101
-#define FAKESOCK_FD 0x30000001   /* glibc syslog's AF_UNIX socket (datagrams discarded) */
+#define PIPEFD_R 964
+#define PIPEFD_W 965
+#define FAKESOCK_FD 1000         /* glibc syslog's AF_UNIX socket (datagrams discarded).
+                                    (Also un-aliases it from the dirfd range: it used to be
+                                    0x30000001 = DIRFD_BASE+1.) */
 
 struct thread {
     uc_engine *uc;          /* this guest thread's CPU */

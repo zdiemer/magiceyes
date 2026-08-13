@@ -558,7 +558,7 @@ static int linux_errno(int e) {
    there is no /proc, so the open fails (-ENOENT) and the guest's init diverges/hangs. Serve
    canned content from a malloc buffer via a fake fd, host-independently (the old /proc/mounts
    path used mkstemp("/tmp/..."), which also fails on Windows). */
-#define MEMFD_BASE 0x20000000
+#define MEMFD_BASE 968          /* fd_set-safe (see DEVFD_BASE in engine.h): 968..983 */
 #define MEMFD_MAX  16
 struct memfile { int used; char *data; uint32_t len, pos; };
 static struct memfile g_memf[MEMFD_MAX];
@@ -580,7 +580,7 @@ static int memfd_make(const char *s) { return memfd_make_bin(s, (uint32_t)strlen
    A guest open() of a directory becomes a DIRFD: opendir() + a snapshot of all entries (name +
    type). getdents/getdents64 serve from the snapshot with a cursor (no telldir/seekdir, which
    MinGW lacks). Used by Caanoo Rhythmos scanning ./package/ for songs. */
-#define DIRFD_BASE 0x30000000
+#define DIRFD_BASE 984          /* fd_set-safe (see DEVFD_BASE in engine.h): 984..999 */
 #define DIRFD_MAX  16
 struct dirhandle { int used, n, pos; char **name; unsigned char *type; };
 static struct dirhandle g_dirf[DIRFD_MAX];
