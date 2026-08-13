@@ -66,23 +66,31 @@ guessing. Samples: `aquaVenture`, `arcadevol1`, `Arcadevol2`, `Arcadevol3`.
 
 Filter: `label:"group: black-screen"`
 
-## 3. Titles dying instantly with exit 127 — 43 titles
+## 3. ~~Titles dying instantly with exit 127~~ — FIXED 2026-08-13 (it was 151 titles, and item 4 too)
 
-Of the 121 titles that never rendered and gave no diagnosis, **43 exit with code 127** and a median
-run of **0.8 seconds**. 127 is the shell's "command not found", so these are almost certainly
-launcher scripts `exec`ing a binary we did not resolve. `loader.c` already follows launcher scripts
-and scores candidates, so this is a gap in that logic rather than new machinery.
+**Not launcher scripts.** Exit 127 was **ld.so aborting on unresolvable NEEDED libs/symbols**
+(same code as "command not found"), and the cluster was 151 titles once counted properly — mostly
+Caanoo, i.e. most of item 4's "Caanoo is the weakest platform". Five layers of supply gaps, fixed
+in commit 09ac78a: empty rootfs-eabi stubs made real (SDL_ttf, libinifile — the GPH INI API is now
+reimplemented in `guest/src/inifile.c`), missing Wheezy libs staged (smpeg/SDL_net/expat), the
+Caanoo firmware's DGE/OpenAL libs staged with their OS-ABI byte normalised, ~150 missing
+fakesdl/fakegles entry points added, EABI direct socket syscalls implemented, and the guest
+`LD_LIBRARY_PATH` now includes the game's own dir + `lib`/`libs` + the launcher script's dir
+(titles ship satellite libs beside the .gpe, like on a real SD card).
 
-Cheap to investigate: run one with `--debug`, read what the script tried to exec. If it is a common
-pattern (a path assumption, a missing interpreter) it may be one fix for all 43.
+Harness verification over all 151: **64 playable, 20 renders, 23 black-but-running, 44 still
+incompatible** (missing game data, two OABI-shim titles pending a `build_guest.sh` rebuild, the
+item-7 libpng bug, jamvm/libffi). The 23 black join the black-screen bucket; the counts in the
+summary tables above predate this fix — re-sweep to fold them in.
 
 Filter: `label:"group: no-frames"` + `label:"needs triage"`
 
-## 4. Caanoo is the weakest platform — 16 playable of 205
+## 4. Caanoo is the weakest platform — largely explained by item 3
 
-GP2X gets 211/673 playable, Wiz 26/153, Caanoo **16/205**. Caanoo also owns 52 of the 121
-no-diagnosis failures, the largest share of any platform. Whatever is wrong is systemic rather than
-per-title, and the sweep does not tell you what. Worth one session just characterising it.
+Caanoo owned most of the exit-127 cluster; after 09ac78a its numbers should approach the other
+platforms on re-sweep. What remains Caanoo-specific: touchscreen titles wanting
+`/dev/touchscreen/wm97xx`, and DGE titles now loading the real firmware `libdge20` whose runtime
+behaviour on our Pollux stubs is unproven beyond loading.
 
 ## 5. Silent titles — 69 render fine with zero audio
 
