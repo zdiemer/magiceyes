@@ -1001,12 +1001,23 @@ static void pollux_mlc_write(uint32_t off, uint32_t val) {
     }
 }
 
+/* Register-block offset for a guest address. A title may mmap /dev/mem @0xC0000000 MORE THAN
+   ONCE (malvado's Fenix runtime maps it twice); every window is hooked, but g_mmsp2_guest only
+   records the last, so offsets computed against it were garbage for the earlier windows. Resolve
+   through the recorded /dev/mem maps instead. */
+static uint32_t mmsp2_off(uint32_t addr) {
+    for (int i = 0; i < g_nmem; i++)
+        if (addr >= g_mem[i].guest && addr < g_mem[i].guest + g_mem[i].len &&
+            g_mem[i].phys >= 0xC0000000u && g_mem[i].phys < 0xC0100000u)
+            return g_mem[i].phys - 0xC0000000u + (addr - g_mem[i].guest);
+    return addr - g_mmsp2_guest;
+}
 void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                            int size, int64_t value, void *user) {
     (void)type; (void)user;
     if (!g_mmsp2_guest) return;
     g_n_wr++;
-    uint32_t off = (uint32_t)addr - g_mmsp2_guest;
+    uint32_t off = mmsp2_off((uint32_t)addr);
     if (g_trace) { static int n = 0; if (n++ < 400)
         fprintf(stderr, "  MMSP2 wr %04x sz%d=%08x\n", off, size, (uint32_t)value); }
     /* Pollux MLC range. Wiz + Caanoo silicon, but also any DYNAMIC title regardless of the badge:
@@ -1069,7 +1080,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     (void)type; (void)size; (void)value; (void)user;
     if (!g_mmsp2_guest) return;
     g_n_rd++;
-    uint32_t off = (uint32_t)addr - g_mmsp2_guest;
+    uint32_t off = mmsp2_off((uint32_t)addr);
     if (off == 0x0a00) {           /* TCOUNT: free-running counter, 7.3728 MHz reference crystal */
         /* The game derives BOTH frame pacing AND simulation dt from TCOUNT, so the tick rate
            sets frame rate and game speed together. The GP2X reference crystal is 7.3728 MHz
@@ -1083,7 +1094,8 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         double now = tv.tv_sec + tv.tv_usec * 1e-6;
         if (g_tcount_t0 == 0) g_tcount_t0 = now;
         uint32_t us = (uint32_t)((now - g_tcount_t0) * hz);
-        uc_mem_write(uc, g_mmsp2_guest + 0x0a00, &us, 4);
+        uc_mem_write(uc, (uint32_t)addr, &us, 4);   /* serve into the window actually read
+                                                       (there may be several 0xC0000000 maps) */
         return;
     }
     /* GPIOB pin-level @ 0x1182: bit 4 is the LCD VSYNC line, bit 5 HSYNC. rlyeh-minlib
@@ -1096,11 +1108,11 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (off == 0x1182) {
         struct timeval tv; gettimeofday(&tv, NULL);
         uint64_t us = (uint64_t)tv.tv_sec * 1000000ull + tv.tv_usec;
-        uint16_t v = 0; uc_mem_read(uc, g_mmsp2_guest + off, &v, 2);
+        uint16_t v = 0; uc_mem_read(uc, (uint32_t)addr, &v, 2);
         v &= (uint16_t)~0x30;
         if (us % 16667u < 1000u) v |= 0x10;   /* in vertical blank */
         if (us % 64u < 8u)       v |= 0x20;   /* in horizontal blank */
-        uc_mem_write(uc, g_mmsp2_guest + off, &v, 2);
+        uc_mem_write(uc, (uint32_t)addr, &v, 2);
         return;
     }
     /* GPIO button registers (active low; canonical GP2X layout, matches our shm enum):
@@ -1113,7 +1125,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         if (off == 0x1198)      v = 0xFF00 | (~b & 0x00FF);            /* stick (bits 0..7) */
         else if (off == 0x1184) v = 0x00FF | ((~(b >> 8) & 0xFF) << 8); /* buttons -> hi byte */
         else                    v = 0xFF00 | (~(b >> 16) & 0xFF);      /* VOL -> lo byte */
-        uc_mem_write(uc, g_mmsp2_guest + off, &v, 2);
+        uc_mem_write(uc, (uint32_t)addr, &v, 2);
         return;
     }
     if (g_trace) { static int n = 0; if (n++ < 200) fprintf(stderr, "  MMSP2 RD %04x\n", off); }

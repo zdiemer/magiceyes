@@ -394,14 +394,17 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
            fbdev mmap with the shared pram at its real phys so the fbdev view and any /dev/mem
            view alias the same bytes, and present shows what either drew. */
         at = (uint32_t)pram_map(fbpa, len + fbdelta, addr);
-    } else if (type == DEV_MEM && phys != 0xC0000000u && phys != 0xE0020000u &&
+    } else if (type == DEV_MEM && phys != 0xE0020000u &&
         phys_to_guest(phys, &alias0) && phys_to_guest(phys + len - 1, &alias1) &&
         alias1 - alias0 == len - 1) {
         /* A previously-mapped /dev/mem phys: alias the SAME guest pages (one physical RAM = one set
            of bytes). Lets a second mapper -- e.g. our SDL shim re-mmapping the Pollux video memory
            to read the game's decoded YV12 planes -- see exactly what the first mapper wrote, instead
-           of a fresh zero anon region. Reg windows (0xC0000000 MMSP2 / 0xE0020000 blitter) keep the
-           per-mapping path so their hooks stay correct. */
+           of a fresh zero anon region. This now includes repeat maps of the 0xC0000000 reg block
+           (malvado's Fenix runtime maps it in both its SDL and its core: separate backings meant a
+           register stored via one window read as zero via the other); aliasing returns the FIRST
+           window's guest range, whose read/write hooks are already in place. The 0xE0020000
+           blitter window keeps the per-mapping path. */
         at = alias0;
     } else if (type == DEV_MEM && phys_in_pram(phys, len))
         at = (uint32_t)pram_map(phys, len, addr);
