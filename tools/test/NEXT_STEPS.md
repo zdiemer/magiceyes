@@ -6,11 +6,12 @@ Ranked by how many titles one fix would move. Generated from the second 1031-tit
 filter away (issues embed a gameplay clip + screenshot where one exists).
 
 Current state: **557 playable, 38 ingame, 147 black, 289 incompatible, 0 crashes** under the
-revised grading (silence no longer demotes; playable cutoff 20 fps). Same measurements graded the
-old way were 457/138; the morning sweep was 404/154/152/321, 08-12 was 331/132/120/448, 08-11 was
-253/123/185/470. Of the 289
-incompatible, **170 are not our bug**: 99 are not ARM executables, 59 ship no `.gpe`, 7 lost
-their game data, 5 are broken archives. Discount those before reading the numbers below.
+revised grading of 8f1c784 (silence no longer demotes to `ingame`; playable cutoff is 20 fps in
+both `run_title.py` and the reported grade). The same measurements graded the old way were
+457/138; the morning sweep was 404/154/152/321, 08-12 was 331/132/120/448, 08-11 was
+253/123/185/470. Of the 289 incompatible, **170 are not our bug**: 99 are not ARM executables,
+59 ship no `.gpe`, 7 lost their game data, 5 are broken archives. Discount those before reading
+the numbers below.
 
 ## Context: what fell on 08-13 (second wave, commit eb42220)
 
@@ -25,7 +26,7 @@ their game data, 5 are broken archives. Discount those before reading the number
   the helper thread (main.c) revives async present.
 - **F200 touchscreen + /dev/null + syscalls**: `wm97xx` TS_EVENT samples from the viewer's
   mouse-to-touch plumbing, `/dev/null` as EOF/discard, real `mremap`/`times`/`alarm`, FAT-case
-  path fallback. `unknown-device` 11 to 6, `unimplemented-syscall` 3 to 2, `low-fps` 40 to 18.
+  path fallback. `unknown-device` 11 to 6, `unimplemented-syscall` 3 to 2.
 
 The method that keeps working: **don't trust the report tables**. Find where the pixels actually
 land (the game's own log files are often faster than watchpoints) and read the code the title
@@ -35,46 +36,64 @@ Caveat: the MCP debugger's `step`/`resume` does NOT advance past an active break
 
 ---
 
+## Recommended attack order
+
+Best titles-per-effort first; each item stands alone.
+
+1. **Check libjpeg/BMP through SDL_image (15 minutes, possibly many titles).** The libpng
+   discovery generalises: SDL_image dlopens `libjpeg.so.62` the same way. `readelf -d` the
+   rootfs libjpeg for missing NEEDED entries and undefined symbols, then boot one JPG-art black
+   title. Several of the remaining 147 black titles fit the "no error printed" profile exactly.
+2. **Launcher-script CLI args (mechanical, 13 titles).** Thirteen no-frames titles print
+   "Usage:" and exit: on the device a `.gpe` wrapper script execs the real binary with
+   arguments the harness drops. Teach the loader (or `run_title.py`) to read the sibling script
+   for args.
+3. **Batch re-run the silent no-frames deaths with `ME_DEBUG=1 ME_SYSLOG=1` (scripted, ~31
+   titles).** Same playbook that cracked the exit-127 cluster: run the batch, cluster the first
+   error line, fix by class. The clustering script pattern is described under item 2 below.
+4. **`/dev/sequencer` MIDI (22 titles in the no-audio queue).** Audio-quality work now, not
+   tier work, but the biggest single audio lead: an accept-and-discard node gets past opens,
+   real MIDI needs timidity assets.
+5. **Lock in the wins.** Record baselines for BareFistFighter (PNG path) and 4WE_GP2x (GLBasic
+   present path) so future changes can't silently regress them, and verify the wave-2 fixes on
+   the native Windows bundle (`bin/magiceyes.exe`): the LD_PRELOAD injection and staleness
+   present are shared code but have only been exercised on the Linux engine.
+
+---
+
 ## 1. Black screen at full speed: 147 titles, still the top group
 
 Two waves of fixes in and the bucket barely moved in *count* because former loader-deaths and
 mmio-spins keep sliding into it as they get further, but its composition is new. None of the
 current members print an error. Known-still-black reproducers: `openggs`, `SmashGp2x02`,
 `supertux-0.1.3-gp2x-v4` (draws its loading screen then goes dark), `GPrina-GP2x_v1.0`,
-`Wiz_Blox`, `freecell2x`, `xcom1/2`. Each needs its own live MCP session: where does it draw,
-and what present signal are we missing. Check the non-PNG image formats first (JPG/BMP through
-SDL_image dlopen the same way libpng did; verify libjpeg actually loads).
+`Wiz_Blox`, `freecell2x`, `xcom1/2`. Check the non-PNG image formats first (attack-order item
+1); whatever remains needs its own live MCP session: where does it draw, and what present
+signal are we missing.
 
 Filter: `label:"group: black-screen"`
 
 ## 2. Never rendered a frame, cause unknown: 110 titles
 
-Batch-clustered from the previous sweep's logs (scratchpad recipe; re-run against this sweep's
-`results/*/NNN_*/`): **31 silent exit-1**, **22 guest faults**, **18 silent exit-0**, **16
-silent exit-255**, **13 print "Usage:"** (their device launcher script passes CLI args the
-harness drops; teach `run_title.py`/the loader to parse the accompanying `.gpe` script for
-args), 3 residual exit-127. The silent ones need `ME_DEBUG=1 ME_SYSLOG=1` re-runs; the faults
-need the guard's fault report read per title.
+Batch-clustered from the morning sweep's logs (re-run the clustering against this sweep's
+`results/*/NNN_*/` dirs: read each title's `log.txt` + `stderr.txt` tail, regex-classify, sort
+by class): **31 silent exit-1**, **22 guest faults**, **18 silent exit-0**, **16 silent
+exit-255**, **13 print "Usage:"** (attack-order item 2), 3 residual exit-127. The silent ones
+need `ME_DEBUG=1 ME_SYSLOG=1` re-runs; the faults need the guard's fault report read per title
+(crashes usually share root causes).
 
 Filter: `label:"group: no-frames"`
 
-## 3. Silent titles: 96 render fine with zero audio
+## 3. Silent titles: 97 render fine with zero audio
 
-Every one wrote **zero** audio bytes: an open/init failure, not mixing. As of the silence
-re-grade these no longer cost the `playable` tier (silence may be legitimate), but the
-`no-audio` label remains the audio-work queue. `/dev/sequencer` (MIDI) is touched by 22 titles
-corpus-wide and is still unmodelled; that plus timidity assets is the single biggest known lead
-here. Trace one title's audio init under the MCP server before assuming a cluster.
+Every one wrote **zero** audio bytes: an open/init failure, not mixing. Since the silence
+re-grade these no longer cost the `playable` tier, but the `no-audio` label remains the
+audio-work queue. `/dev/sequencer` (attack-order item 4) is the biggest known lead. Trace one
+title's audio init under the MCP server before assuming a cluster.
 
 Filter: `label:"group: no-audio"`
 
-## 4. Renders but below 20 fps
-
-Halved by the present fixes (many "slow" titles were really present-starved), then trimmed again
-when the playable cutoff moved from 25 to 20 fps. What remains is legitimate slowness. Profile
-(`ME_PROF`) before assuming emulation overhead.
-
-## 5. Wrong picture / flat fill: 23 titles
+## 4. Wrong picture / flat fill: 23 titles
 
 - **Screen holds a second copy of itself** (`FleshChasmer`, `Worship Vector`, `MoveSweep2X`,
   `aimcaanoo`, `GF`): stride/pitch or scanout-width mismatch.
@@ -85,6 +104,12 @@ when the playable cutoff moved from 25 to 20 fps. What remains is legitimate slo
 
 Filter: `label:"visual corruption"` / `label:"flat fill"`
 
+## 5. Renders but below 20 fps: 14 titles
+
+Halved by the present fixes (many "slow" titles were really present-starved), then trimmed
+again when the cutoff moved from 25 to 20 fps. What remains is legitimate slowness. Profile
+(`ME_PROF`) before assuming emulation overhead.
+
 ## 6. Small certain leads
 
 - `113` (OABI indirect syscall) and `117` (SysV `ipc`): one title each (`blocksGP2X-0`,
@@ -92,7 +117,8 @@ Filter: `label:"visual corruption"` / `label:"flat fill"`
 - `/dev/input/mouse/0`: 3 titles blocked outright (208 touch it); mouse-as-device family.
 - The save overlay had a hole: guest paths with doubled slashes (`<dir>//log.txt`) bypassed it
   and wrote into the ROM dir (BareFistFighter appended its log onto the NAS). Fixed in
-  syscalls.c after this sweep ran; verify no other escape paths (relative `./` variants).
+  syscalls.c (commit 6b4b210) after this sweep ran; verify no other escape paths (relative
+  `./` variants), and consider cleaning stray `log.txt` files off the NAS ROM dirs.
 
 ---
 
@@ -104,15 +130,20 @@ Filter: `label:"visual corruption"` / `label:"flat fill"`
   retune thresholds.
 - **Silence is not a defect.** The reported grade treats a silent, full-speed, clean-picture
   title as `playable` (the harness's own `status` still distinguishes `renders`, and
-  `baseline.py` gates on that). The `no-audio` label marks the slice for audio work.
+  `baseline.py` gates on that). The `no-audio` label marks the slice for audio work. The
+  harness cutoff itself is 20 fps as of 8f1c784, so future sweeps' raw `status` will differ
+  slightly from older verdict JSONs at the margin.
 - **Re-running the sweep** (~45 min): `bash tools/test/run_nas_sweep.sh`, then
   `compat_report.py`, `compat_clips.py --out-dir <clone>/clips`, `compat_publish.py --push`,
   `compat_issues.py` (hours; paced; resumable; pass the Windows `gh auth token` as `GH_TOKEN`
-  into WSL). The compat repo's `README.md` summary table is **hand-maintained**; update its
-  numbers too or it drifts.
+  into WSL; `--status <tier>` restricts to a harness-status slice for partial refreshes). The
+  compat repo's `README.md` summary table is **hand-maintained**; update its numbers too or it
+  drifts.
 - **Regression gate before committing engine changes**: `tools/test/smoke.sh` +
   `baseline.py --check` on Payback/Blazar/Vektar (F: paths) **and Deicide 3**
   (`/mnt/f/Roms/GP2X Wiz/Deicide 3/deicide3_eng/d3return_en.gpe`, needs
   `ME_GP2X_ROOTFS`/`MAGICEYES_DEVICE=wiz`), engine copied to ext4 first.
 - **Do not write to the top-level `COMPATIBILITY.md`**: hand-curated, commercial-only. The
   generated report is `tools/test/CORPUS_SWEEP.md`; don't hand-edit that either.
+- **No em dashes in prose.** Zach's preference, project-wide: use commas, colons, or
+  parentheses.
