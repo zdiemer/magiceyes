@@ -60,14 +60,19 @@ across the **972 gradable titles**.
      a black run deterministic under the replay harness.
    - **Zelda ROTH (GP2X)**: parks forever on its intro splash (loop paced, audio thread
      pumping zeros, no .mid ever opened) and the splash renders doubled horizontally.
-3. **The glibc heap-corruption cluster from the no-frames re-triage (7+ titles, one likely
-   engine bug).** The re-triage (below) shows Abbaye x2, rotate/patissier_c_ko, supertux
-   (Caanoo), OpenBOR_v2.1933, pacmame, scummvm-alpha, Wiztern all dying in glibc heap checks
-   ("double free or corruption", "free(): invalid pointer", sYSMALLOc top-chunk assertion).
-   One freed pointer was ASCII text (0x6c657435): something overwrites heap metadata with
-   string data. OpenBOR + Wiztern are the known "flakes that render solo": likely this
-   corruption landing in different places per run. Suspects: brk() contiguity/overlap with
-   mmap, another struct-layout truncation, or an engine write clobbering guest heap.
+3. **The glibc heap-corruption cluster: HALF SOLVED (commit c0b77fc).** Root cause for the
+   core class: fakesdl's SDL_FreeSurface freed the VIDEO SURFACE, which real SDL 1.2
+   silently refuses to free and games legitimately "free" in shutdown/mode-change paths.
+   Fixed + rootfs-eabi restaged: Abbaye_caanoo renders, Abbaye_v3 grades PLAYABLE 57fps,
+   Propis unregressed. Remaining split:
+   - **OABI half (OpenBOR_v2.1933, pacmame, scummvm-alpha, Wiztern) needs the same one-line
+     fix but the OABI shim is UNBUILDABLE** (GPH SDK gcc-4.0.2 rejects fakesdl.c's C99/
+     pthreads). Solving the OABI shim rebuild now has a concrete 4+-title payoff, plus every
+     future shim fix.
+   - **supertux (Caanoo) is a different engine bug**: malloc sYSMALLOc top-chunk assertion
+     immediately after SetVideoMode: brk()-contiguity/overlap suspect. Own session.
+   - rotate/patissier_c_ko now runs to its own clean exit; only its exit cleanup still
+     double-frees (low priority).
 4. **cgenius, second half.** Wave 5 fixed a real engine bug here (79e5457: sigsuspend
    returned for dropped signals and leaked the suspend mask -> lost LinuxThreads restarts;
    load went 26% -> 72%). The REMAINING stall is a handoff deadlock on the process-global
