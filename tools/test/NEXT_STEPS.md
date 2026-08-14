@@ -60,15 +60,55 @@ across the **972 gradable titles**.
      a black run deterministic under the replay harness.
    - **Zelda ROTH (GP2X)**: parks forever on its intro splash (loop paced, audio thread
      pumping zeros, no .mid ever opened) and the splash renders doubled horizontally.
-3. **cgenius loader stall at 42%** (untouched this wave). 9 threads: main polls WIZ_ptimer,
-   loader thread parked in a LinuxThreads lock suspension, t108 reads dev fd 0x38a forever.
-   ME_SIGLOG + mutexwatch session. NOTE: dev-fd read spins now have precedent: malvado's
-   tid102 read /dev/dsp 1024B forever, harmlessly; check what fd 0x38a actually is (the
-   malvado session mapped its whole 900-series with `trace` in seconds).
-4. **No-audio queue.** After the sweep, re-count: MIDI staging may have taken the 22; trace
+3. **The glibc heap-corruption cluster from the no-frames re-triage (7+ titles, one likely
+   engine bug).** The re-triage (below) shows Abbaye x2, rotate/patissier_c_ko, supertux
+   (Caanoo), OpenBOR_v2.1933, pacmame, scummvm-alpha, Wiztern all dying in glibc heap checks
+   ("double free or corruption", "free(): invalid pointer", sYSMALLOc top-chunk assertion).
+   One freed pointer was ASCII text (0x6c657435): something overwrites heap metadata with
+   string data. OpenBOR + Wiztern are the known "flakes that render solo": likely this
+   corruption landing in different places per run. Suspects: brk() contiguity/overlap with
+   mmap, another struct-layout truncation, or an engine write clobbering guest heap.
+4. **cgenius, second half.** Wave 5 fixed a real engine bug here (79e5457: sigsuspend
+   returned for dropped signals and leaked the suspend mask -> lost LinuxThreads restarts;
+   load went 26% -> 72%). The REMAINING stall is a handoff deadlock on the process-global
+   libstdc++ allocator/string mutex (main parks in std::string::_S_construct, loader in a
+   __gnu_cxx::__scoped_lock dtor; ME_SIGLOG restart accounting is BALANCED, stall %% random,
+   throttle-independent). Next: breakpoint pthread_mutex_lock to find the hot mutex address,
+   then ME_MUTEXWATCH its status transitions. May be the true kernel of wave-3's
+   "libstdc++ under LinuxThreads" belief. (Also: fd 0x38a forever-reads = a second /dev/dsp
+   open, benign, same as malvado.)
+5. **BennuGD "See COPYING" family (5 titles)**: Liquid Counter, runner, RailroadRampage x2
+   (Wiz+Caanoo), EpicRocks_Wiz, SmallBall_Wiz: bgdi prints its license banner then exits 255:
+   probably not finding/being handed its .dcb argument (launcher arg passing) or a missing
+   module. One runtime, five titles.
+6. **No-audio queue.** After the sweep, re-count: MIDI staging may have taken the 22; trace
    one remaining silent title's audio init under MCP before assuming a cluster.
-5. **`no-frames` re-triage** with /dev/tty fatal surfacing + the new /proc fakes: deaths that
-   were silent in wave 3/4 now name themselves in log_tail.
+
+## No-frames re-triage results (2026-08-13 wave 5, full table ~/me-triage5/TRIAGE_TABLE.txt)
+
+All 69 titles re-run solo on the wave-5 engine with tty/proc surfacing; nearly every death
+now names itself. Rough clusters:
+- **Missing game data (~20, not ours)**: quake1/quake x3 (shareware pak + mods), hheretic/
+  hhexen/rott x2/wolf4sdl x2 (no WADs), OpenTTD x3 (sample.cat), warcraft (data.war),
+  reminiscence, srb2, onscripter, openjazz-caanoo (PANEL.000), smw (maps), uqm-0.5.0.
+- **glibc heap corruption (7)**: see attack item 3.
+- **BennuGD license-banner exits (5)**: see attack item 5.
+- **EABI shim media gaps**: freedroid (JPEG load fail), tmw (SDL_ttf font load fail),
+  chroma-wiz ("Unable to open font", now grades black).
+- **Terminal/curses (2)**: gp2x-rogue ("Error opening terminal: linux"), nethack-ascii
+  ("Unable to forkpty") -- needs TERM/terminfo, forkpty.
+- **Singles**: HigherOrLower dies UC_ERR_INSN_INVALID pc=0011df54 insn=00004ff0 (Thumb
+  interworking suspect); BermudaS x2 opens a literal backslash path '..\bermuda.ovr' (check
+  whether the dump carries the file under a translatable name); pykaraoke needs its bundled
+  python runtime; CloneKeen2X/Hexen2X GP2X tails are gp2xmenu symbol-lookup noise AFTER the
+  game already quit (the game's own exit reason still unknown).
+- **Still-silent 0fps parks (~12)**: abduction, garden2x, gravityforce2x, kobo, Echo,
+  openttd_c, quake2-caanoo, sdllopan, zlocada, ArtShot, Zombiepox, nethack06 -- next probe
+  is per-title threads/log under MCP.
+Note for the harness: a bare engine copy on ext4 resolves NO rootfs (exe-relative and
+cwd-relative candidates both miss) and every dynamic title dies "interpreter not found" --
+export ME_GP2X_ROOTFS + ME_GP2X_ROOTFS_EABI explicitly in any hand-rolled batch, like
+run_nas_sweep's staged layout does implicitly.
 
 ## Smaller certain leads (unchanged from wave 4)
 
