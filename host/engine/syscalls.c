@@ -18,14 +18,51 @@ void me_host_tmpdir(char *out, size_t cap) {
     me_paths_dir(ME_PATH_CACHE, out, cap);
 }
 
-/* Redirect guest writes/reads under /mnt/tmp and /tmp into the host scratch dir (the GPEComp
-   stub writes its decompressed payload to /mnt/tmp/<name>_tmp). Identity on Linux, where those
-   paths exist for real; on Windows there is no /mnt/tmp, so map it to %TEMP%\magiceyes. */
-void rewrite_guest_path(const char *in, char *out, size_t cap) {
+/* Redirect guest writes/reads under /mnt/tmp into the host scratch dir (the GPEComp
+   stub writes its decompressed payload to /mnt/tmp/<name>_tmp). Identity on Linux, where the
+   path exists for real; on Windows there is no /mnt/tmp, so map it to the cache dir. */
+/* Guest /tmp is a fresh per-boot tmpfs on real hardware. Mapping it to the SHARED host /tmp
+   (or a persistent cache dir) leaked state across runs AND titles: a stale zero-byte
+   /tmp/music.raw from a two-day-old run flipped Zelda ROTH's patched SDL_mixer into its
+   external-render music path ("ERROR: Mix_OpenAudio: Could not open requested file", music
+   permanently dead), and two parallel sweep jobs could race on the same /tmp names. Serve a
+   per-process scratch dir under the cache root instead, with its top level emptied on first
+   use (a recycled pid must not resurrect old scratch). */
+static void guest_tmp_base(char *out, size_t cap) {
+    static char base[PATH_MAX]; static int inited = 0;
+    if (!inited) {
+        char c[PATH_MAX]; me_host_tmpdir(c, sizeof c);
+        snprintf(base, sizeof base, "%s%cgtmp-%d", c,
 #ifdef _WIN32
+                 '\\',
+#else
+                 '/',
+#endif
+                 (int)getpid());
+        ME_MKDIR(base);
+        DIR *d = opendir(base);
+        if (d) { struct dirent *e;
+                 while ((e = readdir(d))) {
+                     if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                     char p[PATH_MAX]; snprintf(p, sizeof p, "%s/%s", base, e->d_name);
+                     remove(p);
+                 } closedir(d); }
+        inited = 1;
+    }
+    snprintf(out, cap, "%s", base);
+}
+void rewrite_guest_path(const char *in, char *out, size_t cap) {
     const char *rest = NULL;
+    if (!strncmp(in, "/tmp/", 5)) {
+        char base[PATH_MAX]; guest_tmp_base(base, sizeof base);
+        snprintf(out, cap, "%s/%s", base, in + 5);
+#ifdef _WIN32
+        for (char *q = out + strlen(base); *q; q++) if (*q == '/') *q = '\\';
+#endif
+        return;
+    }
+#ifdef _WIN32
     if (!strncmp(in, "/mnt/tmp/", 9)) rest = in + 9;
-    else if (!strncmp(in, "/tmp/", 5)) rest = in + 5;
     if (rest) {
         char base[PATH_MAX]; me_host_tmpdir(base, sizeof base);
         char fixed[PATH_MAX]; size_t j = 0;
@@ -35,6 +72,8 @@ void rewrite_guest_path(const char *in, char *out, size_t cap) {
         snprintf(out, cap, "%s\\%s", base, fixed);
         return;
     }
+#else
+    (void)rest;
 #endif
     snprintf(out, cap, "%s", in);
 }
@@ -1389,6 +1428,26 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (getenv("ME_OPENLOG")) { char b[1300]; snprintf(b, sizeof b,
             "OPEN '%s' [%s] flags=%x -> %ld%s\n", p, hp, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
         if (r >= 0) { g_self->enoent_streak = 0; hostfd_track_path((int)r, path_ino(hp), hp); return r; }
+        /* GP2X SD-root timidity convention: MIDI ports ship a cwd timidity.cfg whose
+           instrument lines point at ../timidity/<name>.pat -- a shared patch pack the user
+           was meant to unzip to the SD root, absent from most dumps, so the title's music
+           is silent (Zelda ROTH prints "Mix_OpenAudio: Could not open requested file").
+           On ENOENT of a path whose leaf sits in a timidity/ dir, retry the donor pack in the rootfs
+           (usr/share/midi/gp2xpats, harvested from the zelda-roth-olb-3t Caanoo bundle,
+           which ships the canonical names: piano.pat, bass.pat, ...). */
+        if (e2 == ENOENT) {
+            const char *tm = strstr(p, "timidity/");
+            if (tm && tm[9] && !strchr(tm + 9, '/')) {
+                char gp[PATH_MAX]; snprintf(gp, sizeof gp, "/usr/share/midi/gp2xpats/%s", tm + 9);
+                char h2[PATH_MAX]; resolve_io(gp, 0, h2, sizeof h2);
+                r = open(h2, host_open_flags((int)a1), a2);
+                if (r >= 0) {
+                    if (getenv("ME_OPENLOG")) fprintf(stderr, "OPEN '%s' -> pack [%s] %ld\n", p, h2, r);
+                    g_self->enoent_streak = 0;
+                    hostfd_track_path((int)r, path_ino(h2), h2); return r;
+                }
+            }
+        }
         /* a worker tight-looping on missing files (the music worker on absent *.ama):
            back it off with a real sleep so it doesn't spin hot. */
         if (e2 == ENOENT && ++g_self->enoent_streak > 3) {

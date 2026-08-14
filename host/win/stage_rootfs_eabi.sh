@@ -172,5 +172,21 @@ elif [ -d "$REF/usr" ]; then
   cp -a "$REF/usr/." "$DST/usr/" 2>/dev/null || { mkdir -p "$DST/usr"; cp -a "$REF/usr/." "$DST/usr/"; }
 fi
 
+# MIDI instrument patches: SDL_mixer's timidity reads /etc/timidity.cfg -> freepats (the
+# no-audio MIDI cluster), and GP2X-convention ports reference a shared SD-root timidity/
+# pack by name (piano.pat, bass.pat, ...) which the engine falls back to at
+# usr/share/midi/gp2xpats on ENOENT (syscalls.c). freepats is GPL (Debian package
+# "freepats"); the gp2xpats donor set was harvested from the zelda-roth-olb-3t Caanoo
+# bundle. Stage both when a previously-staged copy exists beside this rootfs.
+for MIDISRC in "$REPO/assets/rootfs/0/rootfs/usr/share/midi" "$REPO/assets/rootfs-win/usr/share/midi"; do
+  if [ -d "$MIDISRC/freepats" ]; then
+    mkdir -p "$DST/usr/share/midi"
+    cp -a "$MIDISRC/freepats" "$DST/usr/share/midi/" 2>/dev/null || true
+    [ -d "$MIDISRC/gp2xpats" ] && cp -a "$MIDISRC/gp2xpats" "$DST/usr/share/midi/" 2>/dev/null || true
+    [ -f "$DST/etc/timidity.cfg" ] || { mkdir -p "$DST/etc"; printf 'dir /usr/share/midi/freepats\nsource /usr/share/midi/freepats/freepats.cfg\n' > "$DST/etc/timidity.cfg"; }
+    break
+  fi
+done
+
 echo "done. $(ls "$DST/lib" | wc -l) libs in $DST/lib"
 echo "ME_GP2X_ROOTFS_EABI=$DST  (auto-found as assets/rootfs-eabi; selected by PT_INTERP)"
