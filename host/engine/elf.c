@@ -19,6 +19,7 @@ static uint32_t g_phdr_va, g_phnum, g_phent, g_elf_entry;
    0 for a static binary. AT_ENTRY = the program's entry (NOT the interpreter's). */
 uint32_t g_at_base = 0;
 int g_is_dynamic = 0;
+int g_interp_so3 = 0;   /* PT_INTERP is ld-linux.so.3 (EABI rootfs); 0 = OABI ld-linux.so.2 */
 
 /* The interpreter (ld-linux.so.2, ET_DYN) is loaded at this fixed base — above the mmap
    arena (0x40000000..0x70000000) and below the stack (0x80000000-8MB). ld.so + its bss are
@@ -182,6 +183,7 @@ uint32_t load_elf(const char *path) {
     }
     g_device = dev;
     g_caanoo_dev = (dev == 2);   /* the shim's per-device joystick map keys on this */
+    g_interp_so3 = strstr(interp, "ld-linux.so.3") != NULL;
     if (g_trace) fprintf(stderr, "  device=%d (%s) interp=%s\n", dev,
                          dev == 2 ? "Caanoo" : dev == 1 ? "Wiz" : "GP2X",
                          interp[0] ? interp : "(static)");
@@ -248,18 +250,21 @@ uint32_t setup_stack(int argc, char **argv) {
     envs[nenv++] = "LANG=C";
     envs[nenv++] = "TMPDIR=/tmp";
     if (g_is_dynamic) {
-        /* Rootfs first so the shim keeps shadowing libSDL; then the game's own dir + common
-           lib-subdir names. Many titles SHIP satellite libs beside the .gpe (wizpong/uqm ship
-           libmikmod.so.2, jump_n_blob ships lib/libSDL_gfx.so.13) and rely on the launcher
-           script's LD_LIBRARY_PATH=. on real hardware -- without these entries ld.so aborts
-           with "cannot open shared object" -> exit 127. Relative entries resolve against cwd,
+        /* Lib search order. Many titles SHIP libs beside the .gpe (wizpong/uqm ship
+           libmikmod.so.2, jump_n_blob ships lib/libSDL_gfx.so.13, supertux/openjazz a whole
+           SDL+libpng14 stack, cgenius/alephone a gcc-4.2 libstdc++) and rely on the launcher
+           script's LD_LIBRARY_PATH=. on real hardware. Relative entries resolve against cwd,
            which main() has already chdir'd to the game root. g_script_libdirs carries extra
            runtime dirs the launcher script named or the loader resolved into (a BennuGD
            bgdi's own dir, so its libbgdrtm.so and module .so satellites resolve).
-           NOTE the Wiz "GCC_4.2.0 not found" cluster is NOT solved by reordering game dirs
-           first (tried: it fixes those 12 but silently breaks titles that need the rootfs
-           SDL family to win, e.g. instead's IMG_isBMP); it is solved by upgrading the staged
-           rootfs libgcc_s/libstdc++ themselves (see tools/gp2x/upgrade_wiz_gcclibs.sh). */
+           ORDER: OABI titles get game dirs FIRST -- that is the Wiz firmware's own default
+           (/etc/profile: LD_LIBRARY_PATH="./:/lib:/usr/local/lib:/usr/lib"), so on device a
+           bundled copy always beat /lib. (The wave-3 experiment that concluded game-first
+           "breaks instead's IMG_isBMP" predates the MAP_FIXED bss-zeroing fix, which is what
+           actually broke unstripped bundled libs; and instead is EABI anyway.) EABI titles
+           keep the rootfs FIRST: the EABI rootfs deliberately shadows libSDL/GLES with our
+           shims (fakesdl/fakegles), and a bundled real Pollux GLES lib winning over the shim
+           would poke unemulated hardware. */
         {
             char extra[PATH_MAX + 600] = "";
             size_t off = 0;
@@ -267,28 +272,9 @@ uint32_t setup_stack(int argc, char **argv) {
                 off += snprintf(extra + off, sizeof extra - off, ":%s", g_launcher_dir);
             if (g_script_libdirs[0])
                 snprintf(extra + off, sizeof extra - off, ":%s", g_script_libdirs);
-            /* A port that ships its OWN libSDL-1.2.so.0 beside the game (supertux/openjazz bundle
-               a full SDL+libpng14+libjpeg stack) must get that stack wholesale: with /lib first the
-               process mixes firmware SDL_image with bundled libpng14 and every image load dies
-               ("Incompatible libpng version" -> exits to menu -> graded black). Only a bundled
-               libSDL promotes the game dirs; satellite-only bundles (instead's SDL_image) keep the
-               rootfs family first, which the wave-3 reorder experiment showed they need. */
-            int bundled_sdl = 0;
-            {
-                const char *dirs[] = { ".", "lib", "libs",
-                                       g_launcher_dir[0] ? g_launcher_dir : NULL,
-                                       g_launch_cwd[0] ? g_launch_cwd : NULL };
-                char p[PATH_MAX + 32];
-                struct stat st;
-                for (int i = 0; i < (int)(sizeof dirs / sizeof dirs[0]); i++)
-                    if (dirs[i]) {
-                        snprintf(p, sizeof p, "%s/libSDL-1.2.so.0", dirs[i]);
-                        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) { bundled_sdl = 1; break; }
-                    }
-            }
             snprintf(envbuf[nenv], sizeof envbuf[0],
-                     bundled_sdl ? "LD_LIBRARY_PATH=.:lib:libs%s:/lib:/usr/lib"
-                                 : "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs%s", extra);
+                     !g_interp_so3 ? "LD_LIBRARY_PATH=.:lib:libs%s:/lib:/usr/lib"
+                                   : "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs%s", extra);
             envs[nenv] = envbuf[nenv]; nenv++;
         }
         /* Preload zlib: the firmware's /lib/libpng.so.3 carries NO DT_NEEDED for libz (on the

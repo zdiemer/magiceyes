@@ -1098,6 +1098,20 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                                                        (there may be several 0xC0000000 maps) */
         return;
     }
+    /* Pollux TIMER0 count @0x1980 (Wiz/Caanoo): homebrew "ptimer" code latches the count by
+       writing 0x4B to TMRCONTROL @0x1988, then reads a free-running microsecond counter here
+       (cgenius WIZ_ptimer_get_ticks_ms; malvado's Fenix runtime). Zeros froze their pacing
+       loops (cgenius load stuck at 0.0% with the resource loader polling ticks forever). Model
+       a 1 MHz tick, the rate wiz homebrew configures. */
+    if (off == 0x1980 && (g_device != 0 || g_is_dynamic)) {
+        static double pt0 = 0;
+        struct timeval tv; gettimeofday(&tv, NULL);
+        double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        if (pt0 == 0) pt0 = now;
+        uint32_t us = (uint32_t)((now - pt0) * 1e6);
+        uc_mem_write(uc, (uint32_t)addr, &us, 4);
+        return;
+    }
     /* GPIOB pin-level @ 0x1182: bit 4 is the LCD VSYNC line, bit 5 HSYNC. rlyeh-minlib
        titles busy-wait for a rising edge of bit 4 as their only frame pacing, so the bit
        must genuinely toggle or they spin forever (the corpus "mmio-spin" cluster: the
