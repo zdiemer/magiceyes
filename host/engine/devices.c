@@ -1103,7 +1103,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
        (cgenius WIZ_ptimer_get_ticks_ms; malvado's Fenix runtime). Zeros froze their pacing
        loops (cgenius load stuck at 0.0% with the resource loader polling ticks forever). Model
        a 1 MHz tick, the rate wiz homebrew configures. */
-    if (off == 0x1980 && (g_device != 0 || g_is_dynamic)) {
+    if (off == 0x1980 && (g_device != 0 || g_is_dynamic) && !getenv("ME_NO_PTIMER")) {
         static double pt0 = 0;
         struct timeval tv; gettimeofday(&tv, NULL);
         double now = tv.tv_sec + tv.tv_usec * 1e-6;

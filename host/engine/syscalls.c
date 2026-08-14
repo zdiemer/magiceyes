@@ -433,7 +433,7 @@ static int save_overlay_resolve(const char *guest, int write_intent, char *out, 
            dir" after two successful mkdirs). Claim it only when the ROM does NOT have the same
            dir: for a dir present in both, the ROM view keeps directory listings complete (the
            overlay is not a union mount). */
-        if (S_ISDIR(s.st_mode)) {
+        if (S_ISDIR(s.st_mode) && !getenv("ME_NO_OVLDIR")) {
             char orig[PATH_MAX]; struct stat rs;
             resolve_path(guest, orig, sizeof orig);
             if (stat(orig, &rs) != 0) return 1;

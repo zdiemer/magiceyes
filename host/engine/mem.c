@@ -460,21 +460,25 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
                bit15 of DPC0 @0x308c / DPC1 @0x348c) and return a wrong-size surface ->
                SDL_video.c "Video mode smaller than requested". Pre-set the primary-LCD DPC
                as ENABLED and both MLCSCREENSIZEs to the 320x240 panel. */
-            if (g_device != 0 || g_is_dynamic) {
+            /* Presets are per-SILICON: the same offsets are different registers on MMSP2 vs
+               Pollux, so a GP2X-badged dynamic title must NOT get the Pollux values sprayed
+               into its MMSP2 window (or vice versa). */
+            if (g_device != 0) {
                 uint32_t scr = ((240u - 1) << 16) | (320u - 1);
                 uint16_t dpc_on = 0x8000;
                 if (len >= 0x4008) uc_mem_write(g_uc, at + 0x4004, &scr, 4);
                 if (len >= 0x4408) uc_mem_write(g_uc, at + 0x4404, &scr, 4);
                 if (len >= 0x3090) uc_mem_write(g_uc, at + 0x308c, &dpc_on, 2);
-            }
-            /* MMSP2 (GP2X) reset state: paeryn SDL reads the panel geometry from DPC_X_MAX
-               @0x2816 / DPC_Y_MAX @0x2818 (value = size-1, mmsp2_regs.h). Zeros made it derive a
-               1x1 physical screen, and its hardware-scaler math (1024*w/phys_width) then sheared
-               every scaled surface (UQM). The LCD is 320x240 progressive. */
-            if (len >= 0x281a) {
-                uint16_t xmax = 320 - 1, ymax = 240 - 1;
-                uc_mem_write(g_uc, at + 0x2816, &xmax, 2);
-                uc_mem_write(g_uc, at + 0x2818, &ymax, 2);
+            } else {
+                /* MMSP2 (GP2X) reset state: paeryn SDL reads the panel geometry from DPC_X_MAX
+                   @0x2816 / DPC_Y_MAX @0x2818 (value = size-1, mmsp2_regs.h). Zeros made it derive
+                   a 1x1 physical screen, and its hardware-scaler math (1024*w/phys_width) then
+                   sheared every scaled surface (UQM). The LCD is 320x240 progressive. */
+                if (len >= 0x281a && !getenv("ME_NO_DPC_PRESET")) {
+                    uint16_t xmax = 320 - 1, ymax = 240 - 1;
+                    uc_mem_write(g_uc, at + 0x2816, &xmax, 2);
+                    uc_mem_write(g_uc, at + 0x2818, &ymax, 2);
+                }
             }
         }
         if (phys == 0xE0020000u && !getenv("ME_GP2X_NOBLIT")) {   /* MMSP2 2D blitter window: trap

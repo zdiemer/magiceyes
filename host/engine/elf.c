@@ -10,6 +10,7 @@
  * from the device rootfs; libSDL is shadowed by our fake-SDL shim). This mirrors qemu-user's
  * loader; the difference is we redirect the lib opens at the rootfs (see syscalls.c). */
 #include "engine.h"
+#include <dirent.h>   /* bundled-libpng probe in setup_stack (works on Linux + MinGW-w64) */
 
 /* program-header info for the auxv (AT_PHDR/PHENT/PHNUM) — glibc's static-TLS setup
    reads the phdrs via AT_PHDR to find PT_TLS; without it, __thread/locale/stdio init is
@@ -272,9 +273,10 @@ uint32_t setup_stack(int argc, char **argv) {
                 off += snprintf(extra + off, sizeof extra - off, ":%s", g_launcher_dir);
             if (g_script_libdirs[0])
                 snprintf(extra + off, sizeof extra - off, ":%s", g_script_libdirs);
+            int gamefirst = !g_interp_so3 && !getenv("ME_LIBORDER_ROOTFS_FIRST");
             snprintf(envbuf[nenv], sizeof envbuf[0],
-                     !g_interp_so3 ? "LD_LIBRARY_PATH=.:lib:libs%s:/lib:/usr/lib"
-                                   : "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs%s", extra);
+                     gamefirst ? "LD_LIBRARY_PATH=.:lib:libs%s:/lib:/usr/lib"
+                               : "LD_LIBRARY_PATH=/lib:/usr/lib:.:lib:libs%s", extra);
             envs[nenv] = envbuf[nenv]; nenv++;
         }
         /* Preload zlib: the firmware's /lib/libpng.so.3 carries NO DT_NEEDED for libz (on the
@@ -291,19 +293,45 @@ uint32_t setup_stack(int argc, char **argv) {
            (sopwith_camel: lazy PLT bind of __divsi3 mid-game -> "symbol lookup error" after the
            first frames drew, graded "black"). The staged Wiz libSDL neither needs libgcc_s nor
            exports the helpers, so recreate the device's global scope the same way as zlib. */
+        /* And libpng: the firmware SDL_image dlopens "libpng.so.3" for EVERY image it loads;
+           a preloaded copy makes each dlopen a soname match against the already-loaded map,
+           skipping the whole LD_LIBRARY_PATH walk (3000+ failed NAS opens for BareFistFighter).
+           libz must precede libpng in the list (libpng binds zlib symbols from it). */
         {
-            static const char *pre[] = { "/lib/libz.so.1", "/lib/libgcc_s.so.1" };
+            static const char *pre[] = { "/lib/libz.so.1", "/lib/libgcc_s.so.1",
+                                         "/lib/libpng.so.3" };
+            /* A title that SHIPS its own libpng (supertux bundles libpng14) must not get the
+               firmware libpng preloaded over it: the preload's unversioned png symbols would win
+               the global scope and re-create the exact mixed-stack image failures the bundled
+               copy exists to avoid. Probe the game dirs once. */
+            int game_libpng = 0;
+            {
+                const char *dirs[] = { ".", "lib", "libs",
+                                       g_launcher_dir[0] ? g_launcher_dir : NULL,
+                                       g_launch_cwd[0] ? g_launch_cwd : NULL };
+                for (int i = 0; i < (int)(sizeof dirs / sizeof dirs[0]) && !game_libpng; i++) {
+                    if (!dirs[i]) continue;
+                    DIR *dp = opendir(dirs[i]);
+                    if (!dp) continue;
+                    struct dirent *de;
+                    while ((de = readdir(dp)))
+                        if (!strncmp(de->d_name, "libpng", 6)) { game_libpng = 1; break; }
+                    closedir(dp);
+                }
+            }
             char phost[PATH_MAX];
             struct stat ps;
             size_t off = (size_t)snprintf(envbuf[nenv], sizeof envbuf[0], "LD_PRELOAD=");
             int have = 0;
-            for (int i = 0; i < (int)(sizeof pre / sizeof pre[0]); i++)
+            for (int i = 0; i < (int)(sizeof pre / sizeof pre[0]); i++) {
+                if (game_libpng && strstr(pre[i], "libpng")) continue;
                 if (me_rootfs_resolve(pre[i], phost, sizeof phost) &&
                     stat(phost, &ps) == 0 && S_ISREG(ps.st_mode)) {
                     off += (size_t)snprintf(envbuf[nenv] + off, sizeof envbuf[0] - off,
                                             "%s%s", have ? " " : "", pre[i]);
                     have = 1;
                 }
+            }
             if (have) { envs[nenv] = envbuf[nenv]; nenv++; }
         }
         /* ld.so diagnosis: ME_LD_DEBUG=libs (or =all) forwards as the guest's LD_DEBUG, so the
@@ -367,9 +395,14 @@ uint32_t setup_stack(int argc, char **argv) {
     sp -= 16; sp &= ~15u; uint32_t at_random = sp;
     uint8_t rnd[16] = {0x4d,0x61,0x67,0x69,0x63,0x45,0x79,0x65,0x73,1,2,3,4,5,6,7};
     uc_mem_write(g_uc, sp, rnd, 16);
-    /* AT_PLATFORM string */
+    /* AT_PLATFORM string. Deliberately EMPTY: ld.so expands every LD_LIBRARY_PATH entry with
+       platform/hwcap subdirs ("v5l", "fast-mult", "half") and probes each expansion per lookup.
+       With game dirs first in the search path those probes are failed opens on the (slow, SMB)
+       game share -- BareFistFighter's SDL_image dlopens libpng.so.3 per image and burned its
+       whole first minute in 3000+ NAS opens. No GP2X-era title ships hwcap-split libs, so the
+       expansions can never match; suppress them at the source. */
     sp -= 4; sp &= ~3u; uint32_t at_platform = sp;
-    uc_mem_write(g_uc, sp, "v5l", 4);
+    uc_mem_write(g_uc, sp, "", 1);
 
     /* Full auxv, mirroring qemu-user's create_elf_tables() so glibc's static-TLS +
        stdio/C++ init complete (AT_PHDR is the critical one for PT_TLS; AT_BASE/AT_ENTRY
@@ -384,7 +417,10 @@ uint32_t setup_stack(int argc, char **argv) {
         {9 /*AT_ENTRY*/,   g_elf_entry},
         {11/*AT_UID*/,     0}, {12/*AT_EUID*/, 0},
         {13/*AT_GID*/,     0}, {14/*AT_EGID*/, 0},
-        {16/*AT_HWCAP*/,   0x97},   /* armv5te: SWP|HALF|THUMB|FAST_MULT|EDSP */
+        {16/*AT_HWCAP*/,   0x85},   /* armv5te: SWP|THUMB|EDSP. HALF and FAST_MULT are omitted:
+                                       they are "important hwcaps" that make ld.so probe
+                                       half/fast-mult library subdirs on every lookup (see the
+                                       AT_PLATFORM note above); no title keys behavior on them. */
         {17/*AT_CLKTCK*/,  100},
         {15/*AT_PLATFORM*/,at_platform},
         {23/*AT_SECURE*/,  0},
