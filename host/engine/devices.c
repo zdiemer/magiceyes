@@ -1137,6 +1137,41 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         uc_mem_write(uc, (uint32_t)addr, &us, 4);
         return;
     }
+    /* Pollux GPIO pads @0xA000 (Wiz/Caanoo): raw-hardware titles read the button pads
+       directly -- GPIOB PAD @0xA058, GPIOC PAD @0xA098 (malvado's Fenix wizJoystickRead does
+       ldrh from both, combines (C<<16)|B and inverts). The pads are ACTIVE-LOW, so serving
+       the mapped-RAM zeros meant EVERY button read as pressed: malvado blew through its title
+       screen ("Until key(_enter)") straight into "If key(_space) exit(0)" and self-exited
+       black. Bit layout recovered from fxi's key-equivalence jump table (fxi_key):
+       word = ~((GPIOC<<16)|GPIOB): LEFT=16 RIGHT=17 UP=18 DOWN=19 A=20 B=21 X=22 Y=23
+       SELECT=8 MENU(START)=9 L=7 R=6 VOL+=10 VOL-=11 (touch/click 27). Idle pins read HIGH. */
+    if ((g_device != 0 || g_is_dynamic) &&
+        (off == 0xa018 || off == 0xa058 || off == 0xa098)) {
+        uint32_t b = g_shm ? g_shm->buttons : 0, w = 0;
+        if (b & 0x0006) w |= 1u << 16;                    /* LEFT | UPLEFT */
+        if (b & 0x0008) w |= (1u << 16) | (1u << 19);     /* DOWNLEFT */
+        if (b & 0x0040) w |= 1u << 17;                    /* RIGHT */
+        if (b & 0x0080) w |= (1u << 17) | (1u << 18);     /* UPRIGHT */
+        if (b & 0x0020) w |= (1u << 17) | (1u << 19);     /* DOWNRIGHT */
+        if (b & 0x0003) w |= 1u << 18;                    /* UP | UPLEFT */
+        if (b & 0x0010) w |= 1u << 19;                    /* DOWN */
+        if (b & (1u << GP2X_A))       w |= 1u << 20;
+        if (b & (1u << GP2X_B))       w |= 1u << 21;
+        if (b & (1u << GP2X_X))       w |= 1u << 22;
+        if (b & (1u << GP2X_Y))       w |= 1u << 23;
+        if (b & (1u << GP2X_SELECT))  w |= 1u << 8;
+        if (b & (1u << GP2X_START))   w |= 1u << 9;       /* Wiz MENU */
+        if (b & (1u << GP2X_L))       w |= 1u << 7;
+        if (b & (1u << GP2X_R))       w |= 1u << 6;
+        if (b & (1u << GP2X_VOLUP))   w |= 1u << 10;
+        if (b & (1u << GP2X_VOLDOWN)) w |= 1u << 11;
+        if (b & (1u << GP2X_CLICK))   w |= 1u << 27;
+        uint32_t v = 0xffffffffu;                          /* GPIOA (0xa018): nothing active */
+        if (off == 0xa058) v = ~(w & 0xffffu) ;
+        if (off == 0xa098) v = ~(w >> 16);
+        uc_mem_write(uc, (uint32_t)addr, &v, size == 4 ? 4 : 2);
+        return;
+    }
     /* GPIOB pin-level @ 0x1182: bit 4 is the LCD VSYNC line, bit 5 HSYNC. rlyeh-minlib
        titles busy-wait for a rising edge of bit 4 as their only frame pacing, so the bit
        must genuinely toggle or they spin forever (the corpus "mmio-spin" cluster: the
