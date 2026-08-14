@@ -425,7 +425,21 @@ static int save_overlay_resolve(const char *guest, int write_intent, char *out, 
         }
         return 1;
     }
-    struct stat s; return (stat(out, &s) == 0 && S_ISREG(s.st_mode)) ? 1 : 0;
+    struct stat s;
+    if (stat(out, &s) == 0) {
+        if (S_ISREG(s.st_mode)) return 1;
+        /* A DIRECTORY the game mkdir'd lands in the overlay too; a read (stat/opendir) of it
+           must see it or the game concludes its own mkdir failed (UQM: "Could not mount config
+           dir" after two successful mkdirs). Claim it only when the ROM does NOT have the same
+           dir: for a dir present in both, the ROM view keeps directory listings complete (the
+           overlay is not a union mount). */
+        if (S_ISDIR(s.st_mode)) {
+            char orig[PATH_MAX]; struct stat rs;
+            resolve_path(guest, orig, sizeof orig);
+            if (stat(orig, &rs) != 0) return 1;
+        }
+    }
+    return 0;
 }
 
 /* FAT-case fallback: the real device ran games off a FAT SD card, which matches names
