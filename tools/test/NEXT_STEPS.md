@@ -1,114 +1,116 @@
 # What the corpus sweep says to fix next
 
-Ranked by how many titles one fix would move. Generated from the fourth 2026-08-13 sweep
-(`tools/test/CORPUS_SWEEP.md`, run after the wave-4 fixes of 1b115d5..80616f9). The tracker
-`zdiemer/magiceyes-compat` still carries wave-3 labels: `compat_issues.py` has NOT been re-run
-for this sweep (it is hours, paced), and neither have clips/publish. Re-run that pipeline before
-using the tracker's per-title labels.
+Ranked by how many titles one fix would move. Baseline data is still the fourth 2026-08-13
+sweep (`tools/test/CORPUS_SWEEP.md`, run at 2036621 after wave 4); the wave-5 fixes below
+landed AFTER it, so their yield is unmeasured until the next sweep. The tracker
+`zdiemer/magiceyes-compat` label refresh (clips/publish/issues against the wave-4 results)
+was started 2026-08-13 evening; the paced issues pass takes ~2 hours, so check it finished
+before re-running any sweep (a new sweep overwrites `~/me-sweep/results` under it).
 
-Current state: **652 playable, 72 ingame, 116 black, 131 incompatible, 1 crashed** across the
-**972 gradable titles**. Wave 3 read 627/49/151/145/0. Wave 4 moved **60 titles up and 32
-down**; of the downs, 27 are `playable -> ingame` (see the Fenix pacing note below) and the
-strict drops spot-checked as parallel-load flakes (OpenBOR_v2.1933 and Wiztern Demo both
-render solo).
+Fourth-sweep state: **652 playable, 72 ingame, 116 black, 131 incompatible, 1 crashed**
+across the **972 gradable titles**.
 
-## Context: what fell in wave 4 (commits 1b115d5, bb41785, 86b70dd, ada1f90, 7e2ce2f, 80616f9)
+## What fell in wave 5 (commits a8c73ec, 4d50210, cfff917, 67d4dcc)
 
-- **MAP_FIXED now zeroes the mapped range** (mem.c). ld.so anon-maps .bss over the tail of the
-  library file image; keeping stale bytes left every UNSTRIPPED shared lib's .bss full of its
-  own string tables. One fix cured: the whole 5-title Toaplan arcade family (Demons World /
-  Out Zone / Snow Bros 2 / Twin Cobra / Zero Wing, the pc=0000d948 cluster), supertux-wiz's
-  silent `realloc(): invalid pointer` abort, openjazz-wiz's fault storm, AND the wave-3
-  "libstdc++ 6.0.9 throws __concurrence_lock_error under LinuxThreads" belief (that was bss
-  junk too; the libstdc++ promotion is safe now, cgenius loads its bundled 6.0.9 cleanly).
-- **OABI lib search is game-dir-first** (elf.c), matching the Wiz firmware's own
-  `/etc/profile` (`LD_LIBRARY_PATH="./:/lib:..."`). Ports shipping their own SDL/libpng/
-  libstdc++ stacks now get them wholesale. EABI titles keep rootfs-first (that rootfs
-  deliberately shadows libSDL/GLES with our shims). Escape hatch: `ME_LIBORDER_ROOTFS_FIRST`.
-- **The dlopen NAS-open storm** that order exposed is fixed at the source (80616f9): auxv
-  AT_PLATFORM is empty + AT_HWCAP drops HALF|FAST_MULT (no ld.so hwcap-subdir fan), and
-  /lib/libpng.so.3 is LD_PRELOADed (after libz) so SDL_image's per-image dlopen soname-matches
-  instantly, GATED on the title not shipping its own libpng (supertux bundles libpng14).
-- **Pollux MLC handled for Wiz + all dynamic titles**: MLCPALETTE0/1 capture (8bpp titles get
-  true colours: both Sopwiths), portrait-scanout un-rotation (SCREENSIZE 240x320 + pitch 480:
-  supertux), FBIOPUTCMAP/GETCMAP + 8bpp vinfo read-back (SDL only grants SDL_HWPALETTE from
-  it). PUT_VSCREENINFO carries NO mode signal (fbcon probes every standard mode with plain
-  PUTs; trusting it doubled Deicide 3's rows).
-- **Pollux TIMER0 @0x1980** (latch 0x4B -> 0x1988) serves 1 MHz; cgenius/Fenix pacing loops
-  froze on zeros. **Repeat 0xC0000000 maps alias** one backing and decode via the containing
-  map. **DPC/MLC reset presets** are per-silicon (Wiz/Caanoo get DPC0-enabled + SCREENSIZE;
-  GP2X gets paeryn's DPC_X_MAX/Y_MAX 319/239).
-- Guest **/dev/tty write+writev now surface to the log** (glibc fatal messages were invisible);
-  save overlay claims mkdir'd DIRECTORIES on reads when the ROM lacks them (UQM's "Could not
-  mount config dir"); syscalls 113 (OABI indirect), 117 (minimal SysV shm), 241; EABI shim
-  restaged (instead's IMG_isBMP exit-127); libgcc_s preloaded (lazy __divsi3 deaths:
-  sopwith_camel's "9 frames then black").
+- **Timer busy-poll spin throttle** (devices.c spin_throttle). Fenix/BennuGD titles frame-pace
+  by busy-polling Pollux TIMER0 ~5.6M reads+writes/s; each poll is a full MMIO hook, so a
+  merely WAITING title burned a whole host core and the parallel sweep starved every job.
+  That was the entire 27-title playable->ingame "low-fps" demotion family: solo they run at
+  exactly their 25fps Fenix target (1 MHz TIMER0 is the right rate). Now ~140k polls/s and
+  10-20% CPU at unchanged fps; the family should re-grade playable in the next sweep.
+  Payback also got faster (26.9 -> ~60fps: its own poll loop had been starving its threads).
+  ME_NO_SPINSLEEP opts out.
+- **Pollux GPIO button pads modeled** (GPIOB @0xA058, GPIOC @0xA098, GPIOA @0xA018; ACTIVE
+  LOW). Unmodeled zeros read as EVERY BUTTON HELD: malvado (Fenix) blew through its title
+  loop into `If key(_space) exit(0)` and self-exited black; run-to-run exit timing varied
+  purely with NAS cache warmth, disguising it as flakiness. Bit layout recovered from the
+  UNSTRIPPED fxi runtime (wizJoystickRead + fxi_key jump table). malvado: fully in-game.
+  Any Wiz raw-hardware title with phantom-input symptoms should be re-checked.
+- **Synthetic /proc/self/stat + /proc/self/maps + /proc/stat**. On Linux the guest read the
+  ENGINE's own procfs: abuse-wiz's Boehm GC parsed the host's 64-bit startstack, truncated
+  it, and its mark phase scanned ~2.5GB above the stack (the wave-4 "fault storm"). abuse-wiz
+  now reaches its intro + full menu. Any title using libgc or parsing /proc/self is suspect
+  for the same class.
+- **Guest /tmp is per-process and fresh** (cache/gtmp-<pid>, emptied on first use). It used
+  to identity-map to the shared host /tmp: a STALE /tmp/music.raw from an old run flipped
+  Zelda ROTH into a broken music mode days later, and parallel sweep jobs could race on
+  /tmp names. Sweep-vs-solo verdict differences from this class are gone.
+- **MIDI instrument assets staged** (assets change, NOT in git: freepats + a gp2xpats donor
+  set in all three rootfses; engine ENOENT fallback for `*/timidity/<name>` paths;
+  stage_rootfs_eabi.sh carries them forward). Targets the ~22-title MIDI-silent cluster in
+  the no-audio group; unverified per-title (every candidate tried had an unrelated blocker),
+  so read the next sweep's audio columns.
 
 ## Recommended attack order
 
-1. **Black screens, 116 titles, still the top group but 35 lighter.** The wave-4 reproducer
-   method (solo MCP session, run_report, /dev/tty surfacing now shows glibc aborts) works;
-   composition is again "titles that got further". Known opens with state captured in memory
-   (`wave4-bss-palette-bundle-fixes`): `malvado` (Fenix: loads everything, pumps audio, exits 0
-   without drawing), `abuse-wiz` (fault storm reading above stack top during its Lisp data
-   load).
-2. **The Fenix/BennuGD pacing family (27 playable -> ingame demotions, all one runtime).** The
-   Pollux timer now PACES these titles instead of letting them free-run, and they grade
-   `low-fps` (echo_caanoo-class was already flagged). Profile one (EpicFreeFall or smallball):
-   if the engine burns the frame budget in emulation overhead they are a perf lead; if the
-   1 MHz timer rate is wrong they may just be running at the wrong speed. `ME_NO_PTIMER`
-   isolates the timer's contribution in one run.
-3. **No-audio queue, 104 titles.** Unchanged analysis: the 22 MIDI titles need timidity assets;
-   trace one non-MIDI silent title's audio init under MCP before assuming a cluster.
-4. **`no-frames`, 69 titles.** With /dev/tty fatal messages now captured, re-triage this group:
-   deaths that were silent in wave 3 now name themselves in log_tail.
-5. **cgenius loader stall at 42%** (was 0% before the timer). 9 threads: main polls
-   WIZ_ptimer in CResourceLoader::process, loader thread parked in a LinuxThreads lock
-   suspension, workers idle. Either a lost restart-signal edge case or a blocked device read
-   (t108 reads dev fd 0x38a forever). ME_SIGLOG + mutexwatch session.
+1. **Re-run the sweep** (after the tracker issues pass finishes; ~50 min:
+   `bash tools/test/run_nas_sweep.sh` then `compat_report.py --results ~/me-sweep/results`).
+   Wave 5 should move: the 27-title Fenix family (ingame -> playable), malvado + abuse-wiz
+   (black -> playable/ingame), possibly other Wiz raw-GPIO and libgc titles, and some of the
+   no-audio MIDI cluster. Then re-rank.
+2. **Black screens remain the top group.** The solo-MCP reproducer method keeps paying:
+   both wave-5 black fixes came from one session each. Fresh leads with state captured
+   (`wave5-spin-gpio-proc-fixes` memory):
+   - **supertux-wiz is a pure heisenbug**: renders IF AND ONLY IF something slows the guest
+     (watchpoint, pchook, host load, the parallel sweep): 9/9 bare solo runs black, every
+     instrumented run rendered. So the sweep grades it playable while solo triage says
+     black: same class as the OpenBOR/Wiztern "parallel-load flake" note. Root is an init
+     race in Ikari's bundled Wiz SDL (SDL-1.2.13 Rotation): its per-frame shadow->hw blit
+     never starts on the fast side. Find that SDL's source (GP32Spain/archive.org) or make
+     a black run deterministic under the replay harness.
+   - **Zelda ROTH (GP2X)**: parks forever on its intro splash (loop paced, audio thread
+     pumping zeros, no .mid ever opened) and the splash renders doubled horizontally.
+3. **cgenius loader stall at 42%** (untouched this wave). 9 threads: main polls WIZ_ptimer,
+   loader thread parked in a LinuxThreads lock suspension, t108 reads dev fd 0x38a forever.
+   ME_SIGLOG + mutexwatch session. NOTE: dev-fd read spins now have precedent: malvado's
+   tid102 read /dev/dsp 1024B forever, harmlessly; check what fd 0x38a actually is (the
+   malvado session mapped its whole 900-series with `trace` in seconds).
+4. **No-audio queue.** After the sweep, re-count: MIDI staging may have taken the 22; trace
+   one remaining silent title's audio init under MCP before assuming a cluster.
+5. **`no-frames` re-triage** with /dev/tty fatal surfacing + the new /proc fakes: deaths that
+   were silent in wave 3/4 now name themselves in log_tail.
 
-## Smaller certain leads
+## Smaller certain leads (unchanged from wave 4)
 
-- `9437188` and `11711` unimplemented syscalls: one title each (11711 = ipc call 11 = MSGSND,
-  so that title wants SysV message queues; 9437188 = 0x900004 = OABI `write`?? decode it from
-  the title's report before implementing).
+- `9437188` and `11711` unimplemented syscalls: one title each (11711 = ipc MSGSND; decode
+  9437188 from the title's report before implementing).
 - `/dev/accel`, `/dev/cx25874` (TV encoder), `/dev/graphics/fb0`: one title each.
-- The 1 crashed title was `chicken-puyopuyo` (CHICKEN Scheme): its sdl.so module needed
-  libSDL_gfx.so.13, absent from the OABI rootfs, and the Scheme error path then host-faulted.
-  A donor libSDL_gfx.so.13 (from jump_n_blob) is now staged into BOTH OABI rootfses and the
-  title plays. STILL OPEN as an engine-robustness lead: the host fault in the error path
-  printed no fault dump at all (exit 70 with empty stderr); reproduce by removing the staged
-  lib.
-- UQM now runs its intro but its hardware-scaled surfaces shear: the paeryn scaler blits
-  through the MESG FIFO (`fio[MESGFIFO]`), which gp2x_blit_exec skips as "fifo-src". FIFO
-  source support would fix UQM and likely several `garbled-visuals` titles.
-- instead (Caanoo) renders but glyphs draw as solid blocks: EABI shim TTF rendering gap.
+- chicken-puyopuyo host-fault-with-no-dump in the Scheme error path: reproduce by removing
+  the staged libSDL_gfx.so.13 donor.
+- UQM hardware-scaled surfaces shear: MESG FIFO-source blits unimplemented; would fix UQM
+  and likely several `garbled-visuals` titles.
+- instead (Caanoo) glyphs draw as solid blocks: EABI shim TTF rendering gap.
+- FBIO_GET_BOARD_NUMBER (`_IOR('D',91)` on /dev/fb) is probed by Wiz Fenix titles; the whole
+  GPH 'D' ioctl map is in assets/caanoo-ref/pollux_fb_ioctl.h if one ever matters.
 
 ## Notes for whoever picks this up
 
-- **The tiers are aggregate truth, not per-title truth.** OpenBOR_v2.1933 and Wiztern Demo
-  graded incompatible in this sweep and render solo. Confirm a single title by running it
-  before concluding anything from its label.
-- **When a title "regresses", diff scret syscall COUNTS first**: black-BareFistFighter showed
-  1350 opens vs 117 reads where the good run showed 10k reads + 9.5k selects; that shape says
-  "still loading", not "broken present", in one look.
-- Bisect escape hatches in the engine: `ME_LIBORDER_ROOTFS_FIRST`, `ME_NO_DPC_PRESET`,
-  `ME_NO_PTIMER`, `ME_NO_OVLDIR`, plus `ME_LD_DEBUG=libs|files|all` forwarding to the guest's
-  ld.so.
-- **The OABI guest shim still cannot be rebuilt** (fakesdl.c has C99/pthread code the SDK
-  gcc-4.0.2 rejects). The EABI shim rebuilds fine (stage_rootfs_eabi.sh) and was restaged in
-  wave 4; if you touch guest/src, restage BOTH the rootfs-eabi AND re-check a Caanoo title.
-- **Re-running the sweep** (~50 min): `bash tools/test/run_nas_sweep.sh`, then
-  `compat_report.py --results ~/me-sweep/results` from the repo root. The publish pipeline
-  (`compat_clips.py`, `compat_publish.py`, `compat_issues.py`; clone at
-  `E:\Code\magiceyes-compat`) was NOT re-run for wave 4 and the compat repo README summary
-  table is hand-maintained; both are stale against this sweep.
+- **The tiers are aggregate truth, not per-title truth**; supertux-wiz is now the canonical
+  example (playable under sweep load, black solo, by mechanism). Confirm a single title by
+  running it before concluding anything from its label.
+- **When a title behaves differently run to run, look for host-state leakage or load
+  sensitivity first**: malvado's "flaky exit" was NAS cache warmth; Zelda's music mode was a
+  stale shared /tmp file; supertux flips on guest speed.
+- **NEVER run another engine workload while baseline.py is timing**: a concurrent 20s
+  run_title tanked Blazar 61->9fps and failed a gate spuriously. Engine on ext4, box quiet.
+- Bisect escape hatches: `ME_LIBORDER_ROOTFS_FIRST`, `ME_NO_DPC_PRESET`, `ME_NO_PTIMER`,
+  `ME_NO_OVLDIR`, `ME_NO_SPINSLEEP`, plus `ME_LD_DEBUG=libs|files|all`.
+- **Fenix titles are debuggable at source level**: the .gpe is a launcher script, the runtime
+  (fxi) is often UNSTRIPPED, and the game's own .prg source ships beside the .dcb. Read them.
+- **The OABI guest shim still cannot be rebuilt** (SDK gcc-4.0.2 rejects fakesdl.c); the EABI
+  shim rebuilds fine (stage_rootfs_eabi.sh). If you touch guest/src, restage rootfs-eabi AND
+  re-check a Caanoo title.
+- **Restaging assets from scratch now also needs the MIDI sets**: freepats (apt-get download
+  freepats; dpkg -x) into usr/share/midi/freepats + /etc/timidity.cfg, and the gp2xpats donor
+  from `zelda-roth-olb-3t_caanoo/game/timidity/` into usr/share/midi/gp2xpats, in ALL THREE
+  rootfses. stage_rootfs_eabi.sh copies them from a sibling rootfs when present.
 - **Regression gate before committing engine changes**: `tools/test/smoke.sh` +
   `baseline.py --check` on Payback/Blazar/Vektar (F: paths), **Deicide 3**
   (`/mnt/f/Roms/GP2X Wiz/Deicide 3/deicide3_eng/d3return_en.gpe`, `MAGICEYES_DEVICE=wiz`),
-  **BareFistFighter + 4WE_GP2x** (NAS), and now **supertux-wiz + Sopwith (Wiz) +
-  sopwith_camel_rc3** (the wave-4 palette/rotation/bundle wins), engine copied to ext4 first.
-- **Do not write to the top-level `COMPATIBILITY.md`**: hand-curated, commercial-only. The
-  generated report is `tools/test/CORPUS_SWEEP.md`; don't hand-edit that either.
+  **BareFistFighter + 4WE_GP2x** (NAS), + Sopwith (Wiz) and sopwith_camel_rc3 spot checks,
+  engine copied to ext4 first. (supertux-wiz is in the spot list but its grade is a coin
+  flip solo: see above; don't chase it as a regression.)
+- **Do not write to the top-level `COMPATIBILITY.md`** (hand-curated, commercial-only) and
+  don't hand-edit `tools/test/CORPUS_SWEEP.md` (generated).
 - **No em dashes in prose.** Zach's preference, project-wide: use commas, colons, or
   parentheses.
