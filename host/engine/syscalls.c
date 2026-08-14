@@ -1840,6 +1840,45 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 285: return LERR(EAGAIN);                   /* accept: never a peer */
     case 286: case 287: case 288: case 295: return 0; /* getsockname/getpeername/socketpair/getsockopt */
     case 293: return 0;                              /* shutdown */
+    case 113:  /* OABI sys_syscall: indirect syscall(nr, ...) -- args shift left one */
+        return sys_dispatch(a0, a1, a2, a3, a4, a5, 0);
+    case 241:  /* sched_setaffinity: single CPU, accept */
+        return 0;
+    case 117: { /* SysV ipc multiplexer: minimal SHM so single-process users work.
+                   ipc(call, first, second, third, ptr, fifth); SHMAT=21 SHMDT=22 SHMGET=23
+                   SHMCTL=24. The GP2X titles that touch this attach a private segment in one
+                   process only, so segments are plain anon guest memory; semaphores/messages
+                   stay unimplemented. */
+        static struct { int used; uint32_t key, size, guest; } seg[8];
+        switch (a0) {
+        case 23: {  /* shmget(key, size, flg) */
+            if (a1 != 0 /*IPC_PRIVATE*/)
+                for (int i = 0; i < 8; i++)
+                    if (seg[i].used && seg[i].key == a1) return i + 1;
+            for (int i = 0; i < 8; i++)
+                if (!seg[i].used) {
+                    seg[i] = (typeof(seg[0])){1, a1, a2 ? a2 : PAGE, 0};
+                    return i + 1;
+                }
+            return LERR(ENOSPC); }
+        case 21: {  /* shmat(id=first, flg=second, raddr@third, shmaddr=ptr) */
+            int i = (int)a1 - 1;
+            if (i < 0 || i >= 8 || !seg[i].used) return LERR(EINVAL);
+            if (!seg[i].guest) {
+                long g = do_mmap(0, seg[i].size, GMAP_ANON, -1, 0);
+                if (g <= 0) return LERR(ENOMEM);
+                seg[i].guest = (uint32_t)g;
+            }
+            if (a3) uc_mem_write(g_uc, a3, &seg[i].guest, 4);
+            return 0; }
+        case 22:    /* shmdt(ptr): keep the mapping (cheap, and re-attach reuses it) */
+        case 24:    /* shmctl: accept IPC_RMID/IPC_STAT-ish calls */
+            return 0;
+        default:
+            me_report(MR_UNIMPL_SYSCALL, (long)(11700 + a0), NULL, g_self ? g_self->last_pc : 0);
+            return LERR(ENOSYS);
+        }
+    }
     default:
         me_report(MR_UNIMPL_SYSCALL, (long)nr, NULL, g_self ? g_self->last_pc : 0);
         if (g_trace)
