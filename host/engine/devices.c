@@ -1073,6 +1073,29 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     uint32_t g; if (phys_to_guest(phys, &g)) { g_flip_active = 1; g_flip_guest = g; }
     g_frame_ready = 1;
 }
+/* Pacing-register spin throttle. Fenix/BennuGD (and some minlib) titles frame-limit by
+   busy-polling a timer or the vsync line millions of times a second (EpicFreeFall measured
+   ~5.6M latch-write+read pairs/s on TIMER0). On hardware that just warms an otherwise idle
+   CPU; under emulation every poll is a full MMIO hook, so a title that is merely WAITING
+   burns a whole host core -- and a parallel sweep starves every job with it (the 27-title
+   playable->ingame demotion family of the fourth 08-13 sweep). When the same thread polls
+   with sub-5us gaps hundreds of times in a row, sleep briefly: the wall-clock the game
+   reads keeps advancing while it sleeps, so pacing stays correct and granularity (~0.5ms)
+   remains far below a frame. Genuine once-per-frame or per-tick reads never reach the
+   streak threshold. ME_NO_SPINSLEEP opts out. */
+static void spin_throttle(double now) {
+    static int disabled = -1;
+    if (disabled < 0) disabled = getenv("ME_NO_SPINSLEEP") != NULL;
+    if (disabled) return;
+    static __thread double last = 0;
+    static __thread int streak = 0;
+    if (now - last < 5e-6) {
+        if (++streak >= 100) { me_usleep(500); streak = 0;
+                               struct timeval tv; gettimeofday(&tv, NULL);
+                               last = tv.tv_sec + tv.tv_usec * 1e-6; return; }
+    } else streak = 0;
+    last = now;
+}
 /* Serve MMSP2 register reads. The free-running microsecond timer (TCOUNT @ 0x0a00)
    must advance or the game's timing/frame loops spin forever. */
 void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
@@ -1092,6 +1115,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                        hz = mhz * 1e6; }
         struct timeval tv; gettimeofday(&tv, NULL);
         double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        spin_throttle(now);
         if (g_tcount_t0 == 0) g_tcount_t0 = now;
         uint32_t us = (uint32_t)((now - g_tcount_t0) * hz);
         uc_mem_write(uc, (uint32_t)addr, &us, 4);   /* serve into the window actually read
@@ -1107,6 +1131,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         static double pt0 = 0;
         struct timeval tv; gettimeofday(&tv, NULL);
         double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        spin_throttle(now);
         if (pt0 == 0) pt0 = now;
         uint32_t us = (uint32_t)((now - pt0) * 1e6);
         uc_mem_write(uc, (uint32_t)addr, &us, 4);
@@ -1122,6 +1147,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (off == 0x1182) {
         struct timeval tv; gettimeofday(&tv, NULL);
         uint64_t us = (uint64_t)tv.tv_sec * 1000000ull + tv.tv_usec;
+        spin_throttle(us * 1e-6);
         uint16_t v = 0; uc_mem_read(uc, (uint32_t)addr, &v, 2);
         v &= (uint16_t)~0x30;
         if (us % 16667u < 1000u) v |= 0x10;   /* in vertical blank */
