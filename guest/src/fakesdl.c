@@ -348,6 +348,14 @@ SDL_Surface *SDL_CreateRGBSurfaceFrom(void *pixels, int w, int h, int depth,
 }
 void SDL_FreeSurface(SDL_Surface *s) {
     if (!s) return;
+    /* Real SDL 1.2 silently refuses to free the video surface (SDL_VideoSurface check in
+       SDL_video.c), and games rely on it: freeing the screen (shutdown paths, mode-change
+       cleanup) is a no-op on hardware. Our shim freed it for real; the surface's memory got
+       recycled and the game's NEXT FreeSurface/use hit freed chunks -- the "glibc detected:
+       double free or corruption" cluster (Abbaye, patissier/rotate, supertux-caanoo,
+       OpenBOR, pacmame, scummvm, Wiztern: watchpoints showed FreeSurface's refcount
+       decrement going 0 -> -1 on already-freed memory). */
+    if (s == g_screen) return;
     if (--s->refcount > 0) return;
     if (s->format) {
         if (s->format->palette) {
