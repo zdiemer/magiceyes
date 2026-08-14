@@ -1,14 +1,19 @@
 # What the corpus sweep says to fix next
 
-Ranked by how many titles one fix would move. Baseline data is still the fourth 2026-08-13
-sweep (`tools/test/CORPUS_SWEEP.md`, run at 2036621 after wave 4); the wave-5 fixes below
-landed AFTER it, so their yield is unmeasured until the next sweep. The tracker
-`zdiemer/magiceyes-compat` label refresh (clips/publish/issues against the wave-4 results)
-was started 2026-08-13 evening; the paced issues pass takes ~2 hours, so check it finished
-before re-running any sweep (a new sweep overwrites `~/me-sweep/results` under it).
+Ranked by how many titles one fix would move. Generated from the FIFTH sweep (2026-08-14
+early morning, run after all wave-5 fixes including 79e5457 sigsuspend and c0b77fc
+FreeSurface): **686 playable, 69 ingame, 86 black, 131 incompatible, 0 crashed** across the
+**972 gradable titles**. Wave 4 read 652/72/116/131/1: net **+34 playable, -30 black**.
 
-Fourth-sweep state: **652 playable, 72 ingame, 116 black, 131 incompatible, 1 crashed**
-across the **972 gradable titles**.
+Confirmed wave-5 movers in this sweep: malvado playable 57.7 (was black), abuse-wiz
+playable 56.0 (was fault storm), Abbaye + Abbaye_v3 playable (were the heap-corruption
+crashes), **cgenius playable on all three platforms** (the sigsuspend fix; the residual
+libstdc++ deadlock did not bite under sweep timing), Zelda_roth_US playable 55.0 (the
+stale-/tmp fix cured its splash hang, not just music), supertux-wiz playable (its usual
+under-load side). The Caanoo Fenix stragglers moved 2-4fps -> 18.3-18.9fps: real, but
+6-job sweep contention still shaves them under the 20fps cutoff (solo they hold 25).
+The wave-4 tracker labels are STALE against this sweep until the clips/publish/issues
+pipeline is re-run.
 
 ## What fell in wave 5 (commits a8c73ec, 4d50210, cfff917, 67d4dcc)
 
@@ -41,26 +46,27 @@ across the **972 gradable titles**.
   the no-audio group; unverified per-title (every candidate tried had an unrelated blocker),
   so read the next sweep's audio columns.
 
-## Recommended attack order
+## Recommended attack order (per the fifth sweep's group table)
 
-1. **Re-run the sweep** (after the tracker issues pass finishes; ~50 min:
-   `bash tools/test/run_nas_sweep.sh` then `compat_report.py --results ~/me-sweep/results`).
-   Wave 5 should move: the 27-title Fenix family (ingame -> playable), malvado + abuse-wiz
-   (black -> playable/ingame), possibly other Wiz raw-GPIO and libgc titles, and some of the
-   no-audio MIDI cluster. Then re-rank.
-2. **Black screens remain the top group.** The solo-MCP reproducer method keeps paying:
-   both wave-5 black fixes came from one session each. Fresh leads with state captured
-   (`wave5-spin-gpio-proc-fixes` memory):
-   - **supertux-wiz is a pure heisenbug**: renders IF AND ONLY IF something slows the guest
-     (watchpoint, pchook, host load, the parallel sweep): 9/9 bare solo runs black, every
-     instrumented run rendered. So the sweep grades it playable while solo triage says
-     black: same class as the OpenBOR/Wiztern "parallel-load flake" note. Root is an init
-     race in Ikari's bundled Wiz SDL (SDL-1.2.13 Rotation): its per-frame shadow->hw blit
-     never starts on the fast side. Find that SDL's source (GP32Spain/archive.org) or make
-     a black run deterministic under the replay harness.
-   - **Zelda ROTH (GP2X)**: parks forever on its intro splash (loop paced, audio thread
-     pumping zeros, no .mid ever opened) and the splash renders doubled horizontally.
-3. **The glibc heap-corruption cluster: HALF SOLVED (commit c0b77fc).** Root cause for the
+1. **No-audio, 107 titles, now the TOP group** and untouched by the MIDI staging (104 -> 107:
+   the staged freepats did not move it). First step is a verification session, not a fix:
+   pick one silent MIDI title from the sweep (audio column dash + ships .mid) and trace its
+   audio init under MCP; find whether its SDL_mixer ever reads /etc/timidity.cfg, uses a
+   local cfg (Zelda-style ../timidity, now served by the ENOENT fallback), or fails earlier.
+   Then split the 107 by mechanism before assuming clusters.
+2. **Black screens, 86 titles.** The solo-MCP reproducer method keeps paying (all of wave 5's
+   black fixes came from single sessions). Standing lead with full state captured
+   (`wave5-spin-gpio-proc-fixes` memory): **supertux-wiz is a pure heisenbug**: renders iff
+   something slows the guest (9/9 bare solo runs black, every instrumented run rendered, the
+   loaded sweep grades it playable). Root is an init race in Ikari's bundled Wiz SDL
+   (SDL-1.2.13 Rotation): its per-frame shadow->hw blit never starts on the fast side. Find
+   that SDL's source (GP32Spain/archive.org) or make a black run deterministic under the
+   replay harness. Beyond it: fresh reproducer sessions on the remaining 86.
+3. **low-fps, 40 titles**: largely the Caanoo Fenix/BennuGD family now at 18.3-18.9fps under
+   6-job sweep load (25fps solo, target met). Options: shave engine overhead further, run
+   the sweep at fewer jobs, or grade these as the sweep-load artifacts they are. The 3-4fps
+   members (jump_n_blob, purito, Hamster's 3D) are genuinely heavy: profile one.
+4. **The glibc heap-corruption cluster: HALF SOLVED (commit c0b77fc).** Root cause for the
    core class: fakesdl's SDL_FreeSurface freed the VIDEO SURFACE, which real SDL 1.2
    silently refuses to free and games legitimately "free" in shutdown/mode-change paths.
    Fixed + rootfs-eabi restaged: Abbaye_caanoo renders, Abbaye_v3 grades PLAYABLE 57fps,
@@ -73,7 +79,9 @@ across the **972 gradable titles**.
      immediately after SetVideoMode: brk()-contiguity/overlap suspect. Own session.
    - rotate/patissier_c_ko now runs to its own clean exit; only its exit cleanup still
      double-frees (low priority).
-4. **cgenius, second half.** Wave 5 fixed a real engine bug here (79e5457: sigsuspend
+5. **cgenius, second half (now LATENT: all three cgenius builds grade playable in the fifth
+   sweep, so the residual race did not bite under sweep timing: keep for robustness).**
+   Wave 5 fixed a real engine bug here (79e5457: sigsuspend
    returned for dropped signals and leaked the suspend mask -> lost LinuxThreads restarts;
    load went 26% -> 72%). The REMAINING stall is a handoff deadlock on the process-global
    libstdc++ allocator/string mutex (main parks in std::string::_S_construct, loader in a
@@ -82,12 +90,10 @@ across the **972 gradable titles**.
    then ME_MUTEXWATCH its status transitions. May be the true kernel of wave-3's
    "libstdc++ under LinuxThreads" belief. (Also: fd 0x38a forever-reads = a second /dev/dsp
    open, benign, same as malvado.)
-5. **BennuGD "See COPYING" family (5 titles)**: Liquid Counter, runner, RailroadRampage x2
+6. **BennuGD "See COPYING" family (5 titles)**: Liquid Counter, runner, RailroadRampage x2
    (Wiz+Caanoo), EpicRocks_Wiz, SmallBall_Wiz: bgdi prints its license banner then exits 255:
    probably not finding/being handed its .dcb argument (launcher arg passing) or a missing
    module. One runtime, five titles.
-6. **No-audio queue.** After the sweep, re-count: MIDI staging may have taken the 22; trace
-   one remaining silent title's audio init under MCP before assuming a cluster.
 
 ## No-frames re-triage results (2026-08-13 wave 5, full table ~/me-triage5/TRIAGE_TABLE.txt)
 
