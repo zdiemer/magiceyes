@@ -1780,12 +1780,33 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 72:    /* sigsuspend (old) */
     case 179: { /* rt_sigsuspend(mask, size) — block until a deliverable signal arrives */
         struct thread *t = g_self;
+        int entered_in_handler = t->has_sigsave;
         t->susp_oldmask = t->sig_blocked; t->susp_active = 1;
         if (nr == 179 && a0) { uint64_t m = 0; uc_mem_read(g_uc, a0, &m, 8); t->sig_blocked = m; }
         else if (nr == 72) t->sig_blocked = a0;
-        if (!(t->sig_pending & ~t->sig_blocked)) sigsuspend_wait();
-        gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
-        deliver_signals(); g_setpc = 1;
+        /* The kernel returns from sigsuspend ONLY once a handler actually ran; a pending
+           signal that gets dropped (SIG_DFL/IGN, no handler installed) must not end the
+           wait. Returning for it leaked the SUSPEND mask as the thread's resting mask
+           (the pre-suspend mask is restored in sigreturn, which never comes without a
+           handler frame): that left the LinuxThreads restart signal unblocked at rest, so
+           a later restart was consumed at an arbitrary syscall BEFORE its waiter parked --
+           the lost-restart hang that froze cgenius's resource loader at ~26% with main +
+           loader + all workers parked in __pthread_wait_for_restart_signal forever. */
+        for (;;) {
+            if (!(t->sig_pending & ~t->sig_blocked) && !g_exit) sigsuspend_wait();
+            gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
+            deliver_signals();
+            if (t->has_sigsave && !entered_in_handler) break;  /* handler frame pushed;
+                                                                  sigreturn restores the mask */
+            if (entered_in_handler || g_exit) {
+                /* nested sigsuspend inside a handler frame (our single-slot sigsave can't
+                   stack another) or teardown: no sigreturn will restore for us -- do it here. */
+                t->sig_blocked = t->susp_oldmask; t->susp_active = 0;
+                break;
+            }
+            /* woke for a dropped signal: keep waiting, as the kernel would */
+        }
+        g_setpc = 1;
         return 0;
     }
     case 162: { /* nanosleep(req, rem): a real sleep, releasing the engine lock */
