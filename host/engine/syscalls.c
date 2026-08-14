@@ -880,6 +880,43 @@ static int sysfile_open(const char *p) {
     }
     if (!strcmp(p, "/etc/localtime"))
         return memfd_make_bin(TZ_UTC, sizeof TZ_UTC);
+    /* /proc/self/{stat,maps} + /proc/stat MUST be faked, not passed to the host: on a Linux
+       host the guest otherwise reads the ENGINE's own procfs. abuse-wiz's libgc (Boehm GC)
+       derives its stack bottom from /proc/self/stat field 28 (startstack); the host's 64-bit
+       value (0x7ffd15b37448-style) truncated to the guest's 32-bit parse (0x15b37448), and
+       the mark phase then faithfully scanned ~2.5GB from the real stack up through the top
+       of the address space (the "fault storm above stack top": one fault per ~4K step from
+       0x80000000 up). Serve the guest's real stack bottom, a maps built from the engine's
+       own region registry (Boehm also parses maps for dynamic-library roots), and a 1-cpu
+       /proc/stat. */
+    if (!strcmp(p, "/proc/self/stat") || !strcmp(p, "/proc/1/stat")) {
+        static char sb[256];
+        snprintf(sb, sizeof sb,
+                 "1 (game) R 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 %d 0 100 "
+                 "4096000 1000 4294967295 32768 1048576 %lu 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+                 g_nth > 0 ? g_nth : 1, (unsigned long)0x7ffffff0u);   /* startstack: guest stack top */
+        return memfd_make(sb);
+    }
+    if (!strcmp(p, "/proc/self/maps") || !strcmp(p, "/proc/1/maps")) {
+        int n = mem_regions(NULL, 0);
+        struct me_region *rs = n > 0 ? malloc((size_t)n * sizeof *rs) : NULL;
+        if (!rs) return 0;
+        n = mem_regions(rs, n);
+        size_t cap = (size_t)n * 44 + 2; char *mb = malloc(cap);
+        if (!mb) { free(rs); return 0; }
+        size_t o = 0;
+        for (int i = 0; i < n && cap - o > 44; i++)
+            o += (size_t)snprintf(mb + o, cap - o, "%08x-%08x %c%c%cp 00000000 00:00 0\n",
+                                  rs[i].addr, rs[i].addr + rs[i].len,
+                                  (rs[i].perms & 1) ? 'r' : '-',
+                                  (rs[i].perms & 2) ? 'w' : '-',
+                                  (rs[i].perms & 4) ? 'x' : '-');
+        int fd = memfd_make(mb);
+        free(mb); free(rs);
+        return fd;
+    }
+    if (!strcmp(p, "/proc/stat"))
+        return memfd_make("cpu  0 0 0 0 0 0 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0 0 0\nbtime 0\n");
     return 0;
 }
 
