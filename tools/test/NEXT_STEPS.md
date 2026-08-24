@@ -54,14 +54,38 @@ pipeline is re-run.
    audio init under MCP; find whether its SDL_mixer ever reads /etc/timidity.cfg, uses a
    local cfg (Zelda-style ../timidity, now served by the ENOENT fallback), or fails earlier.
    Then split the 107 by mechanism before assuming clusters.
-2. **Black screens, 86 titles.** The solo-MCP reproducer method keeps paying (all of wave 5's
-   black fixes came from single sessions). Standing lead with full state captured
-   (`wave5-spin-gpio-proc-fixes` memory): **supertux-wiz is a pure heisenbug**: renders iff
-   something slows the guest (9/9 bare solo runs black, every instrumented run rendered, the
-   loaded sweep grades it playable). Root is an init race in Ikari's bundled Wiz SDL
-   (SDL-1.2.13 Rotation): its per-frame shadow->hw blit never starts on the fast side. Find
+2. **Black screens: 86 -> 61 (wave 6, 2026-08-24, commit c2e81cb).** The biggest cluster fell:
+   the Wiz firmware SDL pans once at init (flip-locking present to fb page 0) and GLBasic
+   titles then draw every frame into fb page 1 with no further pan/flip; the 250ms staleness
+   fallback re-presented the pinned black page forever. Fix: staleness auto-pan
+   (g_present_stale + present_active auto-pans to the other fb page on evidence). 17 blacks
+   graded playable in a targeted recheck (~/me-sweep/results/black-recheck-*): 10 Wiz
+   (Wiz_Blox, freecell2x, CartoonWiz, tetwizdownload, wiz_drench, Balloonacy, DungeonRunner,
+   March-of-mini-tux, WIZ_S4S, TUcS), 3 GP2X (FlipIR, BubbleTrain_GP2X, scummvm-1.2.0),
+   4 Caanoo (MNV, Drench, SantaMania, arcadevol1). 8 more re-graded incompatible (near-dead
+   missing-data titles: PrBoom "IWAD not found"). The family's `unknown_ioctl:fb` quirk is
+   the Wiz kernel's `_IOR('F',91)` FBIO_GET_BOARD_NUMBER probe, harmless. Remaining black
+   clusters, pre-classified (`black-screen-wave6-autopan` memory):
+   - **mouse-device family, 27 titles, now the biggest**: SDL-fbcon titles probing
+     /dev/input/mouse0 / /dev/psaux / /dev/usbmouse (openggs, gp2xDoukutsu, albion, angband,
+     scummvm-alikes...). The mouse probe itself may be benign; the shared real blocker is
+     unidentified. One solo MCP session on openggs (58fps, audio active, black) is the entry.
+   - **Full-speed still-black GLBasic-alikes** despite auto-pan: GP2X_Nat2007, SmashGp2x02,
+     DuoWIZ_Pong, ColonyConflict, SimOniZ, PPlane2, JUMPNRUN, wiz-car, kenlab. Same MCP
+     page-read method (memory_read both fb pages); suspect a splash drawn once before the
+     stale flag arms (alt static + front nonblank blocks the switch), or a third buffer via
+     /dev/mem.
+   - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
+     faults; check the dumps for case-mismatched data files.
+   - **nazca trio + paraballwiz**: unknown Pollux mmio 0xf004. FleshChasmer x2: unknown fb
+     ioctl + mmio 0x3802/0x3804.
+   Standing lead with full state captured (`wave5-spin-gpio-proc-fixes` memory):
+   **supertux-wiz is a pure heisenbug**: renders iff something slows the guest (9/9 bare solo
+   runs black, every instrumented run rendered, the loaded sweep grades it playable). Root is
+   an init race in Ikari's bundled Wiz SDL (SDL-1.2.13 Rotation): its per-frame shadow->hw
+   blit never starts on the fast side (likely kin to the auto-pan family's mechanism). Find
    that SDL's source (GP32Spain/archive.org) or make a black run deterministic under the
-   replay harness. Beyond it: fresh reproducer sessions on the remaining 86.
+   replay harness.
 3. **low-fps, 40 titles**: largely the Caanoo Fenix/BennuGD family now at 18.3-18.9fps under
    6-job sweep load (25fps solo, target met). Options: shave engine overhead further, run
    the sweep at fewer jobs, or grade these as the sweep-load artifacts they are. The 3-4fps
