@@ -266,6 +266,13 @@ presented:;
    front buffer: the change-heuristic in present_active() otherwise shows the half-drawn back
    buffer between flips -> sprites/text flicker. Updated on each OADR flip. */
 int g_flip_active = 0; uint32_t g_flip_guest = 0;
+/* Set by the helper thread while the flip-synced present has been starved >250ms (no flip
+   signal). Lets present_active() reconsider WHICH page the flip-lock pins: a title can pan
+   once at init (locking us to fb page 0) and then draw every frame into page 1 with no
+   further pan/flip -- the Wiz GLBasic family (Wiz_Blox, freecell2x, xcom, ~20 titles) does
+   exactly this through the firmware SDL's surface pixels, and the old fallback re-presented
+   the pinned page forever: full-speed game, audio playing, permanently black screen. */
+int g_present_stale = 0;
 /* The game signals each frame boundary by writing the MLC OADR register (Payback writes 0
    every frame). Once it does, present in lockstep with that write (one complete frame, synced)
    and stop the async 16ms helper present -- that async copy was catching mid-draw frames
@@ -316,6 +323,28 @@ void present_active(void) {
     if (now - last < 0.008) return;  /* dedupe the OADRL+OADRH pair; allow up to ~100fps */
     last = now;
     if (g_flip_active) {              /* double-buffered: show the flipped-to front buffer only */
+        /* Staleness rescue: with no flip signal for >250ms (g_present_stale), check whether the
+           pinned page is frozen while the OTHER fb page is the live one, and auto-pan to it.
+           Switch only on evidence -- pinned page static across consecutive samples AND (the
+           alternate page animating, or pinned blank while the alternate has content) -- so a
+           genuinely double-buffered title mid-flip is never preempted (it flips within 250ms
+           and never runs stale). Sticky: g_flip_guest moves, so a later real pan overrides. */
+        if (g_present_stale && g_fb_guest && g_flip_guest) {
+            uint32_t page = (uint32_t)g_fbv_h * g_fb_stride;
+            uint32_t alt = (g_flip_guest == g_fb_guest) ? g_fb_guest + page : g_fb_guest;
+            static uint32_t hf = 0, ha = 0; static int front_frozen = 0;
+            uint32_t nf = buf_hash(g_flip_guest), na = buf_hash(alt);
+            int alt_changed = (na != ha);
+            front_frozen = (nf == hf) ? front_frozen + 1 : 0;
+            hf = nf; ha = na;
+            if (front_frozen >= 3 &&
+                (alt_changed || (buf_score(g_flip_guest) == 0 && buf_score(alt) > 0))) {
+                fprintf(DIAG, "present: flip-locked page %08x stale, auto-pan to %08x\n",
+                        g_flip_guest, alt);
+                g_flip_guest = alt;
+                front_frozen = 0; hf = ha = 0;
+            }
+        }
         if (g_flip_guest) present_guest(g_flip_guest);
         return;
     }

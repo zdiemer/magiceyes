@@ -230,6 +230,7 @@ static void *helper_thread(void *arg) {
         if (!g_reloading && g_fb_guest) {
             int fresh = (!g_oadr_driven || g_frame_ready);
             if (fresh) { g_frame_ready = 0; last_ready = now; }
+            g_present_stale = (!fresh && now - last_ready > 0.25);
             /* Staleness fallback: a title can write OADR once at init (locking us to flip-driven
                present) and then never flip again -- GLBasic shoebox titles draw each frame with a
                MESG blit straight into the front buffer, no further MLC writes, no syscalls in the

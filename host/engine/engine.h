@@ -183,6 +183,8 @@ extern uint32_t g_blit_guest;   /* guest base of the 0xe0020000 blitter window *
 extern int g_caanoo_bpp; extern uint32_t g_caanoo_pitch;   /* Pollux MLC layer depth (bytes/px) + pitch */
 extern int g_oadr_driven;   /* game drives present via OADR writes -> async present off */
 extern int g_frame_ready;   /* OADR write -> helper thread presents this frame (off-render-thread) */
+extern int g_present_stale; /* helper: flip-synced present starved >250ms -> present_active may
+                               auto-pan the flip-lock to the fb page the game actually draws */
 extern uint32_t g_aud_freq, g_aud_ch, g_aud_bits;
 extern double g_aud_t0;
 extern int g_aud_on;
