@@ -1614,9 +1614,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 142: { /* _newselect(n, readfds, writefds, exceptfds, timeout). GP2X games use
                    select(0,NULL,NULL,NULL,&tv) as a portable sub-second sleep (Knight Lore's
                    audio/timing worker spins on it). Report any requested writefds as ready
-                   (devices/files are always writable), clear readfds/exceptfds (no input
-                   pending), and otherwise sleep the timeout — lock-free — so the caller paces
-                   to real time instead of busy-spinning. */
+                   (devices/files are always writable). For readfds, consult the same device
+                   readiness as poll() — the WIZ firmware SDL waits for the tslib touchscreen
+                   (evdev) via select(), and unconditionally clearing readfds meant touch input
+                   NEVER arrived (SimOniZ family: rendering fixed, menus untouchable). Non-device
+                   fds keep the old cleared-behaviour. Otherwise sleep the timeout — lock-free —
+                   so the caller paces to real time instead of busy-spinning. */
         uint32_t nfds = a0, rd = a1, wr = a2, ex = a3, tmo = a4;
         int words = (int)((nfds + 31) / 32); if (words > 32) words = 32; if (words < 0) words = 0;
         int ready = 0;
@@ -1624,7 +1627,22 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             uint32_t w = 0; uc_mem_read(g_uc, wr + i * 4, &w, 4);
             ready += __builtin_popcount(w);
         }
-        if (rd) { uint32_t z = 0; for (int i = 0; i < words; i++) uc_mem_write(g_uc, rd + i * 4, &z, 4); }
+        if (rd) for (int i = 0; i < words; i++) {
+            uint32_t w = 0, out = 0; uc_mem_read(g_uc, rd + i * 4, &w, 4);
+            while (w) {
+                int b = __builtin_ctz(w); w &= w - 1;
+                int fd = i * 32 + b, dt = dev_type(fd), r = 0;
+                if (fd == PIPEFD_R) r = g_pipe_w > g_pipe_r;
+                else if (dt == DEV_GPIO) r = 1;                       /* button word: always readable */
+                else if (dt == DEV_INPUT_EV || dt == DEV_INPUT_JS) r = input_pending(fd);
+                else if (dt == DEV_TOUCH) r = ts_pending();
+                if (dt && getenv("ME_INPUTLOG")) { static int ns = 0, nr = 0;
+                    if (ns++ < 10 || (r && nr++ < 40))
+                        fprintf(stderr, "[sel] watch fd=%x dt=%d ready=%d\n", fd, dt, r); }
+                if (r) { out |= 1u << b; ready++; }
+            }
+            uc_mem_write(g_uc, rd + i * 4, &out, 4);
+        }
         if (ex) { uint32_t z = 0; for (int i = 0; i < words; i++) uc_mem_write(g_uc, ex + i * 4, &z, 4); }
         if (ready) return ready;
         double dur = 0.02;                 /* no timeout (parked thread): park ~20ms, then re-select */

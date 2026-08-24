@@ -567,8 +567,36 @@ long gpio_ioctl(uint32_t cmd, uint32_t arg) {
     if (arg) uc_mem_write(g_uc, arg, &v, 4);
     return 0;
 }
+/* Wiz hardware button word (the Pollux pad layout, ACTIVE-HIGH pressed bits): bit
+   positions recovered from the unstripped fxi runtime (wizJoystickRead), shared by the
+   MMIO GPIOB/C pad model and the Wiz /dev/GPIO read. */
+uint32_t wiz_button_word(uint32_t b) {
+    uint32_t w = 0;
+    if (b & 0x0006) w |= 1u << 16;                    /* LEFT | UPLEFT */
+    if (b & 0x0008) w |= (1u << 16) | (1u << 19);     /* DOWNLEFT */
+    if (b & 0x0040) w |= 1u << 17;                    /* RIGHT */
+    if (b & 0x0080) w |= (1u << 17) | (1u << 18);     /* UPRIGHT */
+    if (b & 0x0020) w |= (1u << 17) | (1u << 19);     /* DOWNRIGHT */
+    if (b & 0x0003) w |= 1u << 18;                    /* UP | UPLEFT */
+    if (b & 0x0010) w |= 1u << 19;                    /* DOWN */
+    if (b & (1u << GP2X_A))       w |= 1u << 20;
+    if (b & (1u << GP2X_B))       w |= 1u << 21;
+    if (b & (1u << GP2X_X))       w |= 1u << 22;
+    if (b & (1u << GP2X_Y))       w |= 1u << 23;
+    if (b & (1u << GP2X_SELECT))  w |= 1u << 8;
+    if (b & (1u << GP2X_START))   w |= 1u << 9;       /* Wiz MENU */
+    if (b & (1u << GP2X_L))       w |= 1u << 7;
+    if (b & (1u << GP2X_R))       w |= 1u << 6;
+    if (b & (1u << GP2X_VOLUP))   w |= 1u << 10;
+    if (b & (1u << GP2X_VOLDOWN)) w |= 1u << 11;
+    if (b & (1u << GP2X_CLICK))   w |= 1u << 27;
+    return w;
+}
 long gpio_read(uint32_t gbuf, uint32_t n) {
-    uint32_t v = g_shm ? g_shm->buttons : 0;   /* active-high; gp2xshm.h == GP2X button word */
+    uint32_t v = g_shm ? g_shm->buttons : 0;   /* active-high; gp2xshm.h == GP2X button word.
+       The WIZ firmware libSDL's joystick driver parses this same GP2X order (its update fn
+       bit-tests 0..18 and posts joystick button i for bit i -- disasm @0x3a460), so the GP2X
+       word is correct for Wiz too; do NOT serve the Pollux pad layout here. */
     if (getenv("ME_INPUTLOG") && v) { static int g = 0; if (g++ < 30) fprintf(stderr, "[gpio] read btns=%08x\n", v); }
     uint32_t k = n < 4 ? n : 4;
     if (gbuf && k) uc_mem_write(g_uc, gbuf, &v, k);
@@ -1194,25 +1222,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
        SELECT=8 MENU(START)=9 L=7 R=6 VOL+=10 VOL-=11 (touch/click 27). Idle pins read HIGH. */
     if ((g_device != 0 || g_is_dynamic) &&
         (off == 0xa018 || off == 0xa058 || off == 0xa098)) {
-        uint32_t b = g_shm ? g_shm->buttons : 0, w = 0;
-        if (b & 0x0006) w |= 1u << 16;                    /* LEFT | UPLEFT */
-        if (b & 0x0008) w |= (1u << 16) | (1u << 19);     /* DOWNLEFT */
-        if (b & 0x0040) w |= 1u << 17;                    /* RIGHT */
-        if (b & 0x0080) w |= (1u << 17) | (1u << 18);     /* UPRIGHT */
-        if (b & 0x0020) w |= (1u << 17) | (1u << 19);     /* DOWNRIGHT */
-        if (b & 0x0003) w |= 1u << 18;                    /* UP | UPLEFT */
-        if (b & 0x0010) w |= 1u << 19;                    /* DOWN */
-        if (b & (1u << GP2X_A))       w |= 1u << 20;
-        if (b & (1u << GP2X_B))       w |= 1u << 21;
-        if (b & (1u << GP2X_X))       w |= 1u << 22;
-        if (b & (1u << GP2X_Y))       w |= 1u << 23;
-        if (b & (1u << GP2X_SELECT))  w |= 1u << 8;
-        if (b & (1u << GP2X_START))   w |= 1u << 9;       /* Wiz MENU */
-        if (b & (1u << GP2X_L))       w |= 1u << 7;
-        if (b & (1u << GP2X_R))       w |= 1u << 6;
-        if (b & (1u << GP2X_VOLUP))   w |= 1u << 10;
-        if (b & (1u << GP2X_VOLDOWN)) w |= 1u << 11;
-        if (b & (1u << GP2X_CLICK))   w |= 1u << 27;
+        uint32_t w = wiz_button_word(g_shm ? g_shm->buttons : 0);
         uint32_t v = 0xffffffffu;                          /* GPIOA (0xa018): nothing active */
         if (off == 0xa058) v = ~(w & 0xffffu) ;
         if (off == 0xa098) v = ~(w >> 16);

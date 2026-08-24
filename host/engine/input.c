@@ -11,7 +11,10 @@
  */
 #include "engine.h"
 #include <string.h>
+#include <stdio.h>
+#include <limits.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 /* ---- evdev / joystick wire constants (linux/input.h, linux/joystick.h) ---- */
 #define EV_SYN 0x00
@@ -19,6 +22,8 @@
 #define EV_ABS 0x03
 #define ABS_X  0x00
 #define ABS_Y  0x01
+#define ABS_PRESSURE 0x18
+#define BTN_TOUCH    0x14a
 #define SYN_REPORT 0x00
 #define JS_EVENT_BUTTON 0x01
 #define JS_EVENT_AXIS   0x02
@@ -41,11 +46,63 @@ static const struct btn BTN[] = {
 };
 #define NBTN ((int)(sizeof BTN / sizeof BTN[0]))
 
-/* per-open state: the last input snapshot we reported, so a read emits only what changed */
-struct inpst { int used, type; uint32_t last_btns; int last_ax, last_ay; int js_synced; };
+/* per-open state: the last input snapshot we reported, so a read emits only what changed.
+   tq[]: pending touch events for the Wiz touchscreen node -- tslib's input-raw plugin reads
+   ONE 16-byte input_event per read(), so a report (BTN_TOUCH, ABS_X/Y/PRESSURE, SYN) must be
+   queued and drained across several reads, not crammed into one. */
+struct inpst { int used, type; uint32_t last_btns; int last_ax, last_ay; int js_synced;
+               uint32_t last_tdown; int last_tx, last_ty; uint64_t last_tus;
+               uint8_t tq[16 * 8]; uint32_t tq_len, tq_off; };
 static struct inpst g_inp[64];
 
 static int slot(int fd) { int i = fd - DEVFD_BASE; return (i >= 0 && i < 64) ? i : -1; }
+
+/* ---- Wiz touchscreen over evdev ---------------------------------------------
+   On the real Wiz /dev/input/event0 IS the resistive touchscreen; the firmware libSDL
+   reads it through tslib (module_raw input -> pthres -> variance -> dejitter -> linear),
+   and the linear module applies the rootfs /etc/pointercal calibration. Buttons never
+   come over evdev on the Wiz (they are the /dev/GPIO word), so for g_device==1 this node
+   serves TOUCH: raw ADC coords computed by INVERTING pointercal, so tslib's calibrated
+   output lands exactly on the pixel the viewer's mouse points at. */
+static int32_t g_cal[7]; static int g_cal_ok = -1;   /* /etc/pointercal, lazily loaded */
+static void cal_load(void) {
+    if (g_cal_ok >= 0) return;
+    g_cal_ok = 0;
+    char host[PATH_MAX];
+    if (me_rootfs_resolve("/etc/pointercal", host, sizeof host)) {
+        FILE *f = fopen(host, "r");
+        if (f) {
+            if (fscanf(f, "%d %d %d %d %d %d %d", &g_cal[0], &g_cal[1], &g_cal[2],
+                       &g_cal[3], &g_cal[4], &g_cal[5], &g_cal[6]) == 7 && g_cal[6] &&
+                ((int64_t)g_cal[0] * g_cal[4] - (int64_t)g_cal[1] * g_cal[3]) != 0)
+                g_cal_ok = 1;
+            fclose(f);
+        }
+    }
+}
+/* screen (sx,sy) -> raw coords: invert  s = (A*raw + c) / a6  (identity without a usable cal). */
+static void cal_raw(int sx, int sy, int *rx, int *ry) {
+    cal_load();
+    if (g_cal_ok != 1) { *rx = sx; *ry = sy; return; }
+    int64_t u = (int64_t)sx * g_cal[6] - g_cal[2];
+    int64_t v = (int64_t)sy * g_cal[6] - g_cal[5];
+    int64_t det = (int64_t)g_cal[0] * g_cal[4] - (int64_t)g_cal[1] * g_cal[3];
+    *rx = (int)(((int64_t)g_cal[4] * u - (int64_t)g_cal[1] * v) / det);
+    *ry = (int)(((int64_t)g_cal[0] * v - (int64_t)g_cal[3] * u) / det);
+}
+static int wiz_touch_node(int type) { return g_device == 1 && type == DEV_INPUT_EV; }
+static uint64_t inp_now_us(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
+/* current touch state + whether it needs reporting on this slot (change, or ~100Hz while down) */
+static int touch_pending(int s, uint32_t *down, int *sx, int *sy) {
+    *down = g_shm ? g_shm->touch_down : 0;
+    *sx = g_shm ? g_shm->touch_x : 0; *sy = g_shm ? g_shm->touch_y : 0;
+    if (*down != g_inp[s].last_tdown ||
+        (*down && (*sx != g_inp[s].last_tx || *sy != g_inp[s].last_ty))) return 1;
+    return *down && inp_now_us() - g_inp[s].last_tus >= 10000;
+}
 
 /* current input snapshot from shm: the button bitmap + the synthesised stick axes (-MAX/0/+MAX). */
 static void snapshot(uint32_t *btns, int *ax, int *ay) {
@@ -86,6 +143,10 @@ int input_fake_node(const char *path, struct stat *s) {
 /* is there an unreported input change on this fd? (poll()/select() POLLIN) */
 int input_pending(int fd) {
     int s = slot(fd); if (s < 0 || !g_inp[s].used) return 0;
+    if (wiz_touch_node(g_inp[s].type)) {
+        if (g_inp[s].tq_off < g_inp[s].tq_len) return 1;   /* queued events not yet drained */
+        uint32_t d; int x, y; return touch_pending(s, &d, &x, &y);
+    }
     if (g_inp[s].type == DEV_INPUT_JS && !g_inp[s].js_synced) return 1;   /* js initial state */
     uint32_t btns; int ax, ay; snapshot(&btns, &ax, &ay);
     return btns != g_inp[s].last_btns || ax != g_inp[s].last_ax || ay != g_inp[s].last_ay;
@@ -95,6 +156,10 @@ void input_open(int fd, int type) {
     int s = slot(fd); if (s < 0) return;
     g_inp[s].used = 1; g_inp[s].type = type; g_inp[s].js_synced = 0;
     snapshot(&g_inp[s].last_btns, &g_inp[s].last_ax, &g_inp[s].last_ay);  /* no spurious initial events */
+    g_inp[s].last_tdown = g_shm ? g_shm->touch_down : 0;
+    g_inp[s].last_tx = g_shm ? g_shm->touch_x : 0;
+    g_inp[s].last_ty = g_shm ? g_shm->touch_y : 0;
+    g_inp[s].last_tus = inp_now_us();
 }
 
 /* ---- evdev: pack input_event {tv_sec, tv_usec, u16 type, u16 code, s32 value} = 16 bytes ---- */
@@ -110,6 +175,32 @@ static int js_pack(uint8_t *p, int type, int number, int val) {
 
 long input_read(int fd, uint32_t gbuf, uint32_t n) {
     int s = slot(fd); if (s < 0 || !g_inp[s].used) return 0;
+    if (wiz_touch_node(g_inp[s].type)) {          /* Wiz: this evdev node is the touchscreen */
+        if (g_inp[s].tq_off >= g_inp[s].tq_len) {              /* queue empty: build a report */
+            uint32_t down; int sx, sy;
+            if (!touch_pending(s, &down, &sx, &sy)) return -11;   /* EAGAIN */
+            uint8_t *q = g_inp[s].tq; uint32_t off = 0;
+            int rx, ry; cal_raw(sx, sy, &rx, &ry);
+            if (down != g_inp[s].last_tdown)
+                off += ev_pack(q + off, EV_KEY, BTN_TOUCH, down ? 1 : 0);
+            off += ev_pack(q + off, EV_ABS, ABS_X, rx);
+            off += ev_pack(q + off, EV_ABS, ABS_Y, ry);
+            off += ev_pack(q + off, EV_ABS, ABS_PRESSURE, down ? 255 : 0);
+            off += ev_pack(q + off, EV_SYN, SYN_REPORT, 0);
+            g_inp[s].tq_len = off; g_inp[s].tq_off = 0;
+            g_inp[s].last_tdown = down; g_inp[s].last_tx = sx; g_inp[s].last_ty = sy;
+            g_inp[s].last_tus = inp_now_us();
+            if (getenv("ME_INPUTLOG")) { static int nt = 0; if (nt++ < 40)
+                fprintf(stderr, "[wts] report down=%u screen=%d,%d raw=%d,%d bytes=%u\n",
+                        down, sx, sy, rx, ry, off); }
+        }
+        uint32_t left = g_inp[s].tq_len - g_inp[s].tq_off;
+        uint32_t give = (n / 16) * 16; if (give > left) give = left;
+        if (!give) return -11;                                  /* n < one event */
+        uc_mem_write(g_uc, gbuf, g_inp[s].tq + g_inp[s].tq_off, give);
+        g_inp[s].tq_off += give;
+        return (long)give;
+    }
     uint32_t btns; int ax, ay; snapshot(&btns, &ax, &ay);
     if (getenv("ME_INPUTLOG") && btns) { static int nr = 0;
         if (nr++ < 40) fprintf(stderr, "[inp] read fd=%x btns=%08x ax=%d ay=%d\n", fd, btns, ax, ay); }
@@ -184,10 +275,24 @@ long input_ioctl(int fd, uint32_t cmd, uint32_t arg) {
     case 0x20: { uint8_t z[4] = {0}; uint32_t l = size < 4 ? size : 4; wr(arg, z, l);   /* EVIOCGBIT(0): ev types */
                  set_bit(arg, l, EV_SYN); set_bit(arg, l, EV_KEY); set_bit(arg, l, EV_ABS); return (long)l; }
     case 0x21: { uint8_t z[96]; memset(z, 0, sizeof z); uint32_t l = size < sizeof z ? size : sizeof z;  /* EVIOCGBIT(EV_KEY) */
-                 wr(arg, z, l); for (int i = 0; i < NBTN; i++) set_bit(arg, l, BTN[i].code); return (long)l; }
+                 wr(arg, z, l);
+                 if (wiz_touch_node(s >= 0 ? g_inp[s].type : 0)) set_bit(arg, l, BTN_TOUCH);
+                 else for (int i = 0; i < NBTN; i++) set_bit(arg, l, BTN[i].code);
+                 return (long)l; }
     case 0x23: { uint8_t z[8] = {0}; uint32_t l = size < 8 ? size : 8; wr(arg, z, l);   /* EVIOCGBIT(EV_ABS) */
-                 set_bit(arg, l, ABS_X); set_bit(arg, l, ABS_Y); return (long)l; }
-    case 0x40: case 0x41: {  /* EVIOCGABS(ABS_X/ABS_Y): input_absinfo {value,min,max,fuzz,flat,res} */
+                 set_bit(arg, l, ABS_X); set_bit(arg, l, ABS_Y);
+                 if (wiz_touch_node(s >= 0 ? g_inp[s].type : 0)) set_bit(arg, l, ABS_PRESSURE);
+                 return (long)l; }
+    case 0x40: case 0x41: case 0x58: {  /* EVIOCGABS(ABS_X/ABS_Y/ABS_PRESSURE): input_absinfo */
+        if (wiz_touch_node(s >= 0 ? g_inp[s].type : 0)) {
+            uint32_t d; int sx, sy, rx, ry;
+            d = g_shm ? g_shm->touch_down : 0;
+            sx = g_shm ? g_shm->touch_x : 0; sy = g_shm ? g_shm->touch_y : 0;
+            cal_raw(sx, sy, &rx, &ry);
+            int32_t ai[6] = { nr == 0x40 ? rx : nr == 0x41 ? ry : (d ? 255 : 0),
+                              0, nr == 0x58 ? 255 : 1023, 0, 0, 0 };
+            wr(arg, ai, 24); return 0;
+        }
         int32_t ai[6] = { nr == 0x40 ? ax : ay, -AXIS_MAX, AXIS_MAX, 0, 0, 0 }; wr(arg, ai, 24); return 0; }
     default:
         if (nr >= 0x20 && nr <= 0x3f) { uint8_t z[96] = {0}; uint32_t l = size < sizeof z ? size : sizeof z;
