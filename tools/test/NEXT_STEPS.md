@@ -77,10 +77,11 @@ pipeline is re-run.
      para3, Volleyball, Tetrablocks, AbusimbelProfanation, 2xZdoom_selector, angband2x.
      Deicide 3 + BareFistFighter + baselines verified unregressed.
    Remaining clusters:
-   - **Auto-pan is timing-flaky on sparse redrawers**: Drench/SantaMania/MNV/Flappynerd
-     (Caanoo, 14-27fps) graded playable in one recheck round and black in the next; the
-     rescue's alt-page-changing evidence is marginal at low redraw rates. Consider loosening
-     the tiebreak (front near-blank vs alt much-higher buf_score) for a deterministic switch.
+   - **Caanoo low-fps flappers are sweep-load artifacts, not auto-pan**: Drench/SantaMania/
+     MNV/Flappynerd flipped playable<->black between recheck rounds, but Drench solo renders
+     its menu fine on the SDL backend (no fb path, rescue not involved): under 6-job NAS
+     contention they just haven't reached their menu when the sampler looks. Same class as
+     the Fenix 18fps family (attack item 3); grade solo before believing their tier.
    - **Full-speed still-black GLBasic-alikes** despite auto-pan: GP2X_Nat2007, SmashGp2x02,
      DuoWIZ_Pong, ColonyConflict, SimOniZ, PPlane2, JUMPNRUN, wiz-car, kenlab. Same MCP
      page-read method (memory_read both fb pages); suspect a splash drawn once before the
