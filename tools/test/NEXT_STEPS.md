@@ -54,31 +54,44 @@ pipeline is re-run.
    audio init under MCP; find whether its SDL_mixer ever reads /etc/timidity.cfg, uses a
    local cfg (Zelda-style ../timidity, now served by the ENOENT fallback), or fails earlier.
    Then split the 107 by mechanism before assuming clusters.
-2. **Black screens: 86 -> 61 (wave 6, 2026-08-24, commit c2e81cb).** The biggest cluster fell:
-   the Wiz firmware SDL pans once at init (flip-locking present to fb page 0) and GLBasic
-   titles then draw every frame into fb page 1 with no further pan/flip; the 250ms staleness
-   fallback re-presented the pinned black page forever. Fix: staleness auto-pan
-   (g_present_stale + present_active auto-pans to the other fb page on evidence). 17 blacks
-   graded playable in a targeted recheck (~/me-sweep/results/black-recheck-*): 10 Wiz
-   (Wiz_Blox, freecell2x, CartoonWiz, tetwizdownload, wiz_drench, Balloonacy, DungeonRunner,
-   March-of-mini-tux, WIZ_S4S, TUcS), 3 GP2X (FlipIR, BubbleTrain_GP2X, scummvm-1.2.0),
-   4 Caanoo (MNV, Drench, SantaMania, arcadevol1). 8 more re-graded incompatible (near-dead
-   missing-data titles: PrBoom "IWAD not found"). The family's `unknown_ioctl:fb` quirk is
-   the Wiz kernel's `_IOR('F',91)` FBIO_GET_BOARD_NUMBER probe, harmless. Remaining black
-   clusters, pre-classified (`black-screen-wave6-autopan` memory):
-   - **mouse-device family, 27 titles, now the biggest**: SDL-fbcon titles probing
-     /dev/input/mouse0 / /dev/psaux / /dev/usbmouse (openggs, gp2xDoukutsu, albion, angband,
-     scummvm-alikes...). The mouse probe itself may be benign; the shared real blocker is
-     unidentified. One solo MCP session on openggs (58fps, audio active, black) is the entry.
+2. **Black screens: 86 -> 59 (wave 6, 2026-08-24: engine commit c2e81cb + a rootfs asset
+   swap).** Two root causes fell; final targeted recheck grades 20 playable + 1 renders,
+   59 black, 6 incompatible (missing-data titles: PrBoom "IWAD not found"; results in
+   ~/me-sweep/results/black-recheck-*):
+   - **Staleness auto-pan (c2e81cb)**: the Wiz firmware SDL pans once at init (flip-locking
+     present to fb page 0) and GLBasic titles then draw every frame into fb page 1 with no
+     further pan/flip; the 250ms staleness fallback re-presented the pinned black page
+     forever. present_active now auto-pans to the other fb page on evidence. Fixed the 10-Wiz
+     GLBasic family (Wiz_Blox, freecell2x, CartoonWiz, tetwizdownload, wiz_drench,
+     Balloonacy, DungeonRunner, March-of-mini-tux, WIZ_S4S, TUcS) + FlipIR/BubbleTrain_GP2X/
+     arcadevol1. The family's `unknown_ioctl:fb` quirk is the Wiz kernel's `_IOR('F',91)`
+     FBIO_GET_BOARD_NUMBER probe, harmless.
+   - **Static-dlopen libpng (ASSET change, NOT in git: see `black-screen-wave6-autopan`
+     memory).** The "mouse-device family" (27 titles; the mouse probes were noise): static
+     GP2X binaries dlopen /lib/libpng.so.3, the Wiz-firmware libpng has no DT_NEEDED libz,
+     and static dlopen never processes LD_PRELOAD (wave-2's fix reaches only dynamic
+     titles) -> every IMG_Load NULL -> live game, audio, black. patchelf --add-needed BREAKS
+     glibc-2.3.6's loader; the fix is staging rootfs-gp2x's properly-linked libpng12.so.0.15.0
+     over the libpng symlinks in assets/rootfs/0/rootfs/lib AND assets/rootfs-win/lib
+     (originals kept beside; ANY RESTAGE MUST REDO THIS). Fixed openggs, scummvm-1.2.0,
+     para3, Volleyball, Tetrablocks, AbusimbelProfanation, 2xZdoom_selector, angband2x.
+     Deicide 3 + BareFistFighter + baselines verified unregressed.
+   Remaining clusters:
+   - **Auto-pan is timing-flaky on sparse redrawers**: Drench/SantaMania/MNV/Flappynerd
+     (Caanoo, 14-27fps) graded playable in one recheck round and black in the next; the
+     rescue's alt-page-changing evidence is marginal at low redraw rates. Consider loosening
+     the tiebreak (front near-blank vs alt much-higher buf_score) for a deterministic switch.
    - **Full-speed still-black GLBasic-alikes** despite auto-pan: GP2X_Nat2007, SmashGp2x02,
      DuoWIZ_Pong, ColonyConflict, SimOniZ, PPlane2, JUMPNRUN, wiz-car, kenlab. Same MCP
      page-read method (memory_read both fb pages); suspect a splash drawn once before the
      stale flag arms (alt static + front nonblank blocks the switch), or a third buffer via
      /dev/mem.
+   - **Newly-rendering-but-garbled** (para3, Volleyball, angband2x): interlaced/sheared line
+     duplication, likely the known MESG FIFO-source / phys_ilace shear lead (see UQM below).
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
      faults; check the dumps for case-mismatched data files.
    - **nazca trio + paraballwiz**: unknown Pollux mmio 0xf004. FleshChasmer x2: unknown fb
-     ioctl + mmio 0x3802/0x3804.
+     ioctl + mmio 0x3802/0x3804. gp2xDoukutsu: quick exit 1 after HW-surface alloc.
    Standing lead with full state captured (`wave5-spin-gpio-proc-fixes` memory):
    **supertux-wiz is a pure heisenbug**: renders iff something slows the guest (9/9 bare solo
    runs black, every instrumented run rendered, the loaded sweep grades it playable). Root is
