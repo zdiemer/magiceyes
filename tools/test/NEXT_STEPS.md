@@ -110,10 +110,15 @@ pipeline is re-run.
      menu convention: dpad navigates, START (the Wiz MENU button) confirms; A/B do
      nothing in these menus. **DuoWIZ_Pong is now FULLY PLAYABLE** (menu -> match ->
      pause/resume with L/R -> paddle moves) and **PPlane2 is FULLY PLAYABLE** (dpad
-     menu -> START -> in-game). Per-title residue: SimOniZ is touch-ONLY and consumes
-     neither SDL_GetMouseState (only SDL's cursor init calls it, pchook-proven) nor
-     any button: how it reads its touch is still unknown (likely SDL mouse EVENTS:
-     verify SDL_PollEvent delivery in its own session). ColonyConflict loads slowly
+     menu -> START -> in-game). Per-title residue: SimOniZ (touch-only) is proven
+     correct END-TO-END ON THE ENGINE SIDE and still ignores clicks: GLBasic's
+     MOUSESTATE getter (prg @0x900a8) pumps SDL + polls SDL_GetMouseState into a
+     13-sample smoothing ring, and live memory shows the ring full of our exact
+     (150,94) samples with b1=1 in its output global (0x210b9c) while the menu does
+     nothing: whatever its script wants is game-level behavior, LOW PRIORITY.
+     (GLBasic uses SDL events ONLY for ESC/QUIT: both its PollEvent loops drain and
+     discard everything else; buttons come from its own /dev/GPIO reader at prg
+     @0x9006c, GP2X word order confirmed working.) ColonyConflict loads slowly
      (real work, ~2min on NAS) then sits in the standard select pump; only a faint
      highlight reacts to UP: probably a touch-centric strategy UI, own session.
      Deicide 3 + baselines + Caanoo (Drench, arcadevol1) verified unaffected. Still
