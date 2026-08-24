@@ -95,11 +95,18 @@ pipeline is re-run.
      mapping (the old "second fbdev mmap = fb1" heuristic gave it fresh anon backing:
      game painted a buffer present never read), and drives the panel-native PORTRAIT
      scanout declared via FBIO_LCD_CHANGE_CONTROL (_IOW('D',90), the mystery fb ioctl):
-     now aliased (dev_fbno) + un-rotated. OPEN for the family: renders but ignores
-     button/touch input (GLBasic-Wiz input path untraced): they will grade "black" no
-     more but need an input session to reach playable. Still black for their own
-     reasons: SmashGp2x02 (unknown MMSP2 0x1062/0x1066/0x106e), JUMPNRUN/kenlab
-     (Caanoo, kenlab is the glDrawElements gap), wiz-car (unconfirmed).
+     now aliased (dev_fbno) + un-rotated. Input follow-up (commit ee3296d) landed two
+     real plumbing fixes: select() now consults device readiness like poll() (it used
+     to clear readfds unconditionally, so the firmware SDL's select-driven tslib/
+     keyboard input could NEVER arrive), and the Wiz /dev/input/event0 now serves the
+     tslib touch protocol (pointercal-inverted raw coords, one event per read).
+     REMAINING BLOCKER, next session: tslib's dlopen'd module chain is corrupt under
+     our loader: ts_read fires on touch but the head module's ops->read pointer lands
+     MID-libc-read (+0x54): suspect plugin (/lib/ts/*.so) relocation. Until then the
+     family renders but its (touch-driven) menus are deaf. Deicide 3 input verified
+     unaffected. Still black for their own reasons: SmashGp2x02 (unknown MMSP2
+     0x1062/0x1066/0x106e), JUMPNRUN/kenlab (Caanoo, kenlab is the glDrawElements
+     gap), wiz-car (unconfirmed).
    - **Newly-rendering-but-garbled** (para3, Volleyball, angband2x): interlaced/sheared line
      duplication, likely the known MESG FIFO-source / phys_ilace shear lead (see UQM below).
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
