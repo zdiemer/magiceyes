@@ -100,13 +100,21 @@ pipeline is re-run.
      to clear readfds unconditionally, so the firmware SDL's select-driven tslib/
      keyboard input could NEVER arrive), and the Wiz /dev/input/event0 now serves the
      tslib touch protocol (pointercal-inverted raw coords, one event per read).
-     REMAINING BLOCKER, next session: tslib's dlopen'd module chain is corrupt under
-     our loader: ts_read fires on touch but the head module's ops->read pointer lands
-     MID-libc-read (+0x54): suspect plugin (/lib/ts/*.so) relocation. Until then the
-     family renders but its (touch-driven) menus are deaf. Deicide 3 input verified
-     unaffected. Still black for their own reasons: SmashGp2x02 (unknown MMSP2
-     0x1062/0x1066/0x106e), JUMPNRUN/kenlab (Caanoo, kenlab is the glDrawElements
-     gap), wiz-car (unconfirmed).
+     The "corrupt tslib chain" theory was WRONG (all plugins relocate fine): the real
+     gate was one constant, fixed in b2059e7: tslib-0.0's input-raw demands
+     EVIOCGVERSION == 0x10000 EXACTLY and permanently latches its fd-check as failed
+     on the modern 0x010001 we returned. With that fixed, touch flows end-to-end:
+     tslib consumes the 100Hz stream and libSDL's mouse statics update to the exact
+     viewer pixel (verified by reading them live). REMAINING, own session: the
+     drive-Q-era GLBasic builds (SimOniZ, DuoWIZ_Pong...) consume NEITHER the SDL
+     mouse state (SDL_GetMouseState never called at their menus) NOR the delivered
+     /dev/GPIO button word (pressed bit verified present across 2s holds): their
+     input glue is dlsym-based; disassemble gp2xwiz.prg's dlsym usage to find what
+     they actually poll. Wiz_Blox (newer GLBasic) takes buttons fine. Deicide 3 +
+     baselines + Caanoo (Drench, arcadevol1) verified unaffected. Still black for
+     their own reasons: SmashGp2x02 (unknown MMSP2 0x1062/0x1066/0x106e),
+     JUMPNRUN/kenlab (Caanoo, kenlab is the glDrawElements gap), wiz-car
+     (unconfirmed).
    - **Newly-rendering-but-garbled** (para3, Volleyball, angband2x): interlaced/sheared line
      duplication, likely the known MESG FIFO-source / phys_ilace shear lead (see UQM below).
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
