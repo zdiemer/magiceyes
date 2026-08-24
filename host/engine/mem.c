@@ -373,11 +373,14 @@ long do_mremap(uint32_t olda, uint32_t oldl, uint32_t newl, uint32_t flags) {
 }
 
 /* device mmap: give RAM, track phys->guest, and hook MMSP2 reg writes for flips. */
-long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys) {
+long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys, int fbno) {
     uint32_t at;
-    /* fb0 vs fb1 for an fbdev mmap: first fbdev mmap is fb0. A g_fb_guest set only by the
-       /dev/mem default-scanout fallback below doesn't count — that title never touched fbdev. */
-    int fb1 = (type == DEV_FB) && g_fb_guest && !g_fb_from_devmem;
+    /* fb0 vs fb1 for an fbdev mmap comes from the fd's device number (dev_fbno), NOT from
+       "second mmap = fb1": SimOniZ's GLBasic runtime mmaps /dev/fb0 a SECOND time beside the
+       firmware SDL's mapping and draws through its own view — the old heuristic called that
+       fb1 and gave it fresh anon backing, so the game painted a buffer present never read
+       (full-speed black). */
+    int fb1 = (type == DEV_FB) && fbno == 1;
     uint32_t fbphys = (fb1 ? GP2X_FB1_PHYS : GP2X_FB0_PHYS) + phys;   /* phys = mmap offset here */
     /* fb1's phys is NOT page-aligned (0x25800 apart, real kernel layout). Real fbdev mmap maps
        the containing page and the client adds smem_start's sub-page offset itself; mirror that:
@@ -387,6 +390,9 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
        920, repeat mappings, and the ARM940 all alias the same bytes. MMSP2 reg windows
        (phys 0xC0000000 / 0xE0020000) are NOT RAM and keep the per-mapping anon path below. */
     uint32_t alias0, alias1;
+    int fb_aliased = 0;
+    /* Synthetic phys this fbdev range is (or will be) recorded under on non-GP2X devices. */
+    uint32_t fbrec = (fb1 ? 0x04040000u : 0x04000000u) + phys;
     if (type == DEV_FB && g_device == 0 && phys_in_pram(fbpa, len + fbdelta)) {
         /* On the real GP2X, fbdev memory IS upper physical RAM (fb0 at 0x03101000, the kernel's
            boot-time MLC scanout; fb1 the page after). minlib-style titles mmap /dev/mem at that
@@ -394,6 +400,14 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
            fbdev mmap with the shared pram at its real phys so the fbdev view and any /dev/mem
            view alias the same bytes, and present shows what either drew. */
         at = (uint32_t)pram_map(fbpa, len + fbdelta, addr);
+    } else if (type == DEV_FB && g_device != 0 &&
+               phys_to_guest(fbrec, &alias0) && phys_to_guest(fbrec + len - 1, &alias1) &&
+               alias1 - alias0 == len - 1) {
+        /* A repeat fbdev mmap of the same fb device (same aliasing contract as the DEV_MEM
+           branch below): one framebuffer = one set of bytes. SimOniZ (Wiz GLBasic) draws
+           through its own /dev/fb0 view while the firmware SDL's earlier view is what
+           present reads — separate backings meant black. */
+        at = alias0; fb_aliased = 1;
     } else if (type == DEV_MEM && phys != 0xE0020000u &&
         phys_to_guest(phys, &alias0) && phys_to_guest(phys + len - 1, &alias1) &&
         alias1 - alias0 == len - 1) {
@@ -412,12 +426,13 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
         at = do_mmap(addr, len, flags | GMAP_ANON, -1, 0);
     fprintf(stderr, "  DEV mmap type=%d phys=%08x -> guest=%08x len=%08x%s\n",
             type, phys, at, len, (type == DEV_MEM && phys_in_pram(phys, len)) ? " [pram]" : "");
-    if (type == DEV_FB) {                                 /* track up to 2 fb buffers */
+    if (type == DEV_FB && !fb_aliased) {                  /* track up to 2 fb buffers */
         /* Record each fb's phys (matches FBIOGET_FSCREENINFO.smem_start) so an MLC OADR flip —
            or a blitter dst — that targets that phys resolves back here. GP2X records the real
            phys (the pram backing above) with the pixel base at +delta past the aligned mapping;
-           other devices a synthetic aligned one. */
-        uint32_t base = at, rec = fb1 ? 0x04040000u : 0x04000000u;
+           other devices a synthetic aligned one (offset carried, so a partial repeat map of a
+           later page still aliases). */
+        uint32_t base = at, rec = fbrec;
         if (g_device == 0) { base = at + fbdelta; rec = fbphys; }
         if (!fb1) {
             if (g_fb_from_devmem) { g_fb_guest = base; g_fb_from_devmem = 0; } /* fbdev view takes over */

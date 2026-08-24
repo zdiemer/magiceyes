@@ -339,7 +339,8 @@ extern struct freereg g_mfree[256];
 extern int g_nmfree;
 long do_mmap(uint32_t addr, uint32_t len, uint32_t flags, int fd, uint64_t off);
 long do_mremap(uint32_t olda, uint32_t oldl, uint32_t newl, uint32_t flags);
-long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys);
+long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t phys, int fbno);
+int  dev_fbno(int fd);   /* fb device number (0=/dev/fb0, 1=/dev/fb1) for a DEV_FB fd */
 long shmfb_mmap(uint32_t len);   /* alias the shim's gp2x_fb mmap onto the engine's g_shm */
 void mem_register_external(uint32_t guest, uint32_t len, void *host);
 bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,

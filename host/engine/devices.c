@@ -427,8 +427,9 @@ static void fb_pan(uint32_t yoffset) {
     g_flip_guest = g_fb_guest + yoffset * g_fb_stride;   /* page 1 = yoffset of one screen */
     g_frame_ready = 1;
 }
+int dev_fbno(int fd) { int i = fd - DEVFD_BASE; return (i >= 0 && i < 64) ? g_fbnum[i] : 0; }
 long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
-    int i = fd - DEVFD_BASE, fbno = (i >= 0 && i < 64) ? g_fbnum[i] : 0;
+    int fbno = dev_fbno(fd);
     switch (cmd) {
     case 0x4600: if (arg) fill_vscreeninfo(arg); return 0;                 /* GET_VSCREENINFO */
     case 0x4602: if (arg) fill_fscreeninfo(arg, g_device == 0 ? (fbno ? GP2X_FB1_PHYS : GP2X_FB0_PHYS)
@@ -486,6 +487,18 @@ long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
         return 0; }
     case 0x4606: { uint32_t yoff = 0; if (arg) uc_mem_read(g_uc, arg + 20, &yoff, 4);
                    fb_pan(yoff); return 0; }                                /* PAN_DISPLAY (yoffset@20) */
+    case 0x4008445a: {                       /* FBIO_LCD_CHANGE_CONTROL (_IOW('D',90,u32[2])).
+            Wiz GLBasic (SimOniZ/DuoWIZ_Pong family) bypasses SDL for present: it mmaps
+            /dev/fb0 itself (one 0x25800 view = exactly one 240x320x16 PORTRAIT frame, the
+            panel-native geometry) and issues this ioctl to point the LCD controller at it.
+            Adopt the existing Pollux portrait un-rotate present for the fb. */
+        uint32_t v[2] = {0, 0}; if (arg) uc_mem_read(g_uc, arg, v, sizeof v);
+        fprintf(DIAG, "FBIO_LCD_CHANGE_CONTROL cmd=%08x val=%08x\n", v[0], v[1]);
+        if (g_device == 1) {
+            g_mlc_rot = 1; g_mlc_rot_w = 240; g_mlc_rot_h = 320;
+            g_mlc_rot_pitch = 480; g_mlc_rot_bypp = 2;
+        }
+        return 0; }
     case 0x4611: return 0;                                                  /* FBIOBLANK: accept */
     default:     me_report(MR_UNKNOWN_IOCTL, (long)cmd, "fb", 0); return 0;  /* accept unknown fb ioctl */
     }

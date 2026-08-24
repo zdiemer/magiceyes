@@ -1112,7 +1112,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         uint32_t m[6]; uc_mem_read(g_uc, a0, m, sizeof m);
         int fd = (m[4] == 0xffffffffu) ? -1 : (int)m[4], t = dev_type(fd);
         if (t == DEV_SHMFB) return shmfb_mmap(m[1]);
-        if (t) return dev_mmap(t, m[0], m[1], m[3], m[5]);
+        if (t) return dev_mmap(t, m[0], m[1], m[3], m[5], dev_fbno(fd));
         long r = do_mmap(m[0], m[1], m[3], fd, m[5]);
         /* glibc 2.3.6's ld.so (the Wiz/GP2X rootfs) loads shared objects through old_mmap, NOT
            mmap2 -- hooking only mmap2 indexed no libraries at all. m[5] is a BYTE offset here. */
@@ -1123,7 +1123,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 192: { /* mmap2: a4=fd, a5=pgoff (4096 units) */
         int fd = (a4 == 0xffffffffu) ? -1 : (int)a4, t = dev_type(fd);
         if (t == DEV_SHMFB) return shmfb_mmap(a1);
-        if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096));
+        if (t) return dev_mmap(t, a0, a1, a3, (uint32_t)(a5 * 4096), dev_fbno(fd));
         long r = do_mmap(a0, a1, a3, fd, (uint64_t)a5 * 4096);
         /* ld.so maps a shared object at file offset 0 to establish its load base -- the one moment
            the debugger can learn where a .so landed, since nothing records it afterwards. Index it
