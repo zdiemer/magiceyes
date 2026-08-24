@@ -181,6 +181,11 @@ long input_read(int fd, uint32_t gbuf, uint32_t n) {
             if (!touch_pending(s, &down, &sx, &sy)) return -11;   /* EAGAIN */
             uint8_t *q = g_inp[s].tq; uint32_t off = 0;
             int rx, ry; cal_raw(sx, sy, &rx, &ry);
+            /* tslib-0.0's input-raw picks its protocol from EVIOCGBIT(0): because we
+               advertise EV_SYN, its check_fd sets the SYN-mode flag and samples are
+               EMITTED on the EV_SYN frame terminator (disasm @0x9a8 in input.so), so
+               the report MUST end with SYN_REPORT. (Its version gate is separate: see
+               EVIOCGVERSION below -- exactly 0x10000 or the plugin latches dead.) */
             if (down != g_inp[s].last_tdown)
                 off += ev_pack(q + off, EV_KEY, BTN_TOUCH, down ? 1 : 0);
             off += ev_pack(q + off, EV_ABS, ABS_X, rx);
@@ -264,7 +269,11 @@ long input_ioctl(int fd, uint32_t cmd, uint32_t arg) {
 
     /* /dev/input/event* (evdev), type 'E'=0x45 */
     switch (nr) {
-    case 0x01: { uint32_t v = 0x010001; wr(arg, &v, 4); return 0; }        /* EVIOCGVERSION */
+    case 0x01: { uint32_t v = 0x010000; wr(arg, &v, 4); return 0; }        /* EVIOCGVERSION:
+                   MUST be exactly 0x10000 (EV_VERSION 1.0.0): the Wiz rootfs tslib-0.0
+                   input-raw plugin does `cmp version, #0x10000; beq ok` and PERMANENTLY
+                   latches its fd-check as failed on any other value (0x010001 = every
+                   ts_read returned 0 forever: the SimOniZ family's deaf touch menus). */
     case 0x02: { uint16_t id[4] = { 0x0003, 0x1f00, 0x0001, 0x0100 }; wr(arg, id, 8); return 0; } /* EVIOCGID */
     case 0x06: { const char *nm = "pollux-analog";                        /* EVIOCGNAME(len) */
                  uint32_t l = (uint32_t)strlen(nm) + 1; if (l > size) l = size; wr(arg, nm, l); return (long)l; }
