@@ -54,10 +54,11 @@ pipeline is re-run.
    audio init under MCP; find whether its SDL_mixer ever reads /etc/timidity.cfg, uses a
    local cfg (Zelda-style ../timidity, now served by the ENOENT fallback), or fails earlier.
    Then split the 107 by mechanism before assuming clusters.
-2. **Black screens: 86 -> 59 (wave 6, 2026-08-24: engine commit c2e81cb + a rootfs asset
-   swap).** Two root causes fell; final targeted recheck grades 20 playable + 1 renders,
-   59 black, 6 incompatible (missing-data titles: PrBoom "IWAD not found"; results in
-   ~/me-sweep/results/black-recheck-*):
+2. **Black screens: 86 -> 60 (wave 6, 2026-08-24: engine commits c2e81cb + 9e09812 + a
+   rootfs asset swap).** Three root causes fell; the final targeted recheck grades
+   21 playable + 1 renders, 60 black, 4 incompatible (missing-data titles: PrBoom "IWAD
+   not found"; results in ~/me-sweep/results/black-recheck-*). A few movers (para3, the
+   Caanoo low-fps four) are load-flaky in-sweep but verified rendering solo:
    - **Staleness auto-pan (c2e81cb)**: the Wiz firmware SDL pans once at init (flip-locking
      present to fb page 0) and GLBasic titles then draw every frame into fb page 1 with no
      further pan/flip; the 250ms staleness fallback re-presented the pinned black page
@@ -76,17 +77,26 @@ pipeline is re-run.
      (originals kept beside; ANY RESTAGE MUST REDO THIS). Fixed openggs, scummvm-1.2.0,
      para3, Volleyball, Tetrablocks, AbusimbelProfanation, 2xZdoom_selector, angband2x.
      Deicide 3 + BareFistFighter + baselines verified unregressed.
+   - **wm97xx touch must free-run (9e09812)**: the real WM9712 is a free-running ADC whose
+     reads always deliver current-state samples (pressure 0 idle); GLBasic's startup gates
+     on seeing one (a poll loop clearing a flag init'd 1.0), so the old only-on-change
+     model starved GP2X_Nat2007 (+Flappynerd_GP2X) into an infinite read() spin parked on
+     "Loading...". ts_pending now streams idle samples at the same ~100Hz pace (per-frame
+     queue-drainers still run dry).
    Remaining clusters:
    - **Caanoo low-fps flappers are sweep-load artifacts, not auto-pan**: Drench/SantaMania/
      MNV/Flappynerd flipped playable<->black between recheck rounds, but Drench solo renders
      its menu fine on the SDL backend (no fb path, rescue not involved): under 6-job NAS
      contention they just haven't reached their menu when the sampler looks. Same class as
      the Fenix 18fps family (attack item 3); grade solo before believing their tier.
-   - **Full-speed still-black GLBasic-alikes** despite auto-pan: GP2X_Nat2007, SmashGp2x02,
-     DuoWIZ_Pong, ColonyConflict, SimOniZ, PPlane2, JUMPNRUN, wiz-car, kenlab. Same MCP
-     page-read method (memory_read both fb pages); suspect a splash drawn once before the
-     stale flag arms (alt static + front nonblank blocks the switch), or a third buffer via
-     /dev/mem.
+   - **Wiz GLBasic shadow-blit family: SimOniZ, DuoWIZ_Pong, ColonyConflict, PPlane2
+     (likely wiz-car) = the supertux-wiz mechanism with a DETERMINISTIC solo reproducer.**
+     SimOniZ's main thread actively blits into RAM shadow buffers (pitch 640, addrs past
+     the fb regions) while every fb page stays zero: the firmware/rotation SDL's
+     shadow->hw copy never runs, and unlike supertux it is black EVERY solo run.
+     Instrument SimOniZ, not supertux. Others still black for their own reasons:
+     SmashGp2x02 (unknown MMSP2 0x1062/0x1066/0x106e), JUMPNRUN/kenlab (Caanoo, kenlab
+     is the glDrawElements gap).
    - **Newly-rendering-but-garbled** (para3, Volleyball, angband2x): interlaced/sheared line
      duplication, likely the known MESG FIFO-source / phys_ilace shear lead (see UQM below).
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
