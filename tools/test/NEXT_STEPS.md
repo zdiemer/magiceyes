@@ -89,14 +89,17 @@ pipeline is re-run.
      its menu fine on the SDL backend (no fb path, rescue not involved): under 6-job NAS
      contention they just haven't reached their menu when the sampler looks. Same class as
      the Fenix 18fps family (attack item 3); grade solo before believing their tier.
-   - **Wiz GLBasic shadow-blit family: SimOniZ, DuoWIZ_Pong, ColonyConflict, PPlane2
-     (likely wiz-car) = the supertux-wiz mechanism with a DETERMINISTIC solo reproducer.**
-     SimOniZ's main thread actively blits into RAM shadow buffers (pitch 640, addrs past
-     the fb regions) while every fb page stays zero: the firmware/rotation SDL's
-     shadow->hw copy never runs, and unlike supertux it is black EVERY solo run.
-     Instrument SimOniZ, not supertux. Others still black for their own reasons:
-     SmashGp2x02 (unknown MMSP2 0x1062/0x1066/0x106e), JUMPNRUN/kenlab (Caanoo, kenlab
-     is the glDrawElements gap).
+   - **FIXED in a15cd1f (fourth root cause): the Wiz GLBasic family (SimOniZ, DuoWIZ_Pong,
+     ColonyConflict, PPlane2) all render pixel-perfect menus now.** Not the supertux
+     mechanism after all: the family mmaps /dev/fb0 itself beside the firmware SDL's
+     mapping (the old "second fbdev mmap = fb1" heuristic gave it fresh anon backing:
+     game painted a buffer present never read), and drives the panel-native PORTRAIT
+     scanout declared via FBIO_LCD_CHANGE_CONTROL (_IOW('D',90), the mystery fb ioctl):
+     now aliased (dev_fbno) + un-rotated. OPEN for the family: renders but ignores
+     button/touch input (GLBasic-Wiz input path untraced): they will grade "black" no
+     more but need an input session to reach playable. Still black for their own
+     reasons: SmashGp2x02 (unknown MMSP2 0x1062/0x1066/0x106e), JUMPNRUN/kenlab
+     (Caanoo, kenlab is the glDrawElements gap), wiz-car (unconfirmed).
    - **Newly-rendering-but-garbled** (para3, Volleyball, angband2x): interlaced/sheared line
      duplication, likely the known MESG FIFO-source / phys_ilace shear lead (see UQM below).
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
