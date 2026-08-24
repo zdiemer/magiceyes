@@ -570,8 +570,13 @@ long gpio_read(uint32_t gbuf, uint32_t n) {
    coords from the shm touch state through that same mapping so titles using the
    stock GPH sample transform land on the pixel the viewer's mouse points at.
    Sample pacing mirrors the real driver: an event whenever the state changes, plus
-   a ~100Hz stream while the pen is down — never an unbounded burst, so a title
-   draining the queue in its frame loop always runs dry. */
+   a ~100Hz stream at ALL times — the real WM9712 is a free-running ADC, so reads
+   deliver current-state samples (pressure 0 when idle) continuously. GLBasic's
+   startup gates on exactly that: it loops its touch poll until it SEES a pen-up
+   sample (a double flag init'd 1.0, cleared only by a sample), so an
+   only-on-change model parked GP2X_Nat2007 (and kin) on "Loading..." forever.
+   The 10ms pace keeps it burst-bounded, so a title draining the queue in its
+   frame loop still always runs dry. */
 static struct { int16_t x, y; uint32_t down; uint64_t last_us; } g_ts_last;
 static uint64_t ts_now_us(void) {
     struct timeval tv; gettimeofday(&tv, NULL);
@@ -582,7 +587,7 @@ int ts_pending(void) {
     if (g_shm->touch_down != g_ts_last.down ||
         (g_shm->touch_down && (g_shm->touch_x != g_ts_last.x || g_shm->touch_y != g_ts_last.y)))
         return 1;
-    return g_shm->touch_down && ts_now_us() - g_ts_last.last_us >= 10000;  /* ~100Hz stream */
+    return ts_now_us() - g_ts_last.last_us >= 10000;  /* ~100Hz free-running sample stream */
 }
 long ts_read(uint32_t gbuf, uint32_t n) {
     if (!g_shm || n < 16 || !ts_pending()) return 0;   /* no sample: read returns 0 (poll gates) */
