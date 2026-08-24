@@ -105,16 +105,23 @@ pipeline is re-run.
      EVIOCGVERSION == 0x10000 EXACTLY and permanently latches its fd-check as failed
      on the modern 0x010001 we returned. With that fixed, touch flows end-to-end:
      tslib consumes the 100Hz stream and libSDL's mouse statics update to the exact
-     viewer pixel (verified by reading them live). REMAINING, own session: the
-     drive-Q-era GLBasic builds (SimOniZ, DuoWIZ_Pong...) consume NEITHER the SDL
-     mouse state (SDL_GetMouseState never called at their menus) NOR the delivered
-     /dev/GPIO button word (pressed bit verified present across 2s holds): their
-     input glue is dlsym-based; disassemble gp2xwiz.prg's dlsym usage to find what
-     they actually poll. Wiz_Blox (newer GLBasic) takes buttons fine. Deicide 3 +
-     baselines + Caanoo (Drench, arcadevol1) verified unaffected. Still black for
-     their own reasons: SmashGp2x02 (unknown MMSP2 0x1062/0x1066/0x106e),
+     viewer pixel (verified by reading them live). RESOLVED for buttons: the family
+     DOES receive input; the "deaf menus" were mostly wrong-button tests. GLBasic-Wiz
+     menu convention: dpad navigates, START (the Wiz MENU button) confirms; A/B do
+     nothing in these menus. **DuoWIZ_Pong is now FULLY PLAYABLE** (menu -> match ->
+     pause/resume with L/R -> paddle moves) and **PPlane2 is FULLY PLAYABLE** (dpad
+     menu -> START -> in-game). Per-title residue: SimOniZ is touch-ONLY and consumes
+     neither SDL_GetMouseState (only SDL's cursor init calls it, pchook-proven) nor
+     any button: how it reads its touch is still unknown (likely SDL mouse EVENTS:
+     verify SDL_PollEvent delivery in its own session). ColonyConflict loads slowly
+     (real work, ~2min on NAS) then sits in the standard select pump; only a faint
+     highlight reacts to UP: probably a touch-centric strategy UI, own session.
+     Deicide 3 + baselines + Caanoo (Drench, arcadevol1) verified unaffected. Still
+     black for their own reasons: SmashGp2x02 (unknown MMSP2 0x1062/0x1066/0x106e),
      JUMPNRUN/kenlab (Caanoo, kenlab is the glDrawElements gap), wiz-car
-     (unconfirmed).
+     (unconfirmed). Debug gotcha recorded: ctl breakpoints on ALREADY-HOT code may
+     silently fail to arm (the libc read bp never fired while the syscall clearly
+     ran); trust pchook (launch-latched) for negatives.
    - **Newly-rendering-but-garbled** (para3, Volleyball, angband2x): interlaced/sheared line
      duplication, likely the known MESG FIFO-source / phys_ilace shear lead (see UQM below).
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
