@@ -249,16 +249,20 @@ void present_guest(uint32_t g) {
                                                but gpu940 video buffers are power-of-2 wide and a
                                                PUT_VSCREENINFO mode sets its own width) */
         uint32_t rowb = (uint32_t)g_fbv_w * 2;
-        /* MLC-scaled mode (stride > native, HSC > 1:1): the surface holds wider-than-panel
-           lines and the hardware downsamples horizontally by HSC/1024 source pixels per
-           output pixel, exactly paeryn's scale_x = 1024*width/phys_width. Verified on
-           Volleyball (640-wide Game&Watch court: both scores + GAME A/B side by side) and
-           para3 (640-wide intro text): without the subsample each showed a plausible-looking
-           but WRONG left-half crop. */
+        /* MLC-scaled mode (stride > native): the surface holds a wider/taller image than the
+           panel and the hardware downsamples BOTH ways: horizontally HSC/1024 source px per
+           output px (paeryn's scale_x), vertically source line floor(y*VS/HW) for panel
+           line y (VS = bytes consumed per output line). Verified: Volleyball 640x480 (full
+           Game&Watch court), para3 640x480 (full intro text), game bIld 2 800x600. Without
+           the subsampling each showed a plausible-looking but WRONG top-left crop/shear. */
         int hsub = (g_fb_stride > rowb && g_mlc_hsc > 1024);
+        uint32_t vs = (g_mlc_vsch << 16) | g_mlc_vscl;
+        int vsub = (g_fb_stride > rowb && vs > g_fb_stride);
         uint8_t row[GP2XSHM_MAXW * 2];
         for (int y = 0; y < g_fbv_h; y++) {
-            uint8_t *src = guest_to_host(g + (uint32_t)y * g_fb_stride); if (!src) break;
+            uint32_t srow = vsub ? (uint32_t)((uint64_t)y * vs / g_fb_stride) * g_fb_stride
+                                 : (uint32_t)y * g_fb_stride;
+            uint8_t *src = guest_to_host(g + srow); if (!src) break;
             if (hsub) {
                 const uint16_t *s16 = (const uint16_t *)src;
                 uint16_t *r16 = (uint16_t *)row;
@@ -1162,20 +1166,18 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         case 0x290a: g_mlc_vsch = lo; break;
         case 0x290c: g_mlc_hw = lo; break;
         }
-        /* What matters for present is the LINE STRIDE the panel scans at: MLC_STL_HW. A
-           title in a "scaled" mode (Volleyball: HSC=2048 VS=2560 HW=1280) writes each
-           scene line TWICE at the natural 640-byte pitch, and the hardware shows every
-           other line by striding HW bytes per panel line. Measured on Volleyball: the
-           memory holds 320 unique pixels per 640-byte line, lines duplicated, so panel
-           geometry (320x240) with row stride HW reproduces the hardware picture; deriving
-           a bigger virtual size from HSC/VS presented the raw doubled buffer (sheared,
-           two copies side by side). g_fb_stride carries the stride; g_fbv_* stay 320x240. */
+        /* MLC scaler model (measured across Volleyball 640x480, para3 640x480, game bIld 2
+           800x600): the surface pitch IS MLC_STL_HW; the horizontal sampler advances
+           HSC/1024 source px per output px; the vertical position for panel line y is
+           source line floor(y*VS/HW) (VS = source bytes consumed per output line: 640
+           native, 2560 for 480-line surfaces at pitch 1280, 4000 for 600 lines at 1600).
+           Present reads pitch from g_fb_stride and does both subsamples. */
         uint32_t hw = g_mlc_hw;
         int bypp = g_fb8_mode ? 1 : 2;
         uint32_t native = 320u * (uint32_t)bypp;
-        if (hw >= native && hw <= native * 4 && (hw % native) == 0 &&
+        if (hw >= native && hw <= native * 8 && (hw & 1) == 0 &&
             g_fb_stride != hw && g_fbv_w == 320) {
-            fprintf(DIAG, "MLC scaler: panel line stride %u (HSC=%u VS=%u)\n",
+            fprintf(DIAG, "MLC scaler: pitch %u (HSC=%u VS=%u)\n",
                     hw, g_mlc_hsc, (g_mlc_vsch << 16) | g_mlc_vscl);
             g_fb_stride = hw;
         }
