@@ -209,8 +209,21 @@ static void raw_to_rgb(const SDL_PixelFormat *f, Uint32 px, Uint8 *r, Uint8 *g, 
     *g = (Uint8)(((px & f->Gmask) >> f->Gshift) << f->Gloss);
     *b = (Uint8)(((px & f->Bmask) >> f->Bshift) << f->Bloss);
 }
+/* Nearest palette entry by squared RGB distance. A palette dst needs a real index from
+   MapRGB and from format-converting blits; returning 0 here blanked every surface a game
+   ConvertSurface'd to 8bpp (noiz2sa's whole sprite set -> solid white screen). */
+static Uint32 pal_nearest(const SDL_Palette *p, Uint8 r, Uint8 g, Uint8 b) {
+    int best = 0, i, n = p->ncolors > 256 ? 256 : p->ncolors;
+    long bestd = 0x7fffffff;
+    for (i = 0; i < n; i++) {
+        int dr = p->colors[i].r - r, dg = p->colors[i].g - g, db = p->colors[i].b - b;
+        long d = (long)dr * dr + (long)dg * dg + (long)db * db;
+        if (d < bestd) { bestd = d; best = i; if (d == 0) break; }
+    }
+    return (Uint32)best;
+}
 static Uint32 rgb_to_raw(const SDL_PixelFormat *f, Uint8 r, Uint8 g, Uint8 b) {
-    if (f->palette) return 0; /* not used for our dst */
+    if (f->palette) return pal_nearest(f->palette, r, g, b);
     return ((Uint32)(r >> f->Rloss) << f->Rshift)
          | ((Uint32)(g >> f->Gloss) << f->Gshift)
          | ((Uint32)(b >> f->Bloss) << f->Bshift);
@@ -387,9 +400,15 @@ SDL_Surface *SDL_DisplayFormat(SDL_Surface *src) {
     Uint32 R = df ? df->Rmask : 0xF800, G = df ? df->Gmask : 0x07E0,
            B = df ? df->Bmask : 0x001F;
     SDL_Surface *d = alloc_surface(0, src->w, src->h, depth, R, G, B, 0);
+    if (df && df->palette && d->format->palette)     /* 8bpp screen: convert to ITS palette */
+        memcpy(d->format->palette->colors, df->palette->colors,
+               256 * sizeof(SDL_Color));
     SDL_UpperBlit(src, NULL, d, NULL);
-    if (src->flags & SDL_SRCCOLORKEY)
-        SDL_SetColorKey(d, SDL_SRCCOLORKEY, src->format->colorkey);
+    if (src->flags & SDL_SRCCOLORKEY) {   /* re-map the key into the dst format's raw units */
+        Uint8 kr, kg, kb;
+        raw_to_rgb(src->format, src->format->colorkey, &kr, &kg, &kb);
+        SDL_SetColorKey(d, SDL_SRCCOLORKEY, rgb_to_raw(d->format, kr, kg, kb));
+    }
     return d;
 }
 SDL_Surface *SDL_DisplayFormatAlpha(SDL_Surface *src) { return SDL_DisplayFormat(src); }
@@ -397,6 +416,14 @@ SDL_Surface *SDL_ConvertSurface(SDL_Surface *src, SDL_PixelFormat *fmt, Uint32 f
     (void)flags;
     SDL_Surface *d = alloc_surface(0, src->w, src->h, fmt->BitsPerPixel,
                                    fmt->Rmask, fmt->Gmask, fmt->Bmask, fmt->Amask);
+    /* converting TO a palette format maps against the CALLER's palette, so it must be in
+       place on the dst before the blit (noiz2sa converts its BMP sprites to its 8bpp
+       greyscale-ramp video format) */
+    if (fmt->palette && d->format->palette) {
+        int n = fmt->palette->ncolors > 256 ? 256 : fmt->palette->ncolors;
+        memcpy(d->format->palette->colors, fmt->palette->colors,
+               (size_t)n * sizeof(SDL_Color));
+    }
     SDL_UpperBlit(src, NULL, d, NULL);
     return d;
 }
@@ -486,11 +513,22 @@ int SDL_UpperBlit(SDL_Surface *src, SDL_Rect *srcrect,
        per-pixel RGB round-trip). This is the common case (sprites DisplayFormat'd to the 16-bit
        screen, blitted to it) and the dominant per-frame cost under ARM emulation; the slow
        general path below stays for format-converting / alpha-blended blits. */
-    if (!(usealpha && sa < 255) && !src->format->palette && !dst->format->palette &&
-        src->format->BytesPerPixel == dst->format->BytesPerPixel &&
-        src->format->Rmask == dst->format->Rmask &&
-        src->format->Gmask == dst->format->Gmask &&
-        src->format->Bmask == dst->format->Bmask) {
+    /* Two 8bpp surfaces with the same palette content blit as a raw index copy (colorkey is
+       an index there). Without this, per-frame 8->8 blits (noiz2sa's layer composition) take
+       the RGB round-trip below, which costs a nearest-palette search per pixel. */
+    int pal_same = 0;
+    if (src->format->palette && dst->format->palette &&
+        src->format->BytesPerPixel == 1 && dst->format->BytesPerPixel == 1) {
+        SDL_Palette *pa = src->format->palette, *pb = dst->format->palette;
+        pal_same = (pa == pb) || (pa->ncolors == pb->ncolors &&
+                   !memcmp(pa->colors, pb->colors, (size_t)pa->ncolors * sizeof(SDL_Color)));
+    }
+    if (!(usealpha && sa < 255) &&
+        ((!src->format->palette && !dst->format->palette &&
+          src->format->BytesPerPixel == dst->format->BytesPerPixel &&
+          src->format->Rmask == dst->format->Rmask &&
+          src->format->Gmask == dst->format->Gmask &&
+          src->format->Bmask == dst->format->Bmask) || pal_same)) {
         int bpp = src->format->BytesPerPixel;
         Uint32 ck = src->format->colorkey;
         for (y = 0; y < sh; y++) {
@@ -521,6 +559,9 @@ int SDL_UpperBlit(SDL_Surface *src, SDL_Rect *srcrect,
         if (dstrect) { dstrect->w = sw; dstrect->h = sh; }
         return 0;
     }
+    /* tiny recent-colour memo: a palette dst pays a 256-entry nearest search per new colour,
+       and sprite art repeats a handful of colours, so this makes converting blits cheap */
+    Uint32 mkey[8], mval[8]; int mn = 0;
     for (y = 0; y < sh; y++) {
         int ty = dy + y, syy = sy0 + y;
         if (ty < cy0 || ty >= cy1 || syy < 0 || syy >= src->h) continue;
@@ -538,7 +579,17 @@ int SDL_UpperBlit(SDL_Surface *src, SDL_Rect *srcrect,
                 g = (Uint8)((g * sa + dg * (255 - sa)) / 255);
                 b = (Uint8)((b * sa + db * (255 - sa)) / 255);
             }
-            put_raw(dst, tx, ty, rgb_to_raw(dst->format, r, g, b));
+            if (dst->format->palette) {
+                Uint32 key = ((Uint32)r << 16) | ((Uint32)g << 8) | b, v;
+                int mi, hit = -1;
+                for (mi = 0; mi < mn; mi++) if (mkey[mi] == key) { hit = mi; break; }
+                v = (hit >= 0) ? mval[hit] : pal_nearest(dst->format->palette, r, g, b);
+                if (hit < 0) { int slot = (mn < 8) ? mn++ : (int)(key & 7);
+                               mkey[slot] = key; mval[slot] = v; }
+                put_raw(dst, tx, ty, v);
+            } else {
+                put_raw(dst, tx, ty, rgb_to_raw(dst->format, r, g, b));
+            }
         }
     }
     if (dstrect) { dstrect->w = sw; dstrect->h = sh; }
