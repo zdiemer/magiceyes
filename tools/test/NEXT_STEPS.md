@@ -1,9 +1,15 @@
 # What the corpus sweep says to fix next
 
-Ranked by how many titles one fix would move. Generated from the FIFTH sweep (2026-08-14
-early morning, run after all wave-5 fixes including 79e5457 sigsuspend and c0b77fc
-FreeSurface): **686 playable, 69 ingame, 86 black, 131 incompatible, 0 crashed** across the
-**972 gradable titles**. Wave 4 read 652/72/116/131/1: net **+34 playable, -30 black**.
+Ranked by how many titles one fix would move. Updated from the SIXTH full sweep
+(2026-08-25 midday, after the wave-6 black-screen arc, the visual/scaler fixes, the
+fakesdl palette-blit fix, the flat-fill classifier fix, and the early-end press-quit
+retry): **736 playable, 56 ingame, 54 black, 126 incompatible, 0 crashed** across the
+**972 gradable titles**. The fifth sweep read 686/69/86/131/0: net **+50 playable,
+-32 black, -5 incompatible**. Tracker + README fully re-published from this sweep
+(compat repo 58b1a51). The Caanoo ingame block (47) is still mostly the Fenix family
+shaved under the 20fps cutoff by 6-job sweep load (25fps solo).
+
+Fifth-sweep context kept below for the per-cluster history:
 
 Confirmed wave-5 movers in this sweep: malvado playable 57.7 (was black), abuse-wiz
 playable 56.0 (was fault storm), Abbaye + Abbaye_v3 playable (were the heap-corruption
