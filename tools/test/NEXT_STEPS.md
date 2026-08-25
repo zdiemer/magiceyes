@@ -157,6 +157,28 @@ pipeline is re-run.
      @0x308c: modeled as a 60Hz edge, bit 15 kept set for open2x init checks -> renders
      its portrait-held title screen). Still black: MNV_Caanoo (load-flaky, renders solo)
      and kenlab (fakegles glDrawElements gap).
+   - **Flat-fill group CLEARED (2026-08-25: 3bbcc33 scaler + 6cf5fad classifier + ec4c3b9
+     shim palette blits + f8538ae retry): 17 titles -> 0 genuine engine flats.** Four
+     distinct mechanisms, worth remembering as classes:
+     (a) The full 2D MLC scaler model (pitch=STL_HW, horizontal HSC/1024, vertical source
+     line = y*VS/HW) fixed the large-virtual-resolution family: "game bIld 2" renders its
+     800x600 layout readable, Volleyball its whole court.
+     (b) The flat-fill CLASSIFIER over-flagged: `colours <= 2` is also every monochrome
+     text screen. Now a two-colour frame is flat only when featureless (edge < 1.5 AND
+     minority colour < 1%); ASCIIPong2xV0.4, fenixGamePack, starsystem, Arcadevol3,
+     levelEdit, Skull re-graded on their real readable screens.
+     (c) **fakesdl palette-dst blits wrote index 0 for every pixel** (rgb_to_raw returned 0
+     for palette formats): any EABI title that ConvertSurface's its art to 8bpp indexed
+     lost EVERYTHING it drew. noiz2sa_caanoo (solid white at 60fps: its own LUT[0] is
+     white) now plays fully; gnp_104 + rg_ura_103 (solid green) render their menus.
+     Fix: pal_nearest mapping + identical-palette 8->8 fast path + ConvertSurface copies
+     the caller's palette BEFORE the converting blit.
+     (d) Press-quit again: the reversed-preacher x3 (long story-crawl intro, START quits to
+     gp2xmenu exit 127 during the black boot phase) still graded playable on held fps so
+     the retry never fired; retry now also covers early exit-127 runs, preferring the
+     fuller same-status re-run. dodge plays end to end (its solid blue was the same
+     artifact). dumbbell2x-01's white "118" is its REAL game-over score screen (unattended
+     snake dies in ~3.5s): known heuristic false positive, not a bug.
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
      faults; check the dumps for case-mismatched data files.
    - **nazca trio + paraballwiz**: unknown Pollux mmio 0xf004. FleshChasmer x2: unknown fb
@@ -177,10 +199,15 @@ pipeline is re-run.
    silently refuses to free and games legitimately "free" in shutdown/mode-change paths.
    Fixed + rootfs-eabi restaged: Abbaye_caanoo renders, Abbaye_v3 grades PLAYABLE 57fps,
    Propis unregressed. Remaining split:
-   - **OABI half (OpenBOR_v2.1933, pacmame, scummvm-alpha, Wiztern) needs the same one-line
-     fix but the OABI shim is UNBUILDABLE** (GPH SDK gcc-4.0.2 rejects fakesdl.c's C99/
-     pthreads). Solving the OABI shim rebuild now has a concrete 4+-title payoff, plus every
-     future shim fix.
+   - **OABI shim rebuild SOLVED (540b3dc, 2026-08-25)**: the "unbuildable" wall was two
+     flags (`-std=gnu99` for the for-loop decls, `-D_GNU_SOURCE` for LinuxThreads'
+     __USE_UNIX98-gated PTHREAD_MUTEX_RECURSIVE). build_guest.sh produces all four ARM
+     libs again (MAGICEYES_SDK is assets/sdk/GPH_SDK). The rebuilt shim carries every
+     fakesdl fix since wave 3 (FreeSurface guard, palette blits). NOTE: the native
+     engine's OABI titles run the firmware's REAL libSDL (rootfs-win keeps it on
+     purpose), so the shim payoff is on the qemu/Wiz path and /opt/shim staging: the
+     OpenBOR/pacmame/scummvm-alpha/Wiztern retest still needs the shim actually staged
+     where those titles load it.
    - **supertux (Caanoo) is a different engine bug**: malloc sYSMALLOc top-chunk assertion
      immediately after SetVideoMode: brk()-contiguity/overlap suspect. Own session.
    - rotate/patissier_c_ko now runs to its own clean exit; only its exit cleanup still
@@ -254,9 +281,12 @@ run_nas_sweep's staged layout does implicitly.
   `ME_NO_OVLDIR`, `ME_NO_SPINSLEEP`, plus `ME_LD_DEBUG=libs|files|all`.
 - **Fenix titles are debuggable at source level**: the .gpe is a launcher script, the runtime
   (fxi) is often UNSTRIPPED, and the game's own .prg source ships beside the .dcb. Read them.
-- **The OABI guest shim still cannot be rebuilt** (SDK gcc-4.0.2 rejects fakesdl.c); the EABI
-  shim rebuilds fine (stage_rootfs_eabi.sh). If you touch guest/src, restage rootfs-eabi AND
-  re-check a Caanoo title.
+- **Both guest shims rebuild now** (OABI needed -std=gnu99 -D_GNU_SOURCE, fixed 540b3dc; EABI
+  via stage_rootfs_eabi.sh). If you touch guest/src, restage rootfs-eabi AND re-check a
+  Caanoo title. Guest env is a WHITELIST built in elf.c: FAKESDL_* debug toggles only reach
+  the guest as ME_FAKESDL_* on the host, and ME_PCHOOK did not fire at all on a dynamic EABI
+  exe (noiz2sa): for those, ground truth is cpu_state backtraces + memory_read of live
+  structs.
 - **Restaging assets from scratch now also needs the MIDI sets**: freepats (apt-get download
   freepats; dpkg -x) into usr/share/midi/freepats + /etc/timidity.cfg, and the gp2xpats donor
   from `zelda-roth-olb-3t_caanoo/game/timidity/` into usr/share/midi/gp2xpats, in ALL THREE
