@@ -93,9 +93,26 @@ def score_frame(path):
 MIN_NON_BLACK = 0.02
 
 
-def pick_screenshot(frame_pngs):
+# run_title captures at 1s, then every 2s, so frame i was taken at about this many seconds in.
+def _captured_at(i):
+    return 1.0 + 2.0 * i
+
+
+# How much to prefer a frame taken after the pilot reached its deepest screen. Large on purpose:
+# the base score rewards colour variety, and a title card usually beats gameplay on that (logo art
+# is showier than a playfield), so a mild nudge loses. A tracker issue illustrated with the title
+# screen says nothing about whether the game plays.
+DEEP_BONUS = 0.45
+
+
+def pick_screenshot(frame_pngs, deepest_at=None):
     """Choose the best frame worth publishing. Returns {path, score, ...} or None if the title
-    never drew anything meaningful."""
+    never drew anything meaningful.
+
+    `deepest_at` (seconds, from a --pilot run) is when the title last reached a screen it had not
+    shown before. Frames from after that moment are what the game actually looks like once you are
+    into it, so they are preferred outright rather than by position.
+    """
     best = None
     n = len(frame_pngs)
     for i, p in enumerate(frame_pngs):
@@ -104,6 +121,8 @@ def pick_screenshot(frame_pngs):
             continue
         # later frames are likelier to be past the splash (the sweep nudges START/A at ~2-10s)
         score *= 1.0 + 0.10 * (i / max(1, n - 1))
+        if deepest_at is not None and _captured_at(i) >= deepest_at:
+            score *= 1.0 + DEEP_BONUS
         if best is None or score > best["score"]:
             best = {"path": p, "score": round(score, 4), "non_black": round(nb, 3),
                     "colours": colours, "index": i}

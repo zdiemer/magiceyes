@@ -217,6 +217,7 @@ class PilotPolicy(Policy):
         self.responses = 0
         self.events = []            # [frame_seq, mask] -- the .rec of what we actually did
         self.visited = []           # node ids in order
+        self.deepest_at = None      # elapsed when it last reached a screen it had not seen before
         self.stuck_reason = None
 
     # ---- helpers -------------------------------------------------------------------------
@@ -358,6 +359,11 @@ class PilotPolicy(Policy):
                     self.idle = self.window[-8:]
                     self.null_self = _idle_spread(self.idle)
                 self.node = self._resolve_node(f)
+                if self.node.id not in self.visited:
+                    # First sighting of this screen. Remembering when that happened lets the
+                    # tracker pick a screenshot from AFTER the title got somewhere, instead of
+                    # relying on a positional nudge and losing to a colourful title card.
+                    self.deepest_at = round(elapsed, 1)
                 if not self.visited or self.visited[-1] != self.node.id:
                     self.visited.append(self.node.id)
                 self._begin_press(spath, f, now)
@@ -530,6 +536,7 @@ class PilotPolicy(Policy):
             "screens": reached,
             "presses": self.presses,
             "responsive": round(self.responses / self.presses, 3) if self.presses else 0.0,
+            "deepest_at": self.deepest_at,
             "lethal_inputs": sorted(self.banned),
             "pilot_hands_off": self.hands_off,
             "pilot_stuck": bool(self.stuck_reason) and reached <= 1 and not self.hands_off,

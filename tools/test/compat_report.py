@@ -226,7 +226,7 @@ def build(results_dir):
         for v in rep.get("titles", []):
             log = read_log(v)
             fat = fatal_line(log)
-            shot = pick_screenshot(v.get("frame_pngs") or [])
+            shot = pick_screenshot(v.get("frame_pngs") or [], v.get("deepest_at"))
             flat = bool(shot and shot.get("colours", 0) <= 2
                         and v.get("status") in ("playable", "renders"))
             if flat:
@@ -274,6 +274,7 @@ def build(results_dir):
                 # leaving that to a hand session per title. Absent on fixed-script runs.
                 "screens": v.get("screens"),
                 "responsive": v.get("responsive"),
+                "deepest_at": v.get("deepest_at"),
                 "lethal_inputs": v.get("lethal_inputs"),
                 "pilot_hands_off": v.get("pilot_hands_off"),
                 "pilot_note": v.get("pilot_note"),
