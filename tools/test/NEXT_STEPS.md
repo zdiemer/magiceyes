@@ -83,6 +83,14 @@ pipeline is re-run.
      model starved GP2X_Nat2007 (+Flappynerd_GP2X) into an infinite read() spin parked on
      "Loading...". ts_pending now streams idle samples at the same ~100Hz pace (per-frame
      queue-drainers still run dry).
+   **Tracker updated for the wave-6 movers (2026-08-24, compat repo 836347c)**: 20 issues
+   flipped to playable in place with fresh shots/clips (14 Wiz incl. the whole GLBasic
+   family, 5 GP2X, arcadevol1). NEW SWEEP CAVEAT discovered doing it: the generic press
+   script now QUITS some fixed titles mid-window (their menus respond since the libpng
+   fix): para3/Volleyball/Tetrablocks/Abusimbel/2xZdoom_selector/Flappynerd_GP2X/
+   angband2x grade black at ~110-150 frames from a scripted button exit but render fine
+   solo: left black in the tracker; the next full sweep needs a gentler press rotation
+   or these 7 stay mislabeled.
    Remaining clusters:
    - **Caanoo low-fps flappers are sweep-load artifacts, not auto-pan**: Drench/SantaMania/
      MNV/Flappynerd flipped playable<->black between recheck rounds, but Drench solo renders
