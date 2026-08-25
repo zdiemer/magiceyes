@@ -229,6 +229,15 @@ def build(results_dir):
             shot = pick_screenshot(v.get("frame_pngs") or [])
             flat = bool(shot and shot.get("colours", 0) <= 2
                         and v.get("status") in ("playable", "renders"))
+            if flat:
+                # Two colours is also what a monochrome text screen is: white-on-black menus,
+                # ASCII art, a mode-select list. A flat FILL has no structure. Un-flag when the
+                # frame has real edges, or when its second colour covers a meaningful share of
+                # the screen (a fill's minority colour is a stray pixel, not a picture).
+                fm = compat_visual.measure(shot.get("path", "")) or {}
+                ink = fm.get("ink", 0.0)
+                if fm.get("edge_energy", 0.0) >= 1.5 or 0.01 < ink < 0.99:
+                    flat = False
             # Judge the whole run, not just the frame chosen as the screenshot: a title can draw a
             # clean menu and fall apart once gameplay starts.
             run = compat_visual.measure_run(v.get("frame_pngs") or []) if not flat else None
