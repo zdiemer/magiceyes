@@ -496,8 +496,12 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
                 }
             }
         }
-        if (phys == 0xE0020000u && !getenv("ME_GP2X_NOBLIT")) {   /* MMSP2 2D blitter window: trap
-                                        writes -> run blits; reads -> serve STATUS=idle (synchronous) */
+        if (phys >= 0xE0020000u && phys < 0xE0028000u && !getenv("ME_GP2X_NOBLIT")) {
+            /* MMSP2 2D blitter window: trap writes -> run blits; reads -> serve STATUS=idle
+               (synchronous). The register file is MIRRORED through the whole 0xE002xxxx
+               block: SmashGp2x maps 0xE0024000 and programs the identical MESG layout
+               there (dst/src/strides/size/STATUS-go), so accept any page of the block --
+               the hook works on window-relative offsets either way. */
             g_blit_guest = at;
             static uc_hook bh, br;
             uc_hook_add(g_uc, &bh, UC_HOOK_MEM_WRITE, blitter_write_cb, NULL,
