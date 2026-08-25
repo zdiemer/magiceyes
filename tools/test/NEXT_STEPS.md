@@ -145,9 +145,18 @@ pipeline is re-run.
      wider view before trusting a "clean" half.) The garbled-visuals group re-ran 9
      playable + 2 renders of 11; the press-quit class is handled by a run_title retry
      (07e8743: a pressed run that dies early re-runs untouched and the better grade wins:
-     all 7 mislabeled titles now grade, Volleyball playable 60fps). Still black after all
-     this: MNV_Caanoo (load-flaky solo-renders), SmashGp2x02 (MMSP2 0x1062/0x1066/0x106e),
-     JUMPNRUN/kenlab, wiz-car.
+     all 7 mislabeled titles now grade, Volleyball playable 60fps).
+   - **Three more blacks fell in the late-evening pass (5ffd328, 2744755, 775f22e):**
+     SmashGp2x02 (the MESG blitter register file is MIRRORED through 0xE002xxxx: the game
+     maps 0xE0024000: accept the whole block -> full title + interactive menu; the 0x106x
+     quirk was incidental), JUMPNRUN (a STATIC GP2X-era build in the Caanoo folder: static
+     titles now get the GP2X display model whatever the device badge: fbdev-pram aliasing
+     + 16bpp instead of the Caanoo 24bpp menu default -> pixel-perfect under both badges;
+     also fixed palette-implies-8bpp: an explicit MLC_STL_CNTL 16bpp declaration overrides
+     it), and wiz-car (busy-waited 1.4B reads on the Pollux DPC vsync INTPEND, bit 10
+     @0x308c: modeled as a 60Hz edge, bit 15 kept set for open2x init checks -> renders
+     its portrait-held title screen). Still black: MNV_Caanoo (load-flaky, renders solo)
+     and kenlab (fakegles glDrawElements gap).
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
      faults; check the dumps for case-mismatched data files.
    - **nazca trio + paraballwiz**: unknown Pollux mmio 0xf004. FleshChasmer x2: unknown fb
