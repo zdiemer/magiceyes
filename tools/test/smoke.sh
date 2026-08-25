@@ -60,4 +60,9 @@ echo "$out" | grep -q "hello from magiceyes" || fail "hello: missing stdout with
 echo "$out" | grep -qi "ctl.*listening" && fail "ctl started without ME_CTL being set"
 echo "  ok: no listener, no behaviour change"
 
+echo "== smoke 5: the pilot's control loop (no engine, no game) =="
+python3 "$REPO/tools/test/pilot/selftest.py" >"$T/pilot.log" 2>&1 \
+  || { sed 's/^/    /' "$T/pilot.log"; fail "pilot selftest"; }
+echo "  ok: finds gated screens, ignores self-animation, blames and then avoids a fatal button"
+
 echo "SMOKE PASS"

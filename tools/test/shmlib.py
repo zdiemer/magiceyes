@@ -145,10 +145,16 @@ def read_frame_raw(path, w, h):
     return b"".join(data[y * stride: y * stride + row] for y in range(h))
 
 
-def _read_pixels(path, w, h):
+def read_pixels(path, w, h):
+    """The raw stride-included pixel block. Callers that want several measures off one frame
+    should read once with this and use the *_from_pixels helpers, rather than calling
+    nonzero_ratio()/dhash() separately (each of those re-reads the whole object)."""
     with open(path, "rb") as f:
         f.seek(PIX_OFF)
         return f.read(MAXW * h * 2)
+
+
+_read_pixels = read_pixels          # legacy internal name
 
 
 def nonzero_ratio(path, w, h):
@@ -156,7 +162,13 @@ def nonzero_ratio(path, w, h):
     Subsamples for speed; good enough to tell 'rendered something' from 'black screen'."""
     if w == 0 or h == 0:
         return 0.0
-    data = _read_pixels(path, w, h)
+    return nonzero_from_pixels(_read_pixels(path, w, h), w, h)
+
+
+def nonzero_from_pixels(data, w, h):
+    """nonzero_ratio() against an already-read pixel block."""
+    if w == 0 or h == 0:
+        return 0.0
     nz = tot = 0
     ystep = 2 if h > 120 else 1
     xstep = 2 if w > 160 else 1
@@ -170,22 +182,22 @@ def nonzero_ratio(path, w, h):
     return (nz / tot) if tot else 0.0
 
 
-def dhash(path, w, h):
-    """A 64-bit difference-hash of the current frame (perceptual: robust to small changes, sensitive
-    to gross ones -- black screen, garbage, wrong palette). Downsamples to a 9x8 luminance grid and
-    compares horizontally-adjacent cells. Pure stdlib. Compare two with hamming()."""
+def luma_grid(data, w, h, gw, gh):
+    """Downsample an already-read pixel block to a gw x gh grid of ~luminance (0..255).
+
+    Each cell averages a 3x3-ish sample of its area rather than every pixel: enough to be stable,
+    cheap enough to run every poll. This is the one primitive dhash(), the pilot's motion mask and
+    its edge-energy measure all share."""
+    cells = [[0] * gw for _ in range(gh)]
     if w == 0 or h == 0:
-        return 0
-    data = _read_pixels(path, w, h)
-    GW, GH = 9, 8
-    cells = [[0] * GW for _ in range(GH)]
-    for cy in range(GH):
-        y0, y1 = cy * h // GH, max(cy * h // GH + 1, (cy + 1) * h // GH)
-        for cx in range(GW):
-            x0, x1 = cx * w // GW, max(cx * w // GW + 1, (cx + 1) * w // GW)
-            s = n = 0
-            ys = max(1, (y1 - y0) // 3)
+        return cells
+    for cy in range(gh):
+        y0, y1 = cy * h // gh, max(cy * h // gh + 1, (cy + 1) * h // gh)
+        ys = max(1, (y1 - y0) // 3)
+        for cx in range(gw):
+            x0, x1 = cx * w // gw, max(cx * w // gw + 1, (cx + 1) * w // gw)
             xs = max(1, (x1 - x0) // 3)
+            s = n = 0
             for y in range(y0, y1, ys):
                 base = y * MAXW * 2
                 for x in range(x0, x1, xs):
@@ -198,14 +210,28 @@ def dhash(path, w, h):
                         s += (r * 8 * 30 + g * 4 * 59 + b * 8 * 11) // 100  # ~luminance 0..255
                         n += 1
             cells[cy][cx] = s // n if n else 0
+    return cells
+
+
+def dhash_bits(cells):
+    """The 64-bit difference hash of a 9x8 luma grid: is each cell darker than its right neighbour."""
     bits = 0
     i = 0
-    for cy in range(GH):
-        for cx in range(GW - 1):
-            if cells[cy][cx] < cells[cy][cx + 1]:
+    for row in cells:
+        for cx in range(len(row) - 1):
+            if row[cx] < row[cx + 1]:
                 bits |= 1 << i
             i += 1
     return bits
+
+
+def dhash(path, w, h):
+    """A 64-bit difference-hash of the current frame (perceptual: robust to small changes, sensitive
+    to gross ones -- black screen, garbage, wrong palette). Downsamples to a 9x8 luminance grid and
+    compares horizontally-adjacent cells. Pure stdlib. Compare two with hamming()."""
+    if w == 0 or h == 0:
+        return 0
+    return dhash_bits(luma_grid(_read_pixels(path, w, h), w, h, 9, 8))
 
 
 def hamming(a, b):

@@ -142,6 +142,14 @@ in-process) need the engine-side control channel — not built yet.
 - **Harness hooks**: `ME_RUN_SECS=N` self-terminates cleanly (flushing the report) for bounded
   runs; a host fault makes the standalone engine exit **70** (so a crash ≠ a clean exit);
   `ME_SHM_NAME` lets parallel engines use separate shm objects.
+- **Closed-loop input** (`tools/test/pilot/`, `--pilot` on `run_title`/`run_corpus`/`run_nas_sweep`):
+  picks the next button from what is on screen rather than firing one fixed rotation at every title.
+  A press is judged against a **null control** (how much that screen moves with nothing pressed), so
+  an attract loop does not credit every button; risky buttons (START/SELECT) are probed last, since
+  the old rotation led with START and START is quit in some engines. Per-title screen graphs in
+  `pilot/paths/<slug>.json` remember what each button did, so a button that killed the title is
+  never pressed again and two fatal buttons switch the title to hands-off. Adds `screens`,
+  `responsive`, `lethal_inputs` to the verdict. `pilot/selftest.py` gates it with no engine or game.
 - **`tools/test/`** (WSL, reads `/dev/shm`): `run_title.py` runs one binary → a verdict JSON with a
   status tier (`incompatible`<`crashed`<`black`<`renders`<`playable`) + fps/frames/audio/quirks;
   `run_corpus.py` runs a whole directory (`--jobs N` parallel) → `SCORECARD.md` +

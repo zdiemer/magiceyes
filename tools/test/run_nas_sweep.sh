@@ -2,7 +2,7 @@
 # Sweep the whole GP2X / Wiz / Caanoo corpus off the NAS share and produce the compatibility
 # artifacts. Run from WSL:
 #
-#   bash tools/test/run_nas_sweep.sh [--secs 25] [--jobs 6] [--stage-only]
+#   bash tools/test/run_nas_sweep.sh [--secs 25] [--jobs 6] [--pilot] [--stage-only]
 #
 # Why it stages to ext4 first (this is not optional, see CLAUDE.md):
 #   * The engine resolves cache/ and saves/ BESIDE THE EXE. Running it from /mnt/e puts the GPEComp
@@ -23,6 +23,7 @@ STAGE_ONLY=0
 CLIP_FPS=15
 CLIP_START=8
 CLIP_SECS=6
+PILOT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --secs) SECS=$2; shift 2;;
@@ -30,6 +31,7 @@ while [ $# -gt 0 ]; do
     --clip-fps) CLIP_FPS=$2; shift 2;;
     --clip-secs) CLIP_SECS=$2; shift 2;;
     --no-clips) CLIP_FPS=0; shift;;
+    --pilot) PILOT=1; shift;;
     --stage-only) STAGE_ONLY=1; shift;;
     *) echo "unknown arg: $1"; exit 2;;
   esac
@@ -55,6 +57,8 @@ for a in rootfs rootfs-eabi rootfs-win rootfs-gp2x caanoo-ref shim fonts; do
   [ -d "$REPO/assets/$a" ] && rsync -a --delete "$REPO/assets/$a/" "$STAGE/assets/$a/"
 done
 cp -f "$REPO/tools/test/"*.py "$STAGE/harness/"
+rm -rf "$STAGE/harness/pilot"
+cp -a "$REPO/tools/test/pilot" "$STAGE/harness/pilot"
 
 # a stale save/cache from an earlier run must not colour a verdict
 rm -rf "$STAGE/saves" "$STAGE/cache"
@@ -67,6 +71,16 @@ rm -rf "$STAGE/saves" "$STAGE/cache"
 # revealed a family of shoebox titles parked on a "press any button" splash -- see NEXT_STEPS.md).
 PRESS="START:0.4,NONE:2.0,A:0.4,NONE:2.0,B:0.4,NONE:2.0,START:0.4,NONE:1.6,A:0.4,NONE:1.6,B:0.4,NONE:2.0,UP:0.3,NONE:1.0,B:0.4"
 
+# --pilot swaps that rotation for the closed loop (tools/test/pilot): it watches the screen and
+# picks the next button from what it sees, so it does not lead with START at a title whose START is
+# its quit. Graphs live beside the staging rather than in the repo, so they accumulate across
+# sweeps on this machine without churning the working tree; copy the interesting ones into
+# tools/test/pilot/paths/ to keep them.
+INPUT_ARGS=(--press "$PRESS")
+if [ "$PILOT" = "1" ]; then
+  INPUT_ARGS=(--pilot --pilot-dir "$STAGE/paths")
+fi
+
 cd "$STAGE"
 {
   echo "=== sweep started $(date -Is)  secs=$SECS jobs=$JOBS ==="
@@ -76,7 +90,7 @@ cd "$STAGE"
     echo "########## $dir (device=${dev:-auto}) $(date -Is) ##########"
     if [ -n "$dev" ]; then export MAGICEYES_DEVICE="$dev"; else unset MAGICEYES_DEVICE; fi
     python3 "$STAGE/harness/run_corpus.py" "/mnt/s/$dir" \
-      --secs "$SECS" --jobs "$JOBS" --press "$PRESS" \
+      --secs "$SECS" --jobs "$JOBS" "${INPUT_ARGS[@]}" \
       --clip-fps "$CLIP_FPS" --clip-start "$CLIP_START" --clip-secs "$CLIP_SECS" \
       --engine "$STAGE/me_unicorn" --out "$STAGE/results/$tag"
     echo "---- $dir done $(date -Is) ----"

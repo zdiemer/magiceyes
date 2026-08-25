@@ -41,7 +41,8 @@ def parse_press(script):
 
 def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
             press=None, headed=False, extra_env=None, quiet=False, replay=None,
-            clip_fps=0, clip_start=6.0, clip_secs=0.0, _retry=True):
+            clip_fps=0, clip_start=6.0, clip_secs=0.0, _retry=2, pilot=False,
+            pilot_dir=None):
     engine = engine or os.path.join(REPO, "bin", "me_unicorn")
     if not os.path.exists(engine):
         return {"title": os.path.basename(game), "path": game, "status": "error",
@@ -99,11 +100,16 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     replay_hashes = []              # [[frame_seq, hash], ...] -- deterministic frame-keyed captures
     CAP_FRAMES = 120                # capture a frame hash every 120 frames during replay
     next_cap_frame = CAP_FRAMES
-    press_seq = parse_press(press)
-    press_idx = 0
-    press_next_at = 2.0 if press_seq else None   # start the input script ~2s in (after boot)
-    hold_until = 0.0
-    held_mask = 0
+    # Input is driven by a policy object, called once per poll. --replay owns the input outright
+    # (deterministic, frame-keyed), so no policy runs alongside it.
+    policy = None
+    if rep is None:
+        if pilot:
+            from pilot.policy import PilotPolicy
+            policy = PilotPolicy(game, secs, base_dir=pilot_dir)
+        elif press:
+            from pilot.policy import ScriptPolicy
+            policy = ScriptPolicy(parse_press(press))
     poll = 0.02 if rep is not None else 0.1      # finer polling tracks frames during replay
 
     # Motion clip: a window of raw frames at a real frame rate, for a smooth playback later. Only
@@ -165,18 +171,8 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
                     replay_hashes.append([int(next_cap_frame),
                                           "0x%016x" % shmlib.dhash(spath, h["width"], h["height"])])
                     next_cap_frame += CAP_FRAMES
-            # input script: press the next chord when its time comes, release when its hold ends
-            el = now - t0
-            if rep is None and press_next_at is not None and el >= press_next_at:
-                names, dur = press_seq[press_idx]
-                held_mask = shmlib.buttons_mask(names)
-                shmlib.set_buttons(spath, held_mask)
-                hold_until = now + dur
-                press_idx += 1
-                press_next_at = el + dur if press_idx < len(press_seq) else None
-            elif held_mask and now >= hold_until:
-                held_mask = 0
-                shmlib.set_buttons(spath, 0)
+            if policy is not None:
+                policy.step(spath, h, now, now - t0)
         time.sleep(poll)
 
     # let the process finish + flush its report
@@ -206,6 +202,10 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
                 pass
 
     elapsed = max(0.001, time.time() - t0)
+    pilot_result = {}
+    if policy is not None:
+        policy.on_exit(exit_code, elapsed)
+        pilot_result = policy.result() or {}
     fps = frames_seen / elapsed
     report = _load_report(report_path)
     hdr = shmlib.read_header(spath) or {}
@@ -241,6 +241,7 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
         "report": report_path,
         "out_dir": out_dir,
     }
+    verdict.update(pilot_result)
     # The input script can QUIT a title whose menus actually work: since the wave-6 fixes the
     # generic taps land on live menu entries (Volleyball's START is its quit), so a run that
     # died well before its time under scripted input gets one untouched re-run, and the
@@ -251,13 +252,26 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     # titles: scripted START quits their intro at 2.3s, exit 0). So ANY early end under
     # scripted input earns the untouched re-run, whatever the status or exit code, and a
     # same-status retry wins when it actually drew more.
-    if (press and not replay and _retry
-            and elapsed < secs - 3 and frames_seen > 30):
+    #
+    # The pilot needs no such guess: it knows which button it was holding when the title died, and
+    # its graph has already recorded that button as lethal. So its re-run is not "the same thing
+    # with no input", it is "the same exploration with that one press off the table", which keeps
+    # whatever progress the first attempt made. It gets two of them, because a title that quits on
+    # ANY early input (angband2x-v2) only proves one button fatal per attempt: attempt two finds
+    # the second, and attempt three is over the hands-off threshold and just watches.
+    died_early = elapsed < secs - 3 and frames_seen > 30
+    if pilot:
+        do_retry = _retry > 0 and died_early and bool(pilot_result.get("lethal_inputs"))
+        sub = "retry%d" % _retry
+    else:
+        do_retry = bool(press) and _retry > 0 and died_early
+        sub = "nopress"
+    if do_retry and not replay:
         retry = run_one(game, secs=secs, engine=engine,
-                        out_dir=os.path.join(out_dir, "nopress"), shm_name=shm_name,
+                        out_dir=os.path.join(out_dir, sub), shm_name=shm_name,
                         press=None, headed=False, extra_env=extra_env, quiet=True,
                         clip_fps=clip_fps, clip_start=clip_start, clip_secs=clip_secs,
-                        _retry=False)
+                        _retry=_retry - 1, pilot=pilot, pilot_dir=pilot_dir)
         order = {"error": 0, "incompatible": 1, "crashed": 2, "black": 3,
                  "renders": 4, "playable": 5}
         better = order.get(retry.get("status"), 0) > order.get(verdict["status"], 0)
@@ -329,6 +343,10 @@ def main():
     ap.add_argument("--out", default=None, help="output dir (default: a temp dir)")
     ap.add_argument("--shm-name", default="gp2x_fb")
     ap.add_argument("--press", default=None, help='e.g. "UP:0.5,A:0.2,B+DOWN:0.3"')
+    ap.add_argument("--pilot", action="store_true",
+                    help="drive input from what is on screen instead of a fixed script")
+    ap.add_argument("--pilot-dir", default=None,
+                    help="where per-title screen graphs live (default tools/test/pilot/paths)")
     ap.add_argument("--clip-fps", type=int, default=0, help="record a motion clip at N fps")
     ap.add_argument("--clip-start", type=float, default=6.0, help="seconds in to start recording")
     ap.add_argument("--clip-secs", type=float, default=0.0, help="length of the recorded window")
@@ -339,7 +357,8 @@ def main():
     a = ap.parse_args()
     v = run_one(a.game, secs=a.secs, engine=a.engine, out_dir=a.out, shm_name=a.shm_name,
                 press=a.press, headed=a.headed, replay=a.replay,
-                clip_fps=a.clip_fps, clip_start=a.clip_start, clip_secs=a.clip_secs)
+                clip_fps=a.clip_fps, clip_start=a.clip_start, clip_secs=a.clip_secs,
+                pilot=a.pilot, pilot_dir=a.pilot_dir)
     if a.json:
         print(json.dumps(v, indent=2))
     else:
@@ -352,6 +371,12 @@ def main():
             print("   blockers: " + ", ".join(str(b) for b in blockers[:8]))
         if v.get("quirks"):
             print("   quirks:   " + ", ".join(v["quirks"][:8]))
+        if v.get("pilot"):
+            print("   pilot:    screens=%d presses=%d responsive=%.2f family=%s%s%s" % (
+                v.get("screens", 0), v.get("presses", 0), v.get("responsive", 0.0),
+                v.get("family") or "-",
+                "  LETHAL=" + ",".join(v["lethal_inputs"]) if v.get("lethal_inputs") else "",
+                "  (" + v["pilot_note"] + ")" if v.get("pilot_note") else ""))
     return 0 if v["status"] in ("playable", "renders") else 1
 
 

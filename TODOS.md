@@ -101,6 +101,14 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 - **Record + replay inputs for parity.** Have `baseline.py` record the input stream alongside the
   golden metrics/frame hashes, then replay on later runs and assert parity (same inputs → same
   frames/fps/audio).
+- **Finish the gameplay pilot** (`tools/test/pilot/`, `--pilot`). The closed loop lands: it drives
+  input from what is on screen, judges each press against a null control, and remembers the buttons
+  that kill a title. Still to do: a `depth` axis (boot/menu/gameplay) built on `screens` +
+  `responsive`; a `probe_inputs` MCP tool so an agent session gets a title's whole button response
+  map in one call rather than ~20 press/screenshot round trips; and promoting a discovered path to
+  a committed `.rec` after a confirm run under `ME_FAKESDL_VTIME=60`, which turns each cracked
+  title into a free per-frame regression gate. Tiers stay untouched until the new signals are
+  calibrated against a full sweep.
 
 ## Packaging / distribution
 

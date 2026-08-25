@@ -16,7 +16,7 @@ bash host/engine/build_engine.sh        # -> bin/me_unicorn
 
 ```sh
 python3 tools/test/run_title.py <game.gpe|folder|zip> [--secs 20] [--press "UP:0.5,A:0.2"] \
-                                [--headed] [--json] [--out DIR]
+                                [--pilot] [--headed] [--json] [--out DIR]
 ```
 
 Prints a one-line verdict and writes `<out>/verdict.json` (+ `frameNN.png`, `report.json`,
@@ -69,6 +69,36 @@ the engine's structured run report:
 `shmlib.py` holds the shared shm reader + RGB565→PNG writer (pure stdlib). `run_corpus.py` imports
 `run_title.py`, which imports `shmlib`.
 
+## Driving input: the fixed script, or the pilot
+
+`--press` replays one fixed chord script on a wall clock, the same one at every title. That is what
+the sweep has always used, and it has a specific failure mode: it leads with START, and START is
+"confirm" in some engines and "quit" in others, so the first thing it does to a title is press its
+most dangerous button. Seven titles were mislabeled in the published tracker for exactly this
+reason (NEXT_STEPS.md, "the generic press script now QUITS some fixed titles mid-window").
+
+`--pilot` (`tools/test/pilot/`) closes the loop instead: it watches the framebuffer and picks the
+next button from what it sees.
+
+- **It measures a null control first.** Most titles animate on their own, so "the frame changed
+  after I pressed" proves nothing. The pilot spends a moment watching each new screen with nothing
+  pressed, and only credits a button that beats what the screen does unprompted. That is what tells
+  a live menu from an attract loop.
+- **It probes safest-first.** The d-pad tells you immediately whether a menu is live and almost
+  never exits anything; the buttons that can quit are tried last, and only if nothing safer has
+  moved the game along.
+- **It learns.** Per-title graphs under `pilot/paths/` record every screen and what each button did
+  there, so a run resumes where the last one got to, and a button that killed the title is never
+  pressed again. Two fatal buttons and it stops pressing that title entirely and just watches,
+  which is how a title that quits on *any* early input gets a clean run without a special case.
+
+Extra verdict fields when `--pilot` is on: `screens`, `presses`, `responsive` (the fraction of
+presses that did something measurable), `family`, `lethal_inputs`, `pilot_hands_off`, `pilot_note`,
+`pilot_events` (the input stream it actually applied, frame-keyed).
+
+`tools/test/pilot/selftest.py` gates the control loop against a fake title with no engine and no
+game, and runs as part of `smoke.sh`.
+
 ## Whole-corpus compatibility sweep
 
 `run_corpus.py` scores a directory. The `compat_*` tools turn several of those runs into the
@@ -85,7 +115,7 @@ python3 tools/test/compat_issues.py  --manifest tools/test/compat_manifest.json 
 
 | Tool | Does |
 |---|---|
-| `run_nas_sweep.sh` | Mounts the corpus share, stages engine+assets on **ext4** (drvfs costs ~20% fps and flips tiers), sweeps GP2X/Wiz/Caanoo with the right `MAGICEYES_DEVICE` |
+| `run_nas_sweep.sh` | Mounts the corpus share, stages engine+assets on **ext4** (drvfs costs ~20% fps and flips tiers), sweeps GP2X/Wiz/Caanoo with the right `MAGICEYES_DEVICE`. `--pilot` swaps the fixed rotation for the closed loop |
 | `compat_report.py` | Classifies every title into **one** failure group, ranks groups by titles blocked, writes `CORPUS_SWEEP.md` + `compat_manifest.json` |
 | `compat_frames.py` | Picks the most representative captured frame per title (stdlib-only PNG decode) |
 | `compat_visual.py` | Measures the frames for shear, duplication, noise and wrong geometry, so a title that runs but draws garbage is graded `ingame` instead of `playable` |

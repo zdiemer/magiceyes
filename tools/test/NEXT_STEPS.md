@@ -1,5 +1,38 @@
 # What the corpus sweep says to fix next
 
+## The press rotation is no longer the only option (2026-08-25)
+
+`tools/test/pilot/` is a closed-loop input driver: `run_title.py --pilot` / `run_corpus.py --pilot`
+/ `run_nas_sweep.sh --pilot`. It watches the framebuffer and picks the next button from what it
+sees, instead of firing the same fixed rotation at all 972 titles. It exists because that rotation
+leads with START, and START is confirm in some engines and quit in others, which is the whole
+mechanism behind the mislabeled seven below.
+
+Measured head to head on those seven, cold, sequential, engine on ext4: the rotation's pressed run
+died early on **all seven** (each rescued only by the `nopress` re-run). The pilot lost none of
+them, and explored while it was there: para3 reached 7 distinct screens with 57% of its presses
+producing a measurable response, 2xZdoom_selector 3 screens at 42%.
+
+What it gives the sweep that the rotation cannot:
+
+- **`responsive`**: the fraction of presses that changed the screen beyond what that screen does on
+  its own. This is the missing signal for the SimOniZ question ("proven correct end to end, still
+  ignores clicks"): a title that renders at 60fps with `responsive=0.0` across a dozen buttons is
+  deaf, and now says so in its verdict instead of needing a hand session to find out.
+- **`lethal_inputs` and `pilot_hands_off`**: which button killed the title, remembered in
+  `pilot/paths/<slug>.json` so the re-run avoids it. Two fatal buttons and it stops pressing that
+  title entirely, which is how angband2x-v2 (dies ~2s in on UP *or* DOWN) gets a clean 1819-frame
+  run with no special case.
+- **`screens`**: how many distinct screens it reached, so "boots to a menu" and "gets into the
+  game" stop looking identical in the scorecard.
+
+Not yet done, in rough order: a `depth` axis (boot/menu/gameplay) built on those signals; a
+`probe_inputs` MCP tool so an agent session gets the whole button response map in one call instead
+of twenty press-and-screenshot round trips; promoting a discovered path to a committed `.rec` after
+a confirm run under `ME_FAKESDL_VTIME=60`. The tier ladder is deliberately untouched until the new
+signals are calibrated against a full sweep.
+
+
 Ranked by how many titles one fix would move. Updated from the SIXTH full sweep
 (2026-08-25 midday, after the wave-6 black-screen arc, the visual/scaler fixes, the
 fakesdl palette-blit fix, the flat-fill classifier fix, and the early-end press-quit
