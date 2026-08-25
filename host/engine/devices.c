@@ -128,6 +128,9 @@ int g_fb8_mode = 0;           /* title showed 8bpp evidence (MLC HSTRIDE=1 or PU
    accepted mode; GET_VSCREENINFO/GET_FSCREENINFO reflect it and present_guest reads + publishes
    frames at this size (the shm contract carries width/height up to 1024x768; the viewer scales). */
 int g_fbv_w = 320, g_fbv_h = 240;
+/* MLC STL scaler registers as last written (HSC/VSCL/VSCH/HW): the hardware-scaled-surface
+   source geometry is derived from these in mmsp2_write_cb. Reset with the fb mode. */
+static uint32_t g_mlc_hsc = 1024, g_mlc_vscl = 0, g_mlc_vsch = 0, g_mlc_hw = 0;
 /* Pollux PORTRAIT scanout (the Wiz LCD is physically 240x320 rotated): the open2x-wiz SDL
    programs MLCSCREENSIZE as 240x320 and rotate-blits the app's landscape frame into the portrait
    buffer. Detected from the SCREENSIZE write (h > w); present un-rotates. */
@@ -1109,6 +1112,43 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         me940_reg_write(off, (uint32_t)value); return;
     }
     if (off == MMSP2_PALLT_A || off == MMSP2_PALLT_D) { gp2x_mmio_palette(off, (uint32_t)value); return; }
+    /* MLC STL hardware scaler (paeryn "hardware-scaled surfaces": the game renders a LARGER
+       surface and the MLC downscales it to the 320x240 panel). paeryn programs
+       HSC @0x2906 = 1024*src_w/phys_w, VSCL/VSCH @0x2908/0x290a = src_h*pitch/phys_h, and
+       HW @0x290c = pitch in bytes. Present used to ignore all three and fold e.g. a
+       640x480/1280-byte-pitch surface into 640-byte rows: the interleaved/sheared class
+       (Volleyball, UQM). Derive the SOURCE geometry and present the surface at its real
+       size (the shm contract carries up to 1024x768; the viewer scales). */
+    if (off >= 0x2906 && off <= 0x290c && !(off & 1)) {
+        if (getenv("ME_GP2X_MLCLOG"))
+            fprintf(stderr, "  MLC scaler raw %04x sz%d = %08x\n", off, size, (uint32_t)value);
+        uint32_t lo = (uint32_t)value & 0xffff;
+        switch (off) {
+        case 0x2906: g_mlc_hsc = lo; break;
+        case 0x2908: g_mlc_vscl = lo;
+                     if (size == 4) g_mlc_vsch = ((uint32_t)value >> 16) & 0xffff; break;
+        case 0x290a: g_mlc_vsch = lo; break;
+        case 0x290c: g_mlc_hw = lo; break;
+        }
+        /* What matters for present is the LINE STRIDE the panel scans at: MLC_STL_HW. A
+           title in a "scaled" mode (Volleyball: HSC=2048 VS=2560 HW=1280) writes each
+           scene line TWICE at the natural 640-byte pitch, and the hardware shows every
+           other line by striding HW bytes per panel line. Measured on Volleyball: the
+           memory holds 320 unique pixels per 640-byte line, lines duplicated, so panel
+           geometry (320x240) with row stride HW reproduces the hardware picture; deriving
+           a bigger virtual size from HSC/VS presented the raw doubled buffer (sheared,
+           two copies side by side). g_fb_stride carries the stride; g_fbv_* stay 320x240. */
+        uint32_t hw = g_mlc_hw;
+        int bypp = g_fb8_mode ? 1 : 2;
+        uint32_t native = 320u * (uint32_t)bypp;
+        if (hw >= native && hw <= native * 4 && (hw % native) == 0 &&
+            g_fb_stride != hw && g_fbv_w == 320) {
+            fprintf(DIAG, "MLC scaler: panel line stride %u (HSC=%u VS=%u)\n",
+                    hw, g_mlc_hsc, (g_mlc_vsch << 16) | g_mlc_vscl);
+            g_fb_stride = hw;
+        }
+        return;   /* known display config (also covered by mlc_config_write's range) */
+    }
     if (off == MMSP2_EADRL || off == MMSP2_EADRH) {   /* MLC primary scanout base (single-buffer) */
         uint16_t lo = 0, hi = 0;
         uc_mem_read(uc, g_mmsp2_guest + MMSP2_EADRL, &lo, 2);
@@ -1283,6 +1323,8 @@ void devices_reset(void) {
     g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0;
     g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0; g_fb_from_devmem = 0;
     g_caanoo_bpp = 0; g_caanoo_pitch = 0; g_fb8_mode = 0; g_fbv_w = 320; g_fbv_h = 240;
+    g_mlc_hsc = 1024; g_mlc_vscl = 0; g_mlc_vsch = 0; g_mlc_hw = 0;
+    g_fb_stride = 640; g_fb_bpp = 16; g_fb_xoff = 0;
     g_mlc_rot = 0; g_mlc_rot_w = 240; g_mlc_rot_h = 320; g_mlc_rot_pitch = 0; g_mlc_rot_bypp = 2;
     g_flip_active = 0; g_flip_guest = 0;
     g_oadr_driven = 0; g_frame_ready = 0;
