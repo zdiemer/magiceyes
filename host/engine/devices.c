@@ -247,10 +247,27 @@ void present_guest(uint32_t g) {
                                                but gpu940 video buffers are power-of-2 wide and a
                                                PUT_VSCREENINFO mode sets its own width) */
         uint32_t rowb = (uint32_t)g_fbv_w * 2;
+        /* MLC-scaled mode (stride > native, HSC > 1:1): the surface holds wider-than-panel
+           lines and the hardware downsamples horizontally by HSC/1024 source pixels per
+           output pixel, exactly paeryn's scale_x = 1024*width/phys_width. Verified on
+           Volleyball (640-wide Game&Watch court: both scores + GAME A/B side by side) and
+           para3 (640-wide intro text): without the subsample each showed a plausible-looking
+           but WRONG left-half crop. */
+        int hsub = (g_fb_stride > rowb && g_mlc_hsc > 1024);
         uint8_t row[GP2XSHM_MAXW * 2];
         for (int y = 0; y < g_fbv_h; y++) {
-            { uint8_t *src = guest_to_host(g + (uint32_t)y * g_fb_stride); if (!src) break;
-              memcpy(row, src, rowb); }
+            uint8_t *src = guest_to_host(g + (uint32_t)y * g_fb_stride); if (!src) break;
+            if (hsub) {
+                const uint16_t *s16 = (const uint16_t *)src;
+                uint16_t *r16 = (uint16_t *)row;
+                uint32_t last = g_fb_stride / 2 - 1;
+                for (int x = 0; x < g_fbv_w; x++) {
+                    uint32_t sx = ((uint32_t)x * g_mlc_hsc) >> 10;
+                    r16[x] = s16[sx > last ? last : sx];
+                }
+            } else {
+                memcpy(row, src, rowb);
+            }
             memcpy(g_shm->pixels + (size_t)y * GP2XSHM_MAXW * 2, row, rowb);
             if (!nz) for (uint32_t i = 0; i < rowb; i++) if (row[i]) { nz = 1; break; }
         }
