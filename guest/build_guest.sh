@@ -47,7 +47,9 @@ cp -f "$HERE/src/"*.c "$HERE/src/gp2xshm.h" "$HERE/src/glcmd.h" "$BLD/"
 cp -rf "$SDK/DGE/include/." "$BLD/inc/"
 
 echo "building libSDL-1.2.so.0 ..."
-$GCC $CFLAGS -I "$BLD/inc/SDL" -I "$BLD/inc" -I "$BLD" \
+# gnu99: the shim uses for-loop decls; _GNU_SOURCE: glibc 2.3.6 LinuxThreads hides
+# PTHREAD_MUTEX_RECURSIVE / pthread_mutexattr_settype behind __USE_UNIX98
+$GCC $CFLAGS -std=gnu99 -D_GNU_SOURCE -I "$BLD/inc/SDL" -I "$BLD/inc" -I "$BLD" \
   -Wl,-soname,libSDL-1.2.so.0 -o "$BLD/libSDL-1.2.so.0" "$BLD/fakesdl.c" -lrt -ldl -lpthread
 
 # fake-GLES offload shim (OABI Caanoo titles -- e.g. the Deicide-pack Propis -- link the firmware's
