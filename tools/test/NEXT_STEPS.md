@@ -135,13 +135,19 @@ pipeline is re-run.
      (unconfirmed). Debug gotcha recorded: ctl breakpoints on ALREADY-HOT code may
      silently fail to arm (the libc read bp never fired while the syscall clearly
      ran); trust pchook (launch-latched) for negatives.
-   - **Shear/interleave class FIXED (ed8fab2)**: not MESG blits at all: the family programs
-     the MLC scaler (HSC=2048 VS=2560 HW=1280) and present ignored the LINE STRIDE. Present
-     now takes the row stride from MLC_STL_HW: Volleyball pixel-perfect, angband2x clean,
-     para3 clean but cropped (it draws true 640-wide lines: HSC-driven horizontal
-     downsampling is the follow-up; also re-examine the `garbled-visuals` group and UQM
-     with this fix in). Method note: the layout was proven by PNG correlation (right half
-     == left half shifted +1 row, diff 0.0), not the datasheet.
+   - **Shear/interleave class DONE (ed8fab2 + e55bc6c), tracker refreshed (compat 9669c4e/
+     2b8924e: 21 issues, 724 playable / 56 black of 972).** Not MESG blits: the family
+     programs the MLC scaler (HSC=2048 VS=2560 HW=1280) and present ignored it. Present now
+     takes the row stride from MLC_STL_HW and horizontally downsamples by HSC/1024
+     (paeryn's scale_x): Volleyball shows its full 640-wide Game&Watch court, para3 its
+     full intro text, angband2x clean. (A line-doubling theory tested clean on Volleyball
+     first but was a symmetric-content artifact: the crop LOOKED coherent; always verify a
+     wider view before trusting a "clean" half.) The garbled-visuals group re-ran 9
+     playable + 2 renders of 11; the press-quit class is handled by a run_title retry
+     (07e8743: a pressed run that dies early re-runs untouched and the better grade wins:
+     all 7 mislabeled titles now grade, Volleyball playable 60fps). Still black after all
+     this: MNV_Caanoo (load-flaky solo-renders), SmashGp2x02 (MMSP2 0x1062/0x1066/0x106e),
+     JUMPNRUN/kenlab, wiz-car.
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
      faults; check the dumps for case-mismatched data files.
    - **nazca trio + paraballwiz**: unknown Pollux mmio 0xf004. FleshChasmer x2: unknown fb
