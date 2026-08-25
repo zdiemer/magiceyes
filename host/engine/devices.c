@@ -151,6 +151,7 @@ int phys_to_guest(uint32_t phys, uint32_t *out) {
 /* MLC 8-bit palette (defined in the palette section below; used by present_guest). */
 extern uint8_t g_pal[256][3];
 extern int g_pal_have;
+extern int g_stl_bpp;
 
 /* GP2X native screen = 320x240. Present the framebuffer at guest addr `g` to shm.
    Depth is inferred from g_pal_have: an 8-bit MLC framebuffer (Odonata, paeryn-SDL
@@ -218,7 +219,8 @@ void present_guest(uint32_t g) {
         g_shm->width = (int)ph; g_shm->height = (int)pw; g_shm->frame_seq++;
         goto presented;
     }
-    if (g_pal_have) {                       /* 8-bit indexed -> RGB565 via the captured palette */
+    if (g_pal_have && g_stl_bpp <= 8) {     /* 8-bit indexed -> RGB565 via the captured palette
+                                               (unless STL_CNTL explicitly declared 16/24bpp) */
         uint16_t lut[256];
         for (int i = 0; i < 256; i++)
             lut[i] = (uint16_t)(((g_pal[i][0] >> 3) << 11) |
@@ -404,7 +406,7 @@ void gp2x_cacheflush(uint32_t guest) {
 #define FB_LEN_  (320 * 240 * 2)
 static void fill_vscreeninfo(uint32_t gbuf) {
     uint8_t b[160]; memset(b, 0, sizeof b);
-    int c = (g_device == 2);                                    /* Caanoo menu: 24bpp BGR888 */
+    int c = (g_device == 2 && g_is_dynamic);   /* Caanoo menu: 24bpp BGR888 (static = GP2X-era 16bpp) */
     uint32_t w = (uint32_t)g_fbv_w, h = (uint32_t)g_fbv_h;
     *(uint32_t *)(b + 0)  = w;   *(uint32_t *)(b + 4)  = h;     /* xres / yres */
     *(uint32_t *)(b + 8)  = w;   *(uint32_t *)(b + 12) = h * 2; /* xres_v / yres_v (2 pages) */
@@ -430,7 +432,8 @@ static void fill_vscreeninfo(uint32_t gbuf) {
 }
 static void fill_fscreeninfo(uint32_t gbuf, uint32_t smem_start) {
     uint8_t b[80]; memset(b, 0, sizeof b);
-    uint32_t bypp = g_fb8_mode ? 1 : (g_device == 2) ? 3 : 2;  /* Caanoo menu 24bpp; GP2X 16bpp */
+    uint32_t bypp = g_fb8_mode ? 1 : (g_device == 2 && g_is_dynamic) ? 3 : 2;  /* Caanoo menu 24bpp;
+                                                             GP2X (and any static build) 16bpp */
     memcpy(b + 0, "MagicEyes-MLC", 13);            /* id[16] */
     *(uint32_t *)(b + 16) = smem_start;            /* smem_start (phys base) */
     *(uint32_t *)(b + 20) = (uint32_t)g_fbv_w * (uint32_t)g_fbv_h * bypp * 2; /* smem_len (2 pages) */
@@ -452,9 +455,10 @@ long fb_ioctl(int fd, uint32_t cmd, uint32_t arg) {
     int fbno = dev_fbno(fd);
     switch (cmd) {
     case 0x4600: if (arg) fill_vscreeninfo(arg); return 0;                 /* GET_VSCREENINFO */
-    case 0x4602: if (arg) fill_fscreeninfo(arg, g_device == 0 ? (fbno ? GP2X_FB1_PHYS : GP2X_FB0_PHYS)
-                                                              : (fbno ? FB1_PHYS : FB0_PHYS));
-                 return 0;                                              /* GET_FSCREENINFO */
+    case 0x4602: if (arg) fill_fscreeninfo(arg, (g_device == 0 || !g_is_dynamic)
+                                                    ? (fbno ? GP2X_FB1_PHYS : GP2X_FB0_PHYS)
+                                                    : (fbno ? FB1_PHYS : FB0_PHYS));
+                 return 0;                          /* GET_FSCREENINFO (static = GP2X-era phys) */
     case 0x4601: {                                                          /* PUT_VSCREENINFO: accept
             but NEVER track: SDL fbcon's FB_CheckMode probes every standard mode (1600x1200 down,
             8bpp) with plain PUTs -- old GPH builds don't even set FB_ACTIVATE_TEST -- so a PUT
@@ -681,6 +685,7 @@ long ts_read(uint32_t gbuf, uint32_t n) {
 #define MMSP2_PALLT_A 0x2958
 #define MMSP2_PALLT_D 0x295a
 uint8_t g_pal[256][3]; int g_pal_have = 0;
+int g_stl_bpp = 0;   /* MLC_STL_CNTL-declared depth (0 = never declared) */
 static uint16_t g_pal_idx; static uint8_t g_pal_phase; static uint16_t g_pal_gb;
 void gp2x_mmio_palette(uint32_t off, uint32_t val) {
     if (off == MMSP2_PALLT_A) { g_pal_idx = (uint16_t)(val & 0xff); g_pal_phase = 0; }
@@ -1129,6 +1134,16 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         me940_reg_write(off, (uint32_t)value); return;
     }
     if (off == MMSP2_PALLT_A || off == MMSP2_PALLT_D) { gp2x_mmio_palette(off, (uint32_t)value); return; }
+    /* MLC_STL_CNTL bpp field (paeryn: 0x02aa=8bpp, 0x04aa=16bpp, bits 9-10). A 16bpp title
+       can still upload a PALLT palette at init (JUMPNRUN), which used to flip present to the
+       8-bit indexed path and shred the picture into a byte-wise LUT weave. An EXPLICIT
+       16/24bpp declaration here overrides the palette inference; titles that never write
+       STL_CNTL (Odonata, Knight Lore) keep the palette-implies-8bpp behaviour. */
+    if (off == 0x28da) {
+        int f = ((uint32_t)value >> 9) & 3;
+        g_stl_bpp = (f == 0) ? 4 : (f == 1) ? 8 : (f == 2) ? 16 : 24;
+        if (f == 1) g_fb8_mode = 1;
+    }
     /* MLC STL hardware scaler (paeryn "hardware-scaled surfaces": the game renders a LARGER
        surface and the MLC downscales it to the 320x240 panel). paeryn programs
        HSC @0x2906 = 1024*src_w/phys_w, VSCL/VSCH @0x2908/0x290a = src_h*pitch/phys_h, and
@@ -1337,7 +1352,7 @@ void devices_reset(void) {
     memset(g_fbnum, 0, sizeof g_fbnum);
     memset(g_mem, 0, sizeof g_mem); g_nmem = 0;
     g_blit_guest = 0; memset(&g_blt, 0, sizeof g_blt);
-    g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0;
+    g_pal_have = 0; g_pal_idx = 0; g_pal_phase = 0; g_stl_bpp = 0;
     g_mmsp2_guest = 0; g_fb_guest = 0; g_fb_guest2 = 0; g_fb_from_devmem = 0;
     g_caanoo_bpp = 0; g_caanoo_pitch = 0; g_fb8_mode = 0; g_fbv_w = 320; g_fbv_h = 240;
     g_mlc_hsc = 1024; g_mlc_vscl = 0; g_mlc_vsch = 0; g_mlc_hw = 0;

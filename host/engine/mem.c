@@ -393,12 +393,17 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
     int fb_aliased = 0;
     /* Synthetic phys this fbdev range is (or will be) recorded under on non-GP2X devices. */
     uint32_t fbrec = (fb1 ? 0x04040000u : 0x04000000u) + phys;
-    if (type == DEV_FB && g_device == 0 && phys_in_pram(fbpa, len + fbdelta)) {
+    if (type == DEV_FB && (g_device == 0 || !g_is_dynamic) && phys_in_pram(fbpa, len + fbdelta)) {
         /* On the real GP2X, fbdev memory IS upper physical RAM (fb0 at 0x03101000, the kernel's
            boot-time MLC scanout; fb1 the page after). minlib-style titles mmap /dev/mem at that
            phys and draw, never writing OADR/EADR — the hardware already scans there. Back the
            fbdev mmap with the shared pram at its real phys so the fbdev view and any /dev/mem
-           view alias the same bytes, and present shows what either drew. */
+           view alias the same bytes, and present shows what either drew. STATIC titles get
+           this on ANY device badge: a static binary is a GP2X-era build whatever corpus
+           folder it shipped in (JUMPNRUN in the Caanoo dir draws through a /dev/mem view of
+           0x3101000 paeryn-style and was split-brained from its fbdev window under
+           MAGICEYES_DEVICE=caanoo). Dynamic titles keep the anon fbdev model the Wiz/Caanoo
+           work was verified against. */
         at = (uint32_t)pram_map(fbpa, len + fbdelta, addr);
     } else if (type == DEV_FB && g_device != 0 &&
                phys_to_guest(fbrec, &alias0) && phys_to_guest(fbrec + len - 1, &alias1) &&
@@ -433,7 +438,7 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
            other devices a synthetic aligned one (offset carried, so a partial repeat map of a
            later page still aliases). */
         uint32_t base = at, rec = fbrec;
-        if (g_device == 0) { base = at + fbdelta; rec = fbphys; }
+        if (g_device == 0 || !g_is_dynamic) { base = at + fbdelta; rec = fbphys; }
         if (!fb1) {
             if (g_fb_from_devmem) { g_fb_guest = base; g_fb_from_devmem = 0; } /* fbdev view takes over */
             else if (!g_fb_guest) g_fb_guest = base;
@@ -442,8 +447,10 @@ long dev_mmap(int type, uint32_t addr, uint32_t len, uint32_t flags, uint32_t ph
         else if (!g_fb_guest2 && base != g_fb_guest) { g_fb_guest2 = base; record_memmap(rec, base, len); }
         /* Caanoo (Pollux) firmware menu draws 24bpp BGR into /dev/fb0. We advertise the fbdev as
            24bpp (line_length 960) so its libSDL renders a full 320px-wide surface; present it via the
-           Caanoo 24bpp path (reads B,G,R at pitch 960 = 320 px/row, no scaling). */
-        if (g_device == 2) { g_caanoo_bpp = 3; g_caanoo_pitch = 960; }
+           Caanoo 24bpp path (reads B,G,R at pitch 960 = 320 px/row, no scaling). Dynamic titles
+           only: a STATIC binary in the Caanoo corpus is a GP2X-era build drawing RGB565
+           (JUMPNRUN came through tripled/washed when this fired for it). */
+        if (g_device == 2 && g_is_dynamic) { g_caanoo_bpp = 3; g_caanoo_pitch = 960; }
         if (getenv("ME_FBWATCH")) {   /* TEMP: count guest writes into this fb (execution vs aliasing) */
             extern void fbwatch_cb(uc_engine*, uc_mem_type, uint64_t, int, int64_t, void*);
             static uc_hook fbh; uc_hook_add(g_uc, &fbh, UC_HOOK_MEM_WRITE, fbwatch_cb, NULL,
