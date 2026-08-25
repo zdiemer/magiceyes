@@ -229,6 +229,23 @@ class PilotPolicy(Policy):
             return 1.0
         return max(1.0, min(4.0, 30.0 / max(4.0, self.fps)))
 
+    def _cycle_scale(self):
+        """_scale(), but never so slow that the window runs out before the buttons do.
+
+        Stretching for a slow title is a trap on its own: a slow screen makes each attempt longer,
+        so fewer buttons get tried, so the pilot is likelier to still be sitting on that slow screen
+        when the run ends. pintor2x's title screen renders at ~5fps and the old code spent the whole
+        window on three of its twelve buttons, never reaching the one that leaves. So the stretch is
+        also capped by what is left: time remaining, divided by buttons remaining.
+        """
+        s = self._scale()
+        if self.node is None:
+            return s
+        left = max(0.0, self.secs - DWELL_SECS - self.el)
+        todo = max(1, len(self.node.untried(self._candidates())))
+        room = (left / todo) / (HOLD_SECS + MEASURE_SECS)
+        return max(1.0, min(s, room))
+
     def _write(self, spath, mask, frame):
         shmlib.set_buttons(spath, mask)
         if not self.events or self.events[-1][1] != mask:
@@ -357,7 +374,7 @@ class PilotPolicy(Policy):
                 self.press_ended_el = elapsed
                 self._write(spath, 0, f.seq)
                 self.phase = MEASURE
-                self.until = now + MEASURE_SECS * self._scale()
+                self.until = now + MEASURE_SECS * self._cycle_scale()
                 self.window = []
 
         elif self.phase == MEASURE:
@@ -395,7 +412,7 @@ class PilotPolicy(Policy):
         self.presses += 1
         self._write(spath, shmlib.buttons_mask([b]), f.seq)
         self.phase = PRESS
-        self.until = now + HOLD_SECS * self._scale()
+        self.until = now + HOLD_SECS * self._cycle_scale()
 
     def _judge(self, f, now):
         """Decide what the press did, against the null control measured on this screen.
