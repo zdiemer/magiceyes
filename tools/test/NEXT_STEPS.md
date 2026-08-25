@@ -135,8 +135,13 @@ pipeline is re-run.
      (unconfirmed). Debug gotcha recorded: ctl breakpoints on ALREADY-HOT code may
      silently fail to arm (the libc read bp never fired while the syscall clearly
      ran); trust pchook (launch-latched) for negatives.
-   - **Newly-rendering-but-garbled** (para3, Volleyball, angband2x): interlaced/sheared line
-     duplication, likely the known MESG FIFO-source / phys_ilace shear lead (see UQM below).
+   - **Shear/interleave class FIXED (ed8fab2)**: not MESG blits at all: the family programs
+     the MLC scaler (HSC=2048 VS=2560 HW=1280) and present ignored the LINE STRIDE. Present
+     now takes the row stride from MLC_STL_HW: Volleyball pixel-perfect, angband2x clean,
+     para3 clean but cropped (it draws true 640-wide lines: HSC-driven horizontal
+     downsampling is the follow-up; also re-examine the `garbled-visuals` group and UQM
+     with this fix in). Method note: the layout was proven by PNG correlation (right half
+     == left half shifted +1 row, diff 0.0), not the datasheet.
    - **xcom1/2 (all three platforms)**: "cannot open geodata/interwin.dat" + null-FILE
      faults; check the dumps for case-mismatched data files.
    - **nazca trio + paraballwiz**: unknown Pollux mmio 0xf004. FleshChasmer x2: unknown fb
