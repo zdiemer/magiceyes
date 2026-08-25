@@ -1269,6 +1269,24 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                                                        (there may be several 0xC0000000 maps) */
         return;
     }
+    /* Pollux DPC0/DPC1 control @0x308c/0x348c (Wiz/Caanoo). Two consumers of one register:
+       open2x-wiz's GP2XWIZ_VideoInit reads bit 15 once as "display engine enabled" (the
+       preset in mem.c keeps it SET, and so do we), while raw-hardware titles busy-wait on
+       bit 10 -- the VSYNC interrupt-pending flag -- as their only frame pacing, then ack it
+       by writing it back (wiz-car burned 1.4 BILLION reads at `ldrh; tst #0x400; beq` on an
+       edge that never came). Model bit 10 as a 60Hz vsync: high for ~1ms of each 16.7ms
+       period; bit 15 stays high always. */
+    if ((off == 0x308c || off == 0x348c) && g_device != 0) {
+        struct timeval tv; gettimeofday(&tv, NULL);
+        double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        spin_throttle(now);
+        uint16_t v = 0; uc_mem_read(uc, (uint32_t)addr & ~1u, &v, 2);
+        uint64_t us = (uint64_t)(now * 1e6);
+        if (us % 16667u < 1000u) v |= 0x0400; else v &= (uint16_t)~0x0400;
+        v |= 0x8000;
+        uc_mem_write(uc, (uint32_t)addr & ~1u, &v, 2);
+        return;
+    }
     /* Pollux TIMER0 count @0x1980 (Wiz/Caanoo): homebrew "ptimer" code latches the count by
        writing 0x4B to TMRCONTROL @0x1988, then reads a free-running microsecond counter here
        (cgenius WIZ_ptimer_get_ticks_ms; malvado's Fenix runtime). Zeros froze their pacing
