@@ -50,7 +50,7 @@ class FakeShm:
 
     XB, YB = 40, 30                 # block size: coarse enough for the 9x8 and 18x16 grids
 
-    def _row(self, screen, yblk, phase, cursor=-1):
+    def _row(self, screen, yblk, phase, cursor=-1, cursor_x=-1):
         """One block-row of pixels. Cached, so a tick is 240 writes and no per-pixel Python.
 
         The per-block value is a scrambled hash of (block, screen), NOT screen plus an offset: a
@@ -59,7 +59,7 @@ class FakeShm:
         read as the same screen. `phase` only perturbs a couple of blocks, which is what an idle
         animation looks like.
         """
-        key = (screen, yblk, phase, cursor)
+        key = (screen, yblk, phase, cursor, cursor_x)
         hit = self._rows.get(key)
         if hit is not None:
             return hit
@@ -72,7 +72,9 @@ class FakeShm:
             # actually breaks a naive "did the frame change" test.
             if phase and (xb * 3 + yblk * 5 + phase) % 4 == 0:
                 v = (v + phase * 5) & 0x1f
-            if yblk == cursor:              # a menu highlight bar: real, but local
+            # A menu highlight: real, but local. cursor_x narrows it to a SINGLE block, which is
+            # what a sudoku square or a "> " marker actually looks like: about 0.3% of the picture.
+            if yblk == cursor and (cursor_x < 0 or xb == cursor_x):
                 v = (v + 16) & 0x1f
             px = (v << 11) | (v << 6) | v
             row[x * 2] = px & 0xff
@@ -81,11 +83,11 @@ class FakeShm:
         self._rows[key] = row
         return row
 
-    def draw(self, screen, phase=0, cursor=-1):
+    def draw(self, screen, phase=0, cursor=-1, cursor_x=-1):
         with open(self.path, "r+b") as f:
             for y in range(H):
                 f.seek(shmlib.PIX_OFF + y * shmlib.MAXW * 2)
-                f.write(self._row(screen, y // self.YB, phase, cursor))
+                f.write(self._row(screen, y // self.YB, phase, cursor, cursor_x))
         self.seq += 1
         self._header()
 
@@ -99,7 +101,8 @@ class FakeGame:
 
     DPAD = ("UP", "DOWN", "LEFT", "RIGHT")
 
-    def __init__(self, shm, animate_from=2, quit_button="START", confirm=None, auto_at=None):
+    def __init__(self, shm, animate_from=2, quit_button="START", confirm=None, auto_at=None,
+                 small_cursor=False):
         self.shm = shm
         self.screen = 0
         self.phase = 0
@@ -109,6 +112,7 @@ class FakeGame:
         self.quit_button = quit_button
         self.confirm = confirm      # set for the "dpad navigates, one button confirms" convention
         self.auto_at = auto_at      # a splash that walks on to the menu with no input at all
+        self.small_cursor = small_cursor
         self.dead = False
 
     def tick(self):
@@ -136,7 +140,7 @@ class FakeGame:
                 return
         if self.screen >= self.animate_from:
             self.phase = (self.phase + 3) & 0x1f
-        self.shm.draw(self.screen, self.phase, self.cursor)
+        self.shm.draw(self.screen, self.phase, self.cursor, 1 if self.small_cursor else -1)
 
 
 def drive(policy, shm, game, secs, dt=0.1):
@@ -230,6 +234,21 @@ def main():
                 "screen=%d cursor=%d" % (game.screen, game.cursor))
     ok &= check("saw the highlight move without calling it progress", game.cursor >= 0,
                 "screens=%d" % r["screens"])
+
+    print("pilot: a cursor covering ONE block still counts as a response")
+    shm = FakeShm(os.path.join(tmp, "shm_i"))
+    # ~0.3% of the picture: a sudoku square, a "> " marker. Judged on area alone this scores zero,
+    # which is how the first corpus sweep called 160 live titles unresponsive.
+    game = FakeGame(shm, animate_from=99, confirm="START", small_cursor=True)
+    p = PilotPolicy(os.path.join(tmp, "titleI.gpe"), secs=60.0, base_dir=paths)
+    drive(p, shm, game, 55.0)
+    p.result()
+    g = G.load(os.path.join(tmp, "titleI.gpe"), paths)
+    boot = g.get(g.boot)
+    dpad = {b: o for b, o in (boot.tried if boot else {}).items()
+            if b in ("UP", "DOWN", "LEFT", "RIGHT")}
+    ok &= check("credited the one-block cursor", any(o == G.LOCAL for o in dpad.values()),
+                "dpad=%s" % dpad)
 
     print("pilot: a splash that walks on to the menu by itself")
     shm = FakeShm(os.path.join(tmp, "shm_h"))

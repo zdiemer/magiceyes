@@ -84,26 +84,35 @@ def _edge(grid):
 
 
 class Delta:
-    """How two frames differ. `frac` is the fraction of the picture that moved, which is what
-    separates a whole new screen from a sprite twitching in the corner of a live one."""
-    __slots__ = ("frac", "cells")
+    """How two frames differ, in two independent ways, because UI responses come in both shapes.
 
-    def __init__(self, frac, cells):
+    `frac` is how much of the picture moved: the right measure for a new screen, a scroll, a page
+    flip. `peak` is how hard the single most-changed cell moved: the right measure for a menu
+    cursor, a highlight bar, a selected sudoku square. Measuring only area misses the second kind
+    entirely, and the second kind is most of what a menu does.
+    """
+    __slots__ = ("frac", "cells", "peak")
+
+    def __init__(self, frac, cells, peak):
         self.frac = frac
         self.cells = cells
+        self.peak = peak
 
 
 def delta(a, b):
     """Per-cell change between two observations."""
     if a is None or b is None or a.w != b.w or a.h != b.h:
-        return Delta(0.0, 0)
-    cells = 0
+        return Delta(0.0, 0, 0)
+    cells = peak = 0
     for cy in range(GH):
         ra, rb = a.grid[cy], b.grid[cy]
         for cx in range(GW):
-            if abs(ra[cx] - rb[cx]) >= CELL_DELTA:
+            d = abs(ra[cx] - rb[cx])
+            if d > peak:
+                peak = d
+            if d >= CELL_DELTA:
                 cells += 1
-    return Delta(cells / float(GW * GH), cells)
+    return Delta(cells / float(GW * GH), cells, peak)
 
 
 def distance(a, b):

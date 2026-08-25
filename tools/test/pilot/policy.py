@@ -30,10 +30,17 @@ caught them:
     a busy screen some tick is always spiking. The same split governs "did we leave this screen":
     judging an attract loop by the ordinary node radius reports a transition on every press.
 """
+import os
+import sys
+
 import shmlib
 from . import graph as G
 from . import observe as OB
 from . import priors
+
+# ME_PILOT_LOG=1 traces every verdict with the numbers behind it, which is the only practical way
+# to tell "this title ignores input" from "the detector could not see the response".
+LOG = os.environ.get("ME_PILOT_LOG")
 
 # Timing. Base values are for a title rendering at a normal rate; _scale() stretches them for slow
 # titles so a 4fps game is not judged unresponsive for failing to react within two of its frames.
@@ -46,6 +53,12 @@ SAMPLE_DT = 0.09        # minimum gap between observations
 
 MAX_PRESSES = 48
 LETHAL_WINDOW = 2.0     # a title dying this soon after a press blames the press
+# How far short of the budget an exit still counts as "it quit" rather than "ME_RUN_SECS stopped
+# it". Tight, because the engine self-terminates AT the budget: anything meaningfully before that
+# is the title leaving on its own. It used to be 3s, and OpenBOR_v2.1933 exited at 22.0s of a 25s
+# window with a button held, missing the window by a hundredth of a second and taking the blame,
+# the retry and its playable grade with it.
+QUIT_MARGIN = 1.0
 NEW_SCREEN_DIST = 20    # perceptual distance beyond which an animating screen is really a new one
 
 # Some titles quit on *any* early input rather than on one particular button: angband2x-v2 dies
@@ -57,10 +70,56 @@ HANDS_OFF_LETHALS = 2
 ANIMATED_FRAC = 0.05    # per-tick cell change above which a screen counts as moving on its own
 RADIUS_MARGIN = 6       # dhash bits a response must clear beyond a moving screen's own spread
 
+# A menu cursor is a SMALL area changing HARD, so an area-only test scores it zero. The first
+# sweep called 160 titles unresponsive on that basis, including hex-a-hop sitting in its own Paused
+# menu and sudoku-v1.0 with a highlighted square: plainly live games, graded deaf. So a strong
+# change in even one cell also counts, provided it beats what the idle screen was already doing.
+#
+# The floors below are deliberately near the noise floor rather than near the signal, because the
+# null control is what does the discriminating. Measured on real titles (scratch probe, idle vs
+# press, per button): sudoku-v1.0 idles at EXACTLY 0.000 frac / 0 cell and answers the d-pad with
+# 0.017 / 26, while hex-a-hop idles at 0.003 / 52 and answers UP with 0.010 / 52. No fixed floor
+# serves both -- 40 is above sudoku's signal and below hex-a-hop's noise -- so the per-screen
+# baseline has to carry it, and these only stop rounding from registering as input.
+CELL_MARGIN = 12        # luma the best cell must clear beyond the screen's idle worst
+CELL_FLOOR = 16         # ...and in absolute terms
+FRAC_FLOOR = 0.004      # ~1 cell of the 288-cell grid
+
+
+def _novelties(idle, frames):
+    """Per frame, how far it sits from the NEAREST idle frame.
+
+    This is the honest question to ask of a screen that animates: not "did the picture move", which
+    it always does, but "did it go somewhere it never goes on its own". An attract loop cycles
+    through a fixed set of pictures, so every frame of it sits close to some idle sample, however
+    far the loop roams overall. A pause menu opening sits close to none of them.
+
+    Comparing against a single reference frame instead is what made hex-a-hop unreachable: its
+    settle window caught an intro animation, the reference was one arbitrary frame of it, and the
+    resulting radius was so wide that opening the pause menu (a 100% change of the picture) did not
+    clear it. A 64-bit hash has little headroom left on a busy screen.
+
+    Returned per frame rather than as a maximum, because the caller needs to know whether the
+    novelty PERSISTED. A short idle window cannot cover a long animation, so some later frame of
+    the loop is always going to look novel in passing; what a real response does is go somewhere
+    and stay there.
+    """
+    if not idle or not frames:
+        return []
+    return [min(OB.distance(i, f) for i in idle) for f in frames]
+
+
+def _idle_spread(idle):
+    """How far an idle frame gets from its nearest idle neighbour: the same measure applied to the
+    idle set itself, so the bar is in the same units as _novelty."""
+    if len(idle) < 2:
+        return 0
+    return max(min(OB.distance(a, b) for b in idle if b is not a) for a in idle)
+
 
 def _deviation(base, frames):
     """How far a run of frames strays from a reference: (worst cell-change fraction, worst
-    perceptual distance).
+    perceptual distance, worst single-cell change).
 
     Measured against a fixed reference, never tick to tick. A screen transition is a *step*: the
     picture changes once and then holds still, so consecutive-frame deltas are ~0 for every frame
@@ -69,9 +128,11 @@ def _deviation(base, frames):
     window (how far the press took it), so the two are directly comparable.
     """
     if not frames:
-        return 0.0, 0
-    return (max(OB.delta(base, f).frac for f in frames),
-            max(OB.distance(base, f) for f in frames))
+        return 0.0, 0, 0
+    ds = [OB.delta(base, f) for f in frames]
+    return (max(d.frac for d in ds),
+            max(OB.distance(base, f) for f in frames),
+            max(d.peak for d in ds))
 
 
 BOOT, SETTLE, READY, PRESS, MEASURE, WATCH, DWELL = (
@@ -145,6 +206,9 @@ class PilotPolicy(Policy):
         # nothing is pressed.
         self.null_dev = 0.0         # worst fraction of cells differing from the reference
         self.null_radius = 0        # worst perceptual distance from the reference
+        self.null_cell = 0          # worst single-cell change while idling
+        self.idle = []              # the idle frames themselves, for the novelty test
+        self.null_self = 0          # how far idle frames sit from each other
         self.ref = None             # the frame a response is measured against
         self.before = None          # observation at the moment of the press
         self.window = []            # frames observed in the current settle/measure window
@@ -187,6 +251,9 @@ class PilotPolicy(Policy):
             self.node = None
             self.null_dev = 0.0
             self.null_radius = 0
+            self.null_cell = 0
+            self.idle = []
+            self.null_self = 0
         self.phase = SETTLE
         self.until = now + SETTLE_SECS * self._scale()
         self.window = []
@@ -270,7 +337,9 @@ class PilotPolicy(Policy):
             if now >= self.until:
                 self.ref = f
                 if len(self.window) >= 4:
-                    self.null_dev, self.null_radius = _deviation(f, self.window)
+                    self.null_dev, self.null_radius, self.null_cell = _deviation(f, self.window)
+                    self.idle = self.window[-8:]
+                    self.null_self = _idle_spread(self.idle)
                 self.node = self._resolve_node(f)
                 if not self.visited or self.visited[-1] != self.node.id:
                     self.visited.append(self.node.id)
@@ -344,12 +413,19 @@ class PilotPolicy(Policy):
           leave it.
         """
         animating = self.null_dev >= ANIMATED_FRAC
-        dev, reach = _deviation(self.ref, self.window + [f])
+        dev, reach, cell = _deviation(self.ref, self.window + [f])
 
+        nv = _novelties(self.idle, self.window + [f])
+        novel = max(nv or [0])
         if animating:
-            responded = reach > self.null_radius + RADIUS_MARGIN
+            # Novel for at least half the window, not merely at some instant in it.
+            bar = self.null_self + RADIUS_MARGIN
+            responded = sum(1 for n in nv if n > bar) >= max(2, (len(nv) + 1) // 2)
         else:
-            responded = dev > max(self.null_dev * 1.8, 0.02)
+            # Either a lot of the picture moved, or one part of it moved hard. The second clause is
+            # what catches a menu cursor, which is most of what a still screen ever does.
+            responded = (dev > max(self.null_dev * 1.8, FRAC_FLOOR)
+                         or cell > max(self.null_cell + CELL_MARGIN, CELL_FLOOR))
 
         # "Did we leave this screen" has to tolerate the same self-animation. A demo loop roams
         # well past the ordinary node radius on its own, so judging it by that radius reports a
@@ -372,17 +448,29 @@ class PilotPolicy(Policy):
             outcome = G.LETHAL
             self._note_lethal(self.button)
 
+        if LOG:
+            sys.stderr.write(
+                "[pilot] %-6s node=%s %-8s dev=%.4f/%.4f cell=%d/%d novel=%d/%d %s\n" % (
+                    self.button, self.node.id, outcome, dev, self.null_dev, cell, self.null_cell,
+                    novel, self.null_self, "animating" if animating else "still"))
+            sys.stderr.flush()
         self.node.record(self.button, outcome)
         if outcome in (G.MOVED, G.LOCAL):
             self.responses += 1
         self.button = None
 
-        if outcome == G.DEAD:
-            # A press that did nothing is itself a sample of what this screen does unprompted, so
-            # fold it into the null control. The bar only ever rises, which makes the detector more
-            # conservative the longer it looks at a busy screen.
+        if outcome == G.DEAD and animating:
+            # Frames reached by a press that did nothing are, by definition, places this screen goes
+            # without being asked. So they join the idle set rather than raising a threshold: the
+            # bar tightens where the evidence actually is, instead of everywhere at once.
+            #
+            # Only on a screen that moves by itself. A still screen's idle window is already a clean
+            # baseline, and a blunt max() ratchet there let one misjudged early press raise the bar
+            # for every button after it.
+            self.idle = (self.idle + self.window)[-16:]
+            self.null_self = _idle_spread(self.idle)
             self.null_dev = max(self.null_dev, dev)
-            self.null_radius = max(self.null_radius, reach)
+            self.null_cell = max(self.null_cell, cell)
 
         if outcome == G.MOVED:
             self._enter_settle(now, fresh=True)   # new screen: identify it and null-control it
@@ -403,7 +491,7 @@ class PilotPolicy(Policy):
         if (blamed is None and self.press_ended_el is not None
                 and (elapsed - self.press_ended_el) <= LETHAL_WINDOW):
             blamed = self.last_button
-        if blamed and elapsed < self.secs - 3.0:
+        if blamed and elapsed < self.secs - QUIT_MARGIN:
             self._note_lethal(blamed)
             if self.node is not None:
                 self.node.tried[blamed] = G.LETHAL

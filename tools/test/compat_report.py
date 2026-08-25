@@ -269,6 +269,14 @@ def build(results_dir):
                 "missing_symbols": v.get("missing_symbols", []),
                 "unknown_devices": v.get("unknown_devices", []),
                 "quirks": v.get("quirks", []),
+                # What the closed-loop input driver found, when the run used it (--pilot). Carried
+                # through so the tracker can say "renders at 60fps and answers nothing" rather than
+                # leaving that to a hand session per title. Absent on fixed-script runs.
+                "screens": v.get("screens"),
+                "responsive": v.get("responsive"),
+                "lethal_inputs": v.get("lethal_inputs"),
+                "pilot_hands_off": v.get("pilot_hands_off"),
+                "pilot_note": v.get("pilot_note"),
                 "fatal": fat,
                 "log_tail": "\n".join(log.strip().splitlines()[-12:]),
                 "screenshot": shot,

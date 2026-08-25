@@ -261,7 +261,11 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     # the second, and attempt three is over the hands-off threshold and just watches.
     died_early = elapsed < secs - 3 and frames_seen > 30
     if pilot:
-        do_retry = _retry > 0 and died_early and bool(pilot_result.get("lethal_inputs"))
+        # Tighter margin than the script path: the pilot knows a press was in flight, so it does
+        # not need the 3s of slack that a blind guess does, and a title that quits with 2s left in
+        # the window is still a title the input quit (OpenBOR_v2.1933, at 22.0s of 25).
+        do_retry = (_retry > 0 and frames_seen > 30 and elapsed < secs - 1
+                    and bool(pilot_result.get("lethal_inputs")))
         sub = "retry%d" % _retry
     else:
         do_retry = bool(press) and _retry > 0 and died_early
