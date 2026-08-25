@@ -246,15 +246,13 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
     # died well before its time under scripted input gets one untouched re-run, and the
     # better-graded verdict wins. Guarded so it fires only when the press plausibly killed it:
     # the title was alive (frames flowed), then the engine exited long before ME_RUN_SECS.
-    # A pressed run that exec'd back to gp2xmenu (exit 127) can still grade `playable` on the
-    # fps it held while alive, with its screenshot sampled from the boot/black phase (the
-    # reversed-preacher titles: quit during the intro -> "black frame with one dot"). So an
-    # early 127 exit under scripted input also earns the untouched re-run, and a same-status
-    # retry wins when it actually drew more.
+    # A pressed run that quit early can still grade `playable` on the fps it held while
+    # alive, with its screenshot sampled from the boot/black phase (the reversed-preacher
+    # titles: scripted START quits their intro at 2.3s, exit 0). So ANY early end under
+    # scripted input earns the untouched re-run, whatever the status or exit code, and a
+    # same-status retry wins when it actually drew more.
     if (press and not replay and _retry
-            and elapsed < secs - 3 and frames_seen > 30
-            and (verdict["status"] in ("black", "incompatible", "crashed")
-                 or verdict.get("exit_code") == 127)):
+            and elapsed < secs - 3 and frames_seen > 30):
         retry = run_one(game, secs=secs, engine=engine,
                         out_dir=os.path.join(out_dir, "nopress"), shm_name=shm_name,
                         press=None, headed=False, extra_env=extra_env, quiet=True,
