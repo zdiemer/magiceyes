@@ -41,7 +41,7 @@ def parse_press(script):
 
 def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
             press=None, headed=False, extra_env=None, quiet=False, replay=None,
-            clip_fps=0, clip_start=6.0, clip_secs=0.0):
+            clip_fps=0, clip_start=6.0, clip_secs=0.0, _retry=True):
     engine = engine or os.path.join(REPO, "bin", "me_unicorn")
     if not os.path.exists(engine):
         return {"title": os.path.basename(game), "path": game, "status": "error",
@@ -241,6 +241,24 @@ def run_one(game, secs=20.0, engine=None, out_dir=None, shm_name="gp2x_fb",
         "report": report_path,
         "out_dir": out_dir,
     }
+    # The input script can QUIT a title whose menus actually work: since the wave-6 fixes the
+    # generic taps land on live menu entries (Volleyball's START is its quit), so a run that
+    # died well before its time under scripted input gets one untouched re-run, and the
+    # better-graded verdict wins. Guarded so it fires only when the press plausibly killed it:
+    # the title was alive (frames flowed), then the engine exited long before ME_RUN_SECS.
+    if (press and not replay and _retry
+            and elapsed < secs - 3 and frames_seen > 30
+            and verdict["status"] in ("black", "incompatible", "crashed")):
+        retry = run_one(game, secs=secs, engine=engine,
+                        out_dir=os.path.join(out_dir, "nopress"), shm_name=shm_name,
+                        press=None, headed=False, extra_env=extra_env, quiet=True,
+                        clip_fps=clip_fps, clip_start=clip_start, clip_secs=clip_secs,
+                        _retry=False)
+        order = {"error": 0, "incompatible": 1, "crashed": 2, "black": 3,
+                 "renders": 4, "playable": 5}
+        if order.get(retry.get("status"), 0) > order.get(verdict["status"], 0):
+            retry["press_quit"] = True   # scripted input killed the pressed run
+            verdict = retry
     if not quiet:
         with open(os.path.join(out_dir, "verdict.json"), "w") as f:
             json.dump(verdict, f, indent=2)
