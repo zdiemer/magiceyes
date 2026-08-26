@@ -5,7 +5,7 @@
 **Play Game Park Holdings handheld games on your PC.**
 
 [![Release](https://img.shields.io/github/v/release/zdiemer/magiceyes?style=flat-square&label=release&color=7f6bff)](https://github.com/zdiemer/magiceyes/releases/latest)
-[![Build](https://img.shields.io/github/actions/workflow/status/zdiemer/magiceyes/ci.yml?branch=main&style=flat-square&label=build)](https://github.com/zdiemer/magiceyes/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/zdiemer/magiceyes/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/zdiemer/magiceyes/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/zdiemer/magiceyes/total?style=flat-square&color=2fd4c6)](https://github.com/zdiemer/magiceyes/releases)
 [![Games playable](https://img.shields.io/badge/games%20playable-739%20%2F%20972-2fd4c6?style=flat-square)](https://github.com/zdiemer/magiceyes-compat)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-9d8ed6?style=flat-square)](#download--run-windows)

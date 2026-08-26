@@ -15,6 +15,7 @@ Linux, or Windows with WSL. Building the Windows bundle cross-compiles from Linu
 | The Windows bundle | `gcc-mingw-w64-x86-64-posix`, `g++-mingw-w64-x86-64-posix` |
 | The ARM guest shim | the GPH SDK toolchain (`gcc-4.0.2-glibc-2.3.6`), 32-bit x86, so i386 multilib |
 | Firmware extraction | `python3-lzo` and `ubi_reader` (Wiz UBIFS) |
+| The unit tests | `libcmocka-dev`, plus [uv](https://astral.sh/uv) for the Python half. `host/win/get_cmocka.sh` cross-builds cmocka if you also want them as Windows `.exe` |
 
 `ME_UNICORN_FORK` points at the fork checkout (default `~/me-unicorn-fork`). Every build
 script honours it, as does CI.
@@ -33,6 +34,22 @@ Windows bundle: `host/win/{build_fork_win,get_sdl2,build_bundle_win}.sh` → `bi
 
 The ARM guest shim is only needed for EABI titles:
 `MAGICEYES_SDK=<GPH SDK> guest/build_guest.sh`.
+
+## Testing
+
+```sh
+bash tests/c/build_tests.sh        # C unit tests, ~1s
+bash tests/python/run_tests.sh     # Python unit tests, ~4s
+bash tools/test/smoke.sh           # engine self-test (needs a built engine + arm-linux-gnueabi-gcc)
+```
+
+The first two are asset-free and need no engine, so they are the cheapest signal available and the
+right thing to run while editing. `ME_TEST_WIN=1` builds and runs the C suite as native Windows
+`.exe` instead (once `host/win/get_cmocka.sh` has run). See [`../tests/README.md`](../tests/README.md).
+
+`tools/test/baseline.py --check` is the level above: a real regression gate over known-good titles,
+but it needs commercial ROMs, which is why it cannot run in CI. Run it before committing engine or
+shim changes, from ext4 (see the fps trap below).
 
 ## WSL traps
 

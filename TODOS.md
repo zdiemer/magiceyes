@@ -42,6 +42,22 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Testing / harness
 
+- **Extend the unit tests past the pure layer.** `tests/` covers everything that is already
+  testable without an engine. What is left is high-value but stranded in translation units that
+  make hundreds of `uc_*` calls against live guest state, so each needs a small change first:
+  - `linux_errno` and `host_open_flags` (`syscalls.c:680`, `:661`) encode the Linux/MinGW constant
+    divergence behind the native-Windows black screen. Both are `static` in a 2000-line file;
+    lifting them into a header would make them directly testable. **Highest value.**
+  - `fill_stat64` / `fill_oabi_stat` (`syscalls.c:605`, `:582`), the 96-vs-104-byte packing behind
+    the Payback load crash. The packed buffer never returns, it goes straight to `uc_mem_write`, so
+    this needs either a capturing stub or a `pack_stat64(uint8_t *out, const struct stat *, int
+    eabi)` extraction.
+  - `wiz_button_word` (`devices.c:601`), pure bit arithmetic where diagonals set two bits. Already
+    non-static; blocked only by its file's 41 `uc_*` calls.
+  - `cond_pass` (`fpa.c:49`) and `rd_double` / `compute` (`oabi_libm.c:44`, `:49`). `rd_double` is
+    exactly the FPA word-order bug class that `95f99c4` and `e93a525` fixed.
+  - `ubifs_mem` (`extract/ubifs.c`): `test_extract.c` covers tar and YAFFS, but synthesising a
+    valid UBIFS image is a job of its own.
 - **Test both Linux and Windows binaries.** The triage harness (`tools/test/`) runs the Linux
   engine (`bin/me_unicorn`). Extend it to also exercise `bin/magiceyes.exe` so the corpus sweep
   covers both targets and catches host-portability regressions.
