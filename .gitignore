@@ -6,6 +6,7 @@ tmp_dyn/
 *.so*
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # large/derivable GP2X+Wiz assets (rootfs, SDK, games, firmware, paeryn-sdl)
 /assets/
