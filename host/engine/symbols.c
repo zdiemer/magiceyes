@@ -32,13 +32,17 @@ static char        g_img[IMG_MAX][64];
 static int         g_nimg = 0;
 static int         g_sorted = 0;
 
+/* Offset 0 is a perfectly good string offset -- it is where the FIRST name lands -- so failure
+   cannot be signalled with 0 without silently dropping that symbol on every load. */
+#define ARENA_ERR 0xffffffffu
+
 static uint32_t arena_put(const char *s) {
     size_t n = strlen(s) + 1;
     if (g_arena_len + n > g_arena_cap) {
         size_t cap = g_arena_cap ? g_arena_cap * 2 : ARENA_CHUNK;
         while (cap < g_arena_len + n) cap *= 2;
         char *nb = realloc(g_arena, cap);
-        if (!nb) return 0;
+        if (!nb) return ARENA_ERR;
         g_arena = nb; g_arena_cap = cap;
     }
     uint32_t off = (uint32_t)g_arena_len;
@@ -112,7 +116,7 @@ int sym_load_image_buf(const uint8_t *buf, long sz, uint32_t bias, const char *l
                    addresses with real functions and would otherwise dominate any listing. */
                 if (nm[0] == '$' && nm[1] && (nm[2] == 0 || nm[2] == '.')) continue;
                 uint32_t off = arena_put(nm);
-                if (!off && g_arena_len) continue;
+                if (off == ARENA_ERR) continue;
                 g_sym[g_nsym].addr     = bias + sy[k].st_value;
                 g_sym[g_nsym].size     = sy[k].st_size;
                 g_sym[g_nsym].name_off = off;
