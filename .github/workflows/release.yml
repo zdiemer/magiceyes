@@ -53,9 +53,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Body: a committed RELEASE_NOTES_<version>.md is the curated changelog; fall back to
-          # GitHub's auto-generated notes when there isn't one for this tag.
-          NOTES_FILE="RELEASE_NOTES_${GITHUB_REF_NAME#v}.md"
+          # Body: a committed docs/releases/RELEASE_NOTES_<version>.md is the curated changelog;
+          # fall back to GitHub's auto-generated notes when there isn't one for this tag.
+          NOTES_FILE="docs/releases/RELEASE_NOTES_${GITHUB_REF_NAME#v}.md"
           if [ -f "$NOTES_FILE" ]; then
             NOTES_ARGS=(--notes-file "$NOTES_FILE")
           else
