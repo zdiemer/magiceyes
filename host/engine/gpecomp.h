@@ -5,7 +5,7 @@
  * linked*, so the native engine (no dynamic loader) can't run it to self-extract; instead
  * we decompress the payload directly on the host. The appended container is standard
  * `uclpack` format (NRV2B/NRV2D/NRV2E, 8-bit). Format worked out + validated byte-for-byte
- * against a qemu-decompressed Payback (see tools/gp2x/decomp_payback.sh, the old ground truth).
+ * against a qemu-decompressed Payback (the old ground truth, before we did it ourselves).
  */
 #ifndef MAGICEYES_GPECOMP_H
 #define MAGICEYES_GPECOMP_H

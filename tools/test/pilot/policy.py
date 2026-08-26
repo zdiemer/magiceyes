@@ -13,10 +13,9 @@ already runs, so it costs one extra framebuffer read per poll and no extra proce
 SETTLE watches the screen with nothing pressed and records how far it wanders on its own: the null
 control. MEASURE then judges a press against it. That comparison is the whole point, because "did
 the frame change after I pressed" proves nothing on a title that animates by itself, which is most
-of them. The older one-shot probes hold the two halves of this: tools/gp2x/input_probe.py presses
-each button and compares hashes with no control at all, while tools/gp2x/test_input.sh does take a
-settle shot with no input first, to see whether the screen advances by itself. Both remain useful
-for eyeballing a single title by hand; this is the version that runs unattended over a corpus.
+of them. The older one-shot probes held the two halves of this separately: one pressed each button
+and compared hashes with no control at all, the other took a settle shot with no input first to see
+whether the screen advances by itself. This is the version that runs unattended over a corpus.
 
 Two details that are easy to get wrong and were, in this file, until the fake title in selftest.py
 caught them:

@@ -4,8 +4,7 @@ Two things the existing harness does not do:
 
 * Tear avoidance. `pixels[]` has no writer seq-lock, and run_title.py re-reads the whole object
   three separate times per capture (save_png, nonzero_ratio, dhash), so a frame can be captured
-  mid-write. We snapshot once, re-check frame_seq, and retry -- the pattern tools/gp2x/dumpfb.sh
-  already uses. Note present_guest() is not the only pixel writer: the GLES paths (glgpu.c /
+  mid-write. We snapshot once, re-check frame_seq, and retry. Note present_guest() is not the only pixel writer: the GLES paths (glgpu.c /
   glraster.c) also write pixels and bump frame_seq from a guest thread, so a seq re-check is the
   only reliable guard.
 

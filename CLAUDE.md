@@ -75,7 +75,7 @@ guest/   src/{fakesdl.c, fakegles.c, drmstub.c, gp2xshm.h}  build_guest.sh  (ARM
 host/    viewer.c  build_viewer.sh                            (native SDL2 viewer)
 host/    engine/{loader,elf,mem,devices,syscalls,gpecomp,guard,...}.c  (the engine)
 host/    win/{stage_rootfs*.sh, build_*_win.sh, compat/, posix_compat.c, README.md}
-tools/   extract_dat.py  un-gpecomp  gp2x/{decomp_*.sh, ...}  (old qemu-era debug probes)
+tools/   extract_dat.py  un-gpecomp  dev/  test/  mcp/
 README.md  TODOS.md  CLAUDE.md  .gitattributes  .gitignore
 bin/     (build outputs, gitignored)
 ```
@@ -209,9 +209,8 @@ Any tooling that sweeps the corpus must ensure this mount itself rather than ass
 - **GPH SDK**: toolchain + `DGE/include/SDL/` headers → `assets/sdk`.
 - **paeryn GP2X SDL source**: the MMSP2 register map (`src/video/gp2x/mmsp2_regs.h`,
   `SDL_gp2xvideo.c`) → `assets/paeryn-sdl`.
-- **Games** (operator-supplied, legally dumped). GPEComp games decompress natively now
-  (`host/engine/gpecomp.c` / `tools/un-gpecomp`); the old `/mnt/tmp` decomp dance
-  (`tools/gp2x/decomp_*.sh`) is the fallback.
+- **Games** (operator-supplied, legally dumped). GPEComp games decompress natively
+  (`host/engine/gpecomp.c` / `tools/un-gpecomp`).
 
 ## GP2X hardware contract (worked out across both backends)
 
@@ -231,7 +230,7 @@ Any tooling that sweeps the corpus must ensure this mount itself rather than ass
 - `/dev/mem` mmap @ phys **0xC0000000** = MMSP2 regs:
   - **TCOUNT timer @0x0a00** (µs) must advance at **7.3728 MHz** (the crystal). This sets
     BOTH frame pacing AND game-sim dt → 30fps at the correct speed. `ME_GP2X_TIMESCALE=N`
-    is **N MHz, not an N× multiplier** (=1 → bogus 4fps; several `tools/gp2x/*` hard-code it).
+    is **N MHz, not an N× multiplier** (=1 → bogus 4fps).
   - **GPIO** @0x1198 lo (8-way stick), 0x1184 hi (START/SEL/L/R/A/B/X/Y), 0x1186 lo (VOL),
     all active-low. Button bits match `gp2xshm.h` (A=12,B=13,X=14,Y=15,START=8,…).
   - **MLC scanout**: OADR @0x290e/0x2910 (odd, double-buffered flip), EADR @0x2912/0x2914
