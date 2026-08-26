@@ -63,6 +63,7 @@ headers because `engine.h` includes them.
 | `test_padmap.c` | the GP2X button bitmap to Wiz pad word mapping |
 | `test_armfp.c` | ARM condition codes and the OABI double marshalling |
 | `test_extract.c` | the tar and YAFFS firmware image walkers |
+| `test_ubifs.c` | the UBI + UBIFS reader, including zlib and LZO blocks |
 | `test_png_write.c` | the dependency-free PNG writer |
 | `test_posix_compat.c` | `pread`/`mmap`/`shm_open` over Win32 (**Windows only**) |
 
@@ -122,9 +123,15 @@ second `main()` there breaks every build.
 
 ## Not covered
 
-`ubifs_mem` (`extract/ubifs.c`) is the last of the originally-deferred targets: `test_extract.c`
-covers tar and YAFFS, but synthesising a valid UBIFS image is a job of its own.
-
-Beyond that, what is left is genuinely stateful rather than merely awkward: the syscall dispatch
+What is left is genuinely stateful rather than merely awkward to reach: the syscall dispatch
 itself, the device model's MMIO callbacks, the thread model and the debugger's stop-the-world
 choreography. Those are integration territory, and `tools/test/` is where they get exercised.
+
+The three firmware readers are worth a note on how far the fixtures go. `test_ubifs.c` and
+`test_extract.c` build their images byte by byte, so they pin the reader against the format as
+documented in the source: field offsets, the log-structured "highest sqnum wins" rule, the UBI
+volume choice, block reassembly, and real zlib/LZO blocks produced by the same miniz and minilzo
+the readers decompress with. What no test in this repo can do is confirm those offsets match a
+real device image, because firmware is neither committed nor redistributable. That check was done
+once by byte-exact extraction of `ld-2.3.6.so` against a known-good rootfs, and it stays a
+one-off; these tests protect the behaviour from drifting away from it, not the original finding.
