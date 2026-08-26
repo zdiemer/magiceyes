@@ -411,8 +411,9 @@ run_nas_sweep's staged layout does implicitly.
   from `zelda-roth-olb-3t_caanoo/game/timidity/` into usr/share/midi/gp2xpats, in ALL THREE
   rootfses. stage_rootfs_eabi.sh copies them from a sibling rootfs when present.
 - **Regression gate before committing engine changes**: `tools/test/smoke.sh` +
-  `baseline.py --check` on Payback/Blazar/Vektar (F: paths), **Deicide 3**
-  (`/mnt/f/Roms/GP2X Wiz/Deicide 3/deicide3_eng/d3return_en.gpe`, `MAGICEYES_DEVICE=wiz`),
+  `baseline.py --check` on Payback/Blazar/Vektar (local corpus), **Deicide 3**
+  (`$MAGICEYES_LOCAL_CORPUS/GP2X Wiz/Deicide 3/deicide3_eng/d3return_en.gpe`,
+  `MAGICEYES_DEVICE=wiz`),
   **BareFistFighter + 4WE_GP2x** (NAS), + Sopwith (Wiz) and sopwith_camel_rc3 spot checks,
   engine copied to ext4 first. (supertux-wiz is in the spot list but its grade is a coin
   flip solo: see above; don't chase it as a regression.)

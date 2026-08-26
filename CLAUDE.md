@@ -7,33 +7,30 @@ MagicEyes SoCs (MMSP2 in GP2X, Pollux in Wiz/Caanoo).
 This file is the working brain: architecture, status, the reusable gotchas, the dev
 environment, and where the (large, un-committed) assets live. Deep per-title war-stories
 live in the memory files (see `MEMORY.md`) and `host/*/README.md`; read `README.md`
-(user-facing) and `TODOS.md` (roadmap) too.
+(user-facing), `TODOS.md` (roadmap) and [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
+(build prerequisites, WSL traps, asset staging) too.
 
 ## Status (what works right now)
 
-- **Wiz** — **Her Knights** (render + audio, BGM included), **Deicide 3** (commercial, Inka
-  DRM) and **Patissier** (EABI) boot on the engine. (**Cave Story / NXEngine** was verified on
-  the retired qemu+shim path and has not been re-checked since.) See `wiz-titles-revival`.
-- **GP2X** — **Payback** (commercial, static) playable end-to-end @ 30fps with video,
-  audio, input, native threads, no crash — on the native engine (`bin/magiceyes.exe`,
-  `bin/me_unicorn`). More static titles render: **Blazar, Quartz2, Vektar, Knight Lore**;
-  dynamic: **Odonata, Wind & Water**. See `payback-loading-deadlock`, `windows-bundle-next`,
-  `gp2x-static-titles-and-reload-crash`, `dynamic-gp2x-games-unicorn`.
-- **Caanoo** (Pollux) — **Propis, Rhythmos, Liar** all run and render (software
-  GLES1.1/EGL shim). Remaining: Rhythmos AVI-video background. See
-  `caanoo-gpu-emulation`.
+**Per-game status is the [magiceyes-compat](https://github.com/zdiemer/magiceyes-compat)
+tracker**, regenerated from the harness: **739 of 972** games playable, 794 reaching gameplay.
+Don't hand-maintain a title list here, it goes stale the moment a sweep runs. Open work is in
+`TODOS.md`; per-title war-stories are in the memory files.
 
-*(Resolved 2026-06-10:* the Windows-only multi-reload hard-crash was upstream Unicorn's
-MinGW `qemu_vfree` releasing CRT-heap pointers with `VirtualFree` — fixed by
-`host/engine/fork-patches/mingw_vfree.py`. See `gp2x-static-titles-and-reload-crash`.)
+Device-level state:
+- **GP2X (MMSP2)** — static and dynamic titles both run. Payback, Blazar and Vektar are the
+  committed baseline gate. See `payback-loading-deadlock`, `gp2x-static-titles-and-reload-crash`,
+  `dynamic-gp2x-games-unicorn`, `windows-bundle-next`.
+- **Wiz (Pollux)** — dynamic OABI titles run on the firmware's real libSDL, EABI titles on our
+  shim. See `wiz-titles-revival`, `real-sdl-stack-migration`.
+- **Caanoo (Pollux)** — software GLES1.1/EGL shim with host-GPU passthrough. Rhythmos' MPEG-4
+  video background is Linux-only. See `caanoo-gpu-emulation`, `gles-host-gpu-passthrough`.
 
 ## Core design
 
-**One backend on every platform: the Unicorn engine** (`host/engine/`). The qemu-user
-backend (`host/qemu/`) was retired in 0.5.0 — the engine had been the only thing under
-test for months, and keeping a second copy of the device model in sync (`host/common/`,
-also removed) cost more than the reference was worth. Anything below that reads "the
-qemu backend did X" is history, not a live code path.
+**One backend on every platform: the Unicorn engine** (`host/engine/`). There was a second,
+qemu-user backend until 0.5.0; anything below that reads "the qemu backend did X" is history,
+not a live code path.
 
 ### The engine → every device, every platform
 GP2X `.gpe` are **GPEComp** self-extractors that decompress to a **statically-linked**
@@ -127,8 +124,10 @@ discontinuity + spectral-flatness measures that identify "radio static" corrupti
 spectrogram and a `.wav`), and `run_report`/`log_tail`/`threads`. Launched from `.mcp.json` via
 `wsl.exe -e bash tools/mcp/run.sh`. Every injected input is recorded to a `.rec` that can be
 promoted into `tools/test/recordings/` as a regression test. See `tools/mcp/README.md`.
-Live guest memory/registers/breakpoints (and any access to the Windows bundle, whose shm is
-in-process) need the engine-side control channel — not built yet.
+Live guest memory/registers/breakpoints go through the engine's control channel (`--ctl` /
+`ME_CTL`, `host/engine/{ctl,dbg}.c`): pause, single-step, breakpoints, watchpoints, memory
+read/write and ELF symbols for named backtraces. It is compiled out of release bundles and CI
+asserts the shipped `magiceyes.exe` has neither the channel nor a socket import.
 
 - **Structured run report** (`host/engine/report.{c,h}`): one central sink (`me_report`) for every
   "I don't fully handle this" event — unimplemented syscall, unknown ioctl/MMSP2-register/`/dev`
@@ -155,64 +154,32 @@ in-process) need the engine-side control channel — not built yet.
   opens the live viewer for a human. `baseline.py` records/checks golden metrics + perceptual frame
   hashes (committed under `tools/test/baselines/`, no game imagery) — the anti-regression gate that
   discourages per-title hacks. `tools/test/smoke.sh` is an asset-free engine self-test (also CI).
-  See `tools/test/README.md`.
-
-## Dev environment & gotchas (IMPORTANT)
-
-- Host dev is **WSL Ubuntu 24.04** + the **forked Unicorn** (`~/me-unicorn-fork`,
-  branch `magiceyes`), `gcc-arm-linux-gnueabi`, MinGW-w64 (Windows cross), `python3-lzo`+`ubi_reader`.
-  Passwordless sudo; `/mnt/tmp` is `1777`. F: is `/mnt/f`, E: is `/mnt/e`.
-- **`wsl.exe ... bash -lc '...'` mangles inline shell vars and `VAR=/path` assignments**
-  (MSYS path conversion) — empty `$VAR`, wrong paths, and pipes/`$()`/quotes get mangled.
-  **Always put logic in a script FILE** and run `wsl.exe -e bash /mnt/e/.../script.sh`.
-- **GPH SDK toolchain** (`gcc-4.0.2-glibc-2.3.6`, builds the ARM shim): 32-bit x86 (needs
-  i386 multilib), must run from **ext4, not `/mnt` drvfs** (drvfs breaks vfork+exec of cc1;
-  32-bit `stat` hits EOVERFLOW on drvfs inodes). `build_guest.sh` copies it to `~/.magiceyes`.
-- Build the shim against the **SDK's own SDL 1.2 headers** (ABI-identical to the real
-  SDL_image/SDL_mixer the game loads).
-- **drvfs huge inodes** bite twice: the SDK toolchain (above) and the guest's 32-bit
-  `fstat()` returning EOVERFLOW (fixed by truncating st_ino to 32 bits — was the Caanoo
-  "QType4 font" wall). See `caanoo-gpu-emulation`.
-- **drvfs bites a third time — never BENCHMARK an engine that lives on `/mnt`.** All writable
-  state (`cache/` GPEComp scratch, `saves/`) resolves *beside the exe* (`paths.c`), so running
-  `bin/me_unicorn` from `/mnt/e` puts the decompress cache on drvfs. Measured with **byte-identical
-  binaries** (same sha256): Payback **21.4–23.6 fps from `/mnt/e` vs 26.7–27.8 fps from `/tmp`** —
-  a ~20% swing that silently flips `baseline.py` status tiers (`playable` ⇄ `renders`, since the
-  cutoff is 20 fps) and inflates `black_ratio` because the sampler catches the loading screen.
-  **Copy the engine to ext4 before any timing run**; the committed baselines assume ext4. There is
-  currently no env override for the cache root (`paths.c` reads only `paths.conf` beside the exe),
-  so relocating means moving the exe or writing a `paths.conf`.
+  See `tools/test/README.md`. **Never take timings from an engine on a Windows drive**: the
+  exe-adjacent cache lands on drvfs and costs ~20% fps, enough to flip status tiers. Copy it to
+  ext4 first (`docs/DEVELOPMENT.md`).
 
 ## External assets (NOT in git)
 
-Large/firmware/game files live under `assets/` (gitignored), or point env vars at a
-shared dir (`MAGICEYES_ROOTFS`, `MAGICEYES_SDK`).
+magiceyes ships no games and no device firmware. Large files live under `assets/` (gitignored)
+or wherever `MAGICEYES_ROOTFS` / `MAGICEYES_SDK` point. What matters for reading the code:
 
-**The corpus lives on `S:` — a network share, not a local disk.** It holds `S:\GP2X` (699),
-`S:\GP2X Wiz` (163) and `S:\GP2X Caanoo` (229) — ~1091 titles, vs the 32 in the older local
-`F:\Roms\GP2X` + `F:\Roms\GP2X Caanoo` (still present; the committed
-`tools/test/baselines/` were recorded from the F: paths). **WSL does not auto-mount network drives**
-— `/mnt` has only `c,d,e,f,g,h`, so `/mnt/s` must be mounted explicitly, and the mount does *not*
-survive into a new `wsl.exe` session:
-```sh
-. tools/local.env     # sets MAGICEYES_CORPUS_UNC; gitignored, this repo is public
-sudo mkdir -p /mnt/s && sudo mount -t drvfs "$MAGICEYES_CORPUS_UNC" /mnt/s   # ~56 MB/s
-```
-Use the UNC form (the `S:` drive-letter form depends on the mapping being visible to WSL init).
-Any tooling that sweeps the corpus must ensure this mount itself rather than assume it.
-- **Wiz rootfs**: extract `wiz_ubifs.img` with `ubireader_extract_files` → glibc/SDL/
-  libstdc++ + real libinkadrm/libdrmcode → `assets/rootfs`.
-- **EABI rootfs** (`assets/rootfs-eabi`): Debian Wheezy armel + EABI-cross-built shim
-  (`host/win/stage_rootfs_eabi.sh`), for Caanoo + EABI Wiz titles.
-- **Caanoo firmware fonts**: `/usr/gp2x/*.ttf` live only in YAFFS2 `yaffs2_rfs.img`;
-  `host/win/extract_caanoo_fw.sh` unyaffs → `assets/caanoo-ref/usr/`.
-- **GPH SDK**: toolchain + `DGE/include/SDL/` headers → `assets/sdk`.
-- **paeryn GP2X SDL source**: the MMSP2 register map (`src/video/gp2x/mmsp2_regs.h`,
-  `SDL_gp2xvideo.c`) → `assets/paeryn-sdl`.
-- **Games** (operator-supplied, legally dumped). GPEComp games decompress natively
+- `assets/rootfs` is a **Wiz** rootfs (glibc 2.3.6, the real libSDL and the genuine DRM libs).
+- `assets/rootfs-eabi` is a **Debian Wheezy armel** rootfs plus our EABI shim, for Caanoo and
+  EABI Wiz titles. The engine picks between them per title from `PT_INTERP`, so both can be
+  staged at once.
+- `assets/caanoo-ref/usr/` holds the Caanoo firmware TTFs, which exist only inside the
+  firmware image.
+- `assets/sdk` is the GPH SDK: the toolchain that builds the ARM shim, and the SDL 1.2 headers
+  the shim must be built against.
+- `assets/paeryn-sdl` is the paeryn GP2X SDL source, the reference for the MMSP2 register map.
+- Games are operator-supplied and legally dumped. GPEComp titles decompress natively
   (`host/engine/gpecomp.c` / `tools/un-gpecomp`).
 
-## GP2X hardware contract (worked out across both backends)
+The harness sweeps a corpus directory; if it is a network share, tooling mounts it itself from
+`MAGICEYES_CORPUS_UNC`. Staging recipes, prerequisites and the environment traps (**never
+benchmark from a Windows drive**) are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+
+## GP2X hardware contract
 
 - Binary: EABI structs + **OABI syscalls** (`swi #(0x900000+nr)`, nr in the immediate);
   modern EABI titles use `svc 0` with nr in r7. glibc 2.3.6 **LinuxThreads** (clones

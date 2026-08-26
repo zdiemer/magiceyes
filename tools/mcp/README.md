@@ -67,8 +67,8 @@ time an `unknown_mmio` event shows up in `run_report`.
 ## Design notes (each of these is a bug that already cost time)
 
 **Engines are staged onto ext4.** All writable engine state (the GPEComp decompress cache, the save
-overlay) resolves *beside the exe* (`host/engine/paths.c`), so an engine run from `/mnt/e` caches
-onto drvfs. Measured with byte-identical binaries: Payback **21.4–23.6 fps from `/mnt/e` vs
+overlay) resolves *beside the exe* (`host/engine/paths.c`), so an engine run from a Windows drive
+caches onto drvfs. Measured with byte-identical binaries: Payback **21.4–23.6 fps on drvfs vs
 26.7–27.8 fps from `/tmp`**. That ~20 % swing flips `baseline.py` status tiers, because the
 `playable` cutoff is 20 fps. Every session therefore copies the engine to `~/.magiceyes/mcp`.
 

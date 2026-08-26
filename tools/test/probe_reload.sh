@@ -8,8 +8,11 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 ENG="$REPO/bin/me_unicorn_dbg"
 [ -x "$ENG" ] || { echo "no $ENG (build with ME_DEBUG_BUILD=1)"; exit 1; }
 # Two continuously-rendering static titles (operator-supplied; override via env).
-G1="${G1:-/mnt/f/Roms/GP2X/Blazar_v1-30_gp2x/blazar.gpe}"
-G2="${G2:-/mnt/f/Roms/GP2X/Quartz2_v1-50_gp2x/Quartz 2.gpe}"
+# Two continuously-rendering static titles. Per-developer paths: pass G1/G2, or set
+# MAGICEYES_LOCAL_CORPUS to a dir holding GP2X/.
+C="${MAGICEYES_LOCAL_CORPUS:-}"
+G1="${G1:-$C/GP2X/Blazar_v1-30_gp2x/blazar.gpe}"
+G2="${G2:-$C/GP2X/Quartz2_v1-50_gp2x/Quartz 2.gpe}"
 SECS="${SECS:-20}"
 [ -f "$G1" ] && [ -f "$G2" ] || { echo "set G1=/path/a.gpe G2=/path/b.gpe (continuously-rendering titles)"; exit 1; }
 export ASAN_OPTIONS="abort_on_error=1:halt_on_error=1:detect_leaks=0"

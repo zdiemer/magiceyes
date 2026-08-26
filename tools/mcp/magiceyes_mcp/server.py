@@ -551,9 +551,16 @@ def baseline_check(games: list[str] | None = None) -> dict:
     # Unique staging dir per call: two concurrent harness calls would otherwise race on copying
     # the same file, and could exec a half-written binary.
     staged = env.stage_engine("linux", "harness-" + uuid.uuid4().hex[:8])
-    default = [str(env.LEGACY_CORPUS / "GP2X" / n)
-               for n in ("Blazar_v1-30_gp2x", "Payback-GP2X-v1.1", "vektar-free")]
-    targets = games or default
+    # The committed baselines were recorded from the local corpus, so without one configured
+    # there is nothing to default to -- say so rather than crashing on a None path.
+    if not games:
+        if not env.LEGACY_CORPUS:
+            return {"regressed": False, "output": "",
+                    "error": "no games given and MAGICEYES_LOCAL_CORPUS is not set; pass explicit "
+                             "paths, or point it at a dir holding GP2X/ (see docs/DEVELOPMENT.md)"}
+        games = [str(env.LEGACY_CORPUS / "GP2X" / n)
+                 for n in ("Blazar_v1-30_gp2x", "Payback-GP2X-v1.1", "vektar-free")]
+    targets = games
     r = subprocess.run(["python3", str(env.TOOLS_TEST / "baseline.py"), "--check",
                         "--engine", str(staged), *targets],
                        capture_output=True, text=True, cwd=str(env.REPO))

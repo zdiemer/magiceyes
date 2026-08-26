@@ -18,7 +18,7 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-# Keep the venv on ext4. The repo lives on drvfs (/mnt/e), where venv creation is slow and the
+# Keep the venv on ext4. When the repo lives on drvfs, venv creation is slow and the
 # engine's exe-adjacent cache costs ~20% throughput (see CLAUDE.md).
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$HOME/.magiceyes/mcp-venv}"
 

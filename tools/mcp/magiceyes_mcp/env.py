@@ -5,8 +5,8 @@ rediscover (all three cost real time to find; see CLAUDE.md):
 
 1. NEVER run an engine that lives on drvfs (/mnt/...). All writable engine state -- the GPEComp
    decompress cache and the save overlay -- resolves *beside the exe* (host/engine/paths.c), so an
-   engine at /mnt/e/Code/magiceyes/bin puts its cache on drvfs. Measured with byte-identical
-   binaries: Payback 21.4-23.6 fps from /mnt/e vs 26.7-27.8 fps from /tmp. That ~20% swing flips
+   engine on a Windows drive puts its cache on drvfs. Measured with byte-identical
+   binaries: Payback 21.4-23.6 fps on drvfs vs 26.7-27.8 fps on ext4. That ~20% swing flips
    status tiers (the "playable" cutoff is 25 fps), so every session stages the engine onto ext4.
 
 2. The corpus lives on S:, a NETWORK share named by MAGICEYES_CORPUS_UNC. WSL does not auto-mount
@@ -44,7 +44,10 @@ CORPUS_DIRS = {"gp2x": "GP2X", "wiz": "GP2X Wiz", "caanoo": "GP2X Caanoo"}
 
 # Older, smaller local corpus. The committed baselines in tools/test/baselines were recorded from
 # these paths, so baseline checks must keep using them.
-LEGACY_CORPUS = Path("/mnt/f/Roms")
+# A second, local corpus (holding GP2X / GP2X Wiz / GP2X Caanoo dirs). Per-developer, so it
+# is configuration: set MAGICEYES_LOCAL_CORPUS. Unset means "no local corpus", not an error.
+_local = os.environ.get("MAGICEYES_LOCAL_CORPUS", "").strip()
+LEGACY_CORPUS = Path(_local) if _local else None
 
 ENGINES = {
     "linux": REPO / "bin" / "me_unicorn",
@@ -93,10 +96,9 @@ def corpus_roots() -> dict:
     for key, sub in CORPUS_DIRS.items():
         p = CORPUS_MNT / sub
         out[key] = {"path": str(p), "present": p.is_dir()}
-    out["legacy_gp2x"] = {"path": str(LEGACY_CORPUS / "GP2X"),
-                          "present": (LEGACY_CORPUS / "GP2X").is_dir()}
-    out["legacy_caanoo"] = {"path": str(LEGACY_CORPUS / "GP2X Caanoo"),
-                            "present": (LEGACY_CORPUS / "GP2X Caanoo").is_dir()}
+    for key, sub in (("legacy_gp2x", "GP2X"), ("legacy_caanoo", "GP2X Caanoo")):
+        d = (LEGACY_CORPUS / sub) if LEGACY_CORPUS else None
+        out[key] = {"path": str(d) if d else None, "present": bool(d and d.is_dir())}
     return out
 
 

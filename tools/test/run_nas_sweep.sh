@@ -5,9 +5,9 @@
 #   bash tools/test/run_nas_sweep.sh [--secs 25] [--jobs 6] [--pilot] [--stage-only]
 #
 # Why it stages to ext4 first (this is not optional, see CLAUDE.md):
-#   * The engine resolves cache/ and saves/ BESIDE THE EXE. Running it from /mnt/e puts the GPEComp
+#   * The engine resolves cache/ and saves/ BESIDE THE EXE. Running it from a Windows drive puts the GPEComp
 #     decompress scratch on drvfs, which measured a ~20% fps hit on Payback (21.4-23.6 fps from
-#     /mnt/e vs 26.7-27.8 from /tmp). The playable/renders cutoff is 25 fps, so that alone flips
+#     drvfs vs 26.7-27.8 on ext4). The playable/renders cutoff is 25 fps, so that alone flips
 #     status tiers and makes the whole scorecard wrong.
 #   * Rootfs candidates are resolved relative to the exe dir, so assets/ has to come along.
 #
