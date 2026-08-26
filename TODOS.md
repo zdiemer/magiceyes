@@ -6,65 +6,29 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Open per-title bugs (native Windows engine unless noted)
 
-> **Real-libSDL migration (commits 9fcad4f / 3513d18):** the native engine now runs firmware menus
-> AND dynamic OABI games on the firmware's REAL libSDL instead of the brittle fake-SDL shim. This
-> fixed the shim's `SDL_Surface`/blit ABI corruption — **Deicide 3 and Her Knights render correctly
-> now**, and the white-rectangle/wrong-blit class (RetroVirus, Wiz menu) is the same root cause.
-> EABI titles (Patissier/rg_ura) still use the shim (no prebuilt real EABI libSDL — see
-> `third_party/README.md`).
-
 - **Her Knights — BGM is radio static.** Gameplay otherwise perfect. PCM is already noise
   in the ring (zcr≈0.5) *before* our SDL conversion — HK's 8-bit (U8 22050) custom sound
   bank through firmware `libSDL_mixer`. Next: play the menu music under a stock
   `qemu-arm` for comparison — static there ⇒ shim/SDL_mixer bug; clean ⇒ engine DSP/CPU
   bug. Trace HK's BGM loader (no symbols). `ME_FAKESDL_AUDIO_DUMP`, zcr analysis.
   See `wiz-titles-revival`.
-- **Deicide 3 — rendering FIXED (real libSDL); audio TBD.** Renders correctly on the real-libSDL
-  bundle (intro cutscenes verified) — the shim's surface/blit ABI mismatch was the cause. Remaining:
-  confirm audio (dump the ring vs the game's `SDL_OpenAudio`), confirm `.dat` assets extracted.
 - **Patissier — incorrect rendering (EABI, still on the shim).** Renders wrong / green screen via
   the EABI rootfs shim. The real-libSDL switch is OABI-only so far; EABI has no prebuilt real libSDL
-  (see `third_party/README.md` "EABI: deferred"). Same for rg_ura.
-- **RetroVirus — white rectangles (likely resolved by real libSDL — RE-VERIFY).** The empty-src-blit
-  cause was the shim's SDL_Surface/PixelFormat ABI mismatch, now off the shim. Re-run on the
-  real-libSDL bundle to confirm.
-- **Odonata — gameplay object-pool crash (PARKED).** Title+menu render, but a few seconds
-  into gameplay hits the game's own assert (object.cpp:297) — dead sprites never freed.
-  Decisive next test: compare against a stock `qemu-arm` run (correct nwfpe FPA +
-  cooperative threads).
-- **Blazar — guest SIGSEGV, qemu backend only (CLOSED).** Ran fine as a static title on
-  the engine; the backend that showed the fault is gone.
-- **Knight Lore — red error screen (minor).** Missing `timidity.cfg` ⇒ no MIDI music;
-  dismissable (press B), gameplay proceeds. Missing asset, not an engine bug.
+  (see `third_party/README.md` "EABI: deferred").
 
 ## Features / roadmap
 
-- **Save support — finish.** Native engine DONE (per-game write overlay, merged enumeration,
-  chdir-anchored writes). *Remaining:* confirm Wiz/Caanoo titles persist;
-  absolute writes OUTSIDE the game dir and `truncate`/`link`/`symlink`/`utime`-by-path aren't
-  redirected (no known title needs it).
+- **Save support — confirm Wiz/Caanoo titles persist.** Absolute writes OUTSIDE the game dir and
+  `truncate`/`link`/`symlink`/`utime`-by-path aren't redirected (no known title needs it).
 - **End-to-end firmware support.** Boot the device firmware, then launch games from the SD card.
   (In-process firmware install + gp2xmenu staging exist; see `firmware-boot-support`.)
-- **Touchscreen — guest-side backing.** Viewer mouse→`shm.touch_*` is done and feeds titles that
-  read the SDL mouse. *Remaining:* back tslib `ts_read` / raw `/dev/input/event` reads with the
-  same shm.touch fields (`guest/src/fakesdl.c` / `devices.c`) for titles that don't use the mouse.
 - **Caanoo firmware-menu touchscreen — BLOCKED inside the firmware libSDL.** The FW menu (gp2xmenu)
   takes touch (e.g. tapping the settings gear) via SDL mouse events, and the firmware libSDL's
   `FB_OpenMouse` reads the touchscreen through **tslib on `/dev/input/event0`** and presents it as
   the SDL mouse (string "Using tslib touchscreen"; `ts_open`/`ts_config`/`ts_fd`). NOT via the
-  menu's own tslib (the home loop never `ts_read`s on its own handle). Investigation
-  (radare2 + engine tracing) established:
-    - Modelled `/dev/input/event0` as a **touchscreen** (ABS_X/Y + BTN_TOUCH + ABS_PRESSURE, screen
-      range 0..319/0..239) distinct from the joystick on `event1`. This needs a **two-node** input
-      model in `input.c` (touch vs joystick per-fd) since tslib and SDL want ABS_X/Y to mean
-      different things; SDL rejects the touchscreen as a joystick and picks `event1` for nav.
-    - **Emulated-device fds must be < `FD_SETSIZE` (1024).** They were `0x10000000+`, so they fell
-      out of any `select()`/`fd_set` — the joystick works only because SDL `read()`s it directly,
-      but the touch path goes through `select()`. (Lowering `DEVFD_BASE` is the fix but risks
-      host-fd aliasing; needs care + a game regression pass.) `_newselect` (syscall 142) must also
-      report input fds ready via `input_pending` (it used to just clear readfds).
-    - With those, the engine is **provably correct**: during a tap it returns the touch fd ready in
-      SDL's `select` with the exact right bit set, and `select` returns >0.
+  menu's own tslib (the home loop never `ts_read`s on its own handle). The engine side is done and
+  provably correct: during a tap it returns the touch fd ready in SDL's `select` with the right bit
+  set. What remains is inside the firmware's own libSDL:
     - **Blocker:** SDL's `FB_PumpEvents` (`fcn.00038d00`) is a jump-table state machine switching on
       the mouse *type* (struct field `0x490`); the `ts_read` that actually reads touch (`0x39648`)
       is only reached in the tslib-mouse state, and the pump never gets there despite the fd being
@@ -80,9 +44,6 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Engine / infra
 
-- **Engine headless self-drain.** The Unicorn engine's audio producer paces against the viewer
-  consuming the shm ring, so a headless run blocks once the ring fills. Self-drain `a_read` by
-  wall clock when no viewer is attached (`viewer_heartbeat` already distinguishes the two).
 - **Consolidate debug switches.** Fold the env-gated probes in `fakesdl.c` (`FAKESDL_BLIT_LOG`,
   `FAKESDL_SRC_DUMP`, `FAKESDL_DISPFMT`, `FAKESDL_NO_COLORKEY`, `FAKESDL_AUDIO_TEST/DUMP`) into one
   `MAGICEYES_DEBUG=blit,audio,src,...`.
@@ -92,22 +53,17 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 - **Test both Linux and Windows binaries.** The triage harness (`tools/test/`) runs the Linux
   engine (`bin/me_unicorn`). Extend it to also exercise `bin/magiceyes.exe` so the corpus sweep
   covers both targets and catches host-portability regressions.
-- **Record + replay inputs for parity.** Have `baseline.py` record the input stream alongside the
-  golden metrics/frame hashes, then replay on later runs and assert parity (same inputs → same
-  frames/fps/audio).
-- **Finish the gameplay pilot** (`tools/test/pilot/`, `--pilot`). The closed loop lands: it drives
-  input from what is on screen, judges each press against a null control, and remembers the buttons
-  that kill a title. Still to do: a `depth` axis (boot/menu/gameplay) built on `screens` +
-  `responsive`; a `probe_inputs` MCP tool so an agent session gets a title's whole button response
-  map in one call rather than ~20 press/screenshot round trips; and promoting a discovered path to
-  a committed `.rec` after a confirm run under `ME_FAKESDL_VTIME=60`, which turns each cracked
-  title into a free per-frame regression gate. Tiers stay untouched until the new signals are
-  calibrated against a full sweep.
+- **Finish the gameplay pilot** (`tools/test/pilot/`, `--pilot`). Still to do: a `depth` axis
+  (boot/menu/gameplay) built on `screens` + `responsive`; a `probe_inputs` MCP tool so an agent
+  session gets a title's whole button response map in one call rather than ~20 press/screenshot
+  round trips; and promoting a discovered path to a committed `.rec` after a confirm run under
+  `ME_FAKESDL_VTIME=60`, which turns each cracked title into a free per-frame regression gate.
+  Tiers stay untouched until the new signals are calibrated against a full sweep.
 
 ## Packaging / distribution
 
 - **Per-OS bundles.** Linux AppImage (engine + rootfs + guest libs + viewer); Windows
-  installer; macOS via container. Single `magiceyes` entrypoint that picks the backend.
+  installer; macOS via container.
 - **romnas wiring.** Point `gp2x-wiz` (then `gp2x`, `gp2x-caanoo`) at magiceyes in
   `config/emulators.yaml` + `config/systems.yaml`: launcher invokes `magiceyes.sh`,
   `frontend_entrypoint: *.gpe`, and a `.dat`-extraction post_process (Deicide etc.). Linux/WSL2 only.
