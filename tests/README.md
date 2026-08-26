@@ -59,9 +59,18 @@ headers because `engine.h` includes them.
 | `test_report.c` | the structured run-report sink, its dedup and its stderr scanner |
 | `test_symbols.c` | ELF symtab indexing and nearest-preceding lookup |
 | `test_paths.c` | the portable Settings/Firmware/Cache roots |
+| `test_hostabi.c` | open()/errno translation and both guest `struct stat64` layouts |
+| `test_padmap.c` | the GP2X button bitmap to Wiz pad word mapping |
+| `test_armfp.c` | ARM condition codes and the OABI double marshalling |
 | `test_extract.c` | the tar and YAFFS firmware image walkers |
 | `test_png_write.c` | the dependency-free PNG writer |
 | `test_posix_compat.c` | `pread`/`mmap`/`shm_open` over Win32 (**Windows only**) |
+
+The last three C modules were extracted out of `syscalls.c`, `devices.c`, `fpa.c` and
+`oabi_libm.c` so they could be reached at all. Each was pure logic sitting in a file that drives
+unicorn, so a test would otherwise have had to link the whole emulator to check a bit mask. The
+extractions are pure code movement: `tools/test/scratch/regression_gate.sh` was run against the
+real golden titles afterwards and all four still match their committed baselines.
 
 **Python** (`tests/python/`, pytest via uv). pytest and numpy are test-time dependencies only; the
 modules under `tools/test` stay pure stdlib, because CI runs them directly.
@@ -113,8 +122,9 @@ second `main()` there breaks every build.
 
 ## Not covered
 
-Some high-value logic is stranded in translation units that are hostile to unit testing, generally
-because they make hundreds of `uc_*` calls against live guest state. `TODOS.md` lists them with the
-specific change each one needs first. The largest are `linux_errno` and `host_open_flags`
-(`syscalls.c`), `fill_stat64` (`syscalls.c`), `wiz_button_word` (`devices.c`) and `rd_double`
-(`oabi_libm.c`).
+`ubifs_mem` (`extract/ubifs.c`) is the last of the originally-deferred targets: `test_extract.c`
+covers tar and YAFFS, but synthesising a valid UBIFS image is a job of its own.
+
+Beyond that, what is left is genuinely stateful rather than merely awkward: the syscall dispatch
+itself, the device model's MMIO callbacks, the thread model and the debugger's stop-the-world
+choreography. Those are integration territory, and `tools/test/` is where they get exercised.

@@ -118,11 +118,12 @@ from Pollux sonames; set explicitly for non-GLES Caanoo titles). See
 **Unit tests come first and cost nothing: `tests/`** (`bash tests/c/build_tests.sh`,
 `bash tests/python/run_tests.sh`). Asset-free, ~5s for both, no engine and no ROMs, and they run in
 CI on every push. They cover the pure layer: GPEComp, the ctl JSON codec, the run report, ELF
-symbols, storage paths, the firmware walkers, the PNG writer, plus the Python harness (status
-tiers, the regression gate, the visual grader, the pilot, the MCP data layer). The C suite also
-runs as native Windows `.exe` (`ME_TEST_WIN=1`, needs `host/win/get_cmocka.sh` once). Everything
-below is the level above that: it answers "does this title run", not "is this function right".
-See `tests/README.md`.
+symbols, storage paths, the host/Linux ABI translation (open flags, errno, both struct stat64
+layouts), the Wiz pad map, ARM condition codes and FPA marshalling, the firmware walkers, the PNG
+writer, plus the Python harness (status tiers, the regression gate, the visual grader, the pilot,
+the MCP data layer). The C suite also runs as native Windows `.exe` (`ME_TEST_WIN=1`, needs
+`host/win/get_cmocka.sh` once). Everything below is the level above that: it answers "does this
+title run", not "is this function right". See `tests/README.md`.
 
 The point: point a Claude agent (or yourself) at a directory of `.gpe` binaries and learn what to
 fix, without a window. Built on the standalone Linux engine (`bin/me_unicorn`).
