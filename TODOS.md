@@ -42,13 +42,6 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Testing / harness
 
-- ~~Extend the unit tests past the pure layer.~~ **Done.** `hostabi.c` (open flags, errno, both
-  `struct stat64` layouts), `padmap.c` (the Wiz pad word) and `armfp.c` (ARM condition codes, the
-  FPA double word order, the libm dispatch) were split out of `syscalls.c`, `devices.c`, `fpa.c`
-  and `oabi_libm.c`, which is what made them reachable; `ubifs_mem` is covered against
-  byte-assembled UBI images. What remains untested is stateful rather than awkward (syscall
-  dispatch, the device MMIO callbacks, the thread model, the debugger's stop-the-world
-  choreography) and belongs to `tools/test/`, not here.
 - **Test both Linux and Windows binaries.** The triage harness (`tools/test/`) runs the Linux
   engine (`bin/me_unicorn`). Extend it to also exercise `bin/magiceyes.exe` so the corpus sweep
   covers both targets and catches host-portability regressions.
