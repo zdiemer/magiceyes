@@ -14,3 +14,6 @@
 LICENSE        text eol=lf
 .gitignore     text eol=lf
 .gitattributes text eol=lf
+
+# SVG is checked in as source (the README banner) -- keep it LF too.
+*.svg text eol=lf
