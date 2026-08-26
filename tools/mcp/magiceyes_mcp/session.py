@@ -212,7 +212,7 @@ class SessionManager:
         game_path = Path(game)
         if not game_path.exists():
             raise FileNotFoundError(
-                f"{game} not found. Use list_games to browse the corpus, or check that the romnas "
+                f"{game} not found. Use list_games to browse the corpus, or check that the corpus "
                 f"share is mounted (engine_health reports this).")
 
         sid = uuid.uuid4().hex[:8]

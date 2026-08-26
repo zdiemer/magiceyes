@@ -9,7 +9,7 @@ rediscover (all three cost real time to find; see CLAUDE.md):
    binaries: Payback 21.4-23.6 fps from /mnt/e vs 26.7-27.8 fps from /tmp. That ~20% swing flips
    status tiers (the "playable" cutoff is 25 fps), so every session stages the engine onto ext4.
 
-2. The corpus lives on S: == \\\\192.168.4.36\\games\\Roms, a NETWORK share. WSL does not auto-mount
+2. The corpus lives on S:, a NETWORK share named by MAGICEYES_CORPUS_UNC. WSL does not auto-mount
    network drives, and the mount does not survive a WSL restart, so we ensure it ourselves.
 
 3. The rootfs candidate list in syscalls.c is CWD-relative ("assets/rootfs-eabi", ...) and the
@@ -36,7 +36,9 @@ if str(TOOLS_TEST) not in sys.path:
 # Everything mutable lives on ext4, never on /mnt (see the module docstring).
 WORK = Path(os.environ.get("MAGICEYES_MCP_WORK", str(Path.home() / ".magiceyes" / "mcp")))
 
-CORPUS_UNC = r"\\192.168.4.36\games\Roms"
+# The corpus share names a private host, so it is configuration, not source. Set
+# MAGICEYES_CORPUS_UNC in the environment or in tools/local.env (gitignored).
+CORPUS_UNC = os.environ.get("MAGICEYES_CORPUS_UNC", "").strip()
 CORPUS_MNT = Path("/mnt/s")
 CORPUS_DIRS = {"gp2x": "GP2X", "wiz": "GP2X Wiz", "caanoo": "GP2X Caanoo"}
 
@@ -56,7 +58,7 @@ def on_drvfs(p: Path) -> bool:
 
 
 def ensure_corpus_mount() -> dict:
-    """Mount the romnas share if it isn't already. Idempotent and safe to call per session.
+    """Mount the corpus share if it isn't already. Idempotent and safe to call per session.
 
     Deliberately not an /etc/fstab edit: the mount is a dev-box convenience, and doing it here means
     the tooling self-heals after a WSL restart instead of failing with a confusing ENOENT.
@@ -64,6 +66,10 @@ def ensure_corpus_mount() -> dict:
     probe = CORPUS_MNT / CORPUS_DIRS["gp2x"]
     if probe.is_dir():
         return {"mounted": True, "action": "already-mounted", "path": str(CORPUS_MNT)}
+    if not CORPUS_UNC:
+        return {"mounted": False, "action": "not-configured", "path": str(CORPUS_MNT),
+                "error": "set MAGICEYES_CORPUS_UNC (environment or tools/local.env) to the "
+                         "corpus share; the local corpus and explicit paths still work without it"}
     try:
         CORPUS_MNT.mkdir(parents=True, exist_ok=True)
     except PermissionError:

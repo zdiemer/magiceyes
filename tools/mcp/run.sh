@@ -25,11 +25,15 @@ export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$HOME/.magiceyes/mcp-ve
 # The corpus is a NETWORK share, so WSL does not auto-mount it and the mount does not survive a WSL
 # restart. Ensure it here rather than making every tool call fail with a confusing ENOENT.
 # Non-fatal: the legacy F: corpus and any explicit path still work without it.
-if [ ! -d /mnt/s/GP2X ]; then
+# The share names a private host: keep it in the environment or tools/local.env, never in git.
+[ -f "$HERE/../local.env" ] && . "$HERE/../local.env"
+if [ ! -d /mnt/s/GP2X ] && [ -n "${MAGICEYES_CORPUS_UNC:-}" ]; then
     sudo mkdir -p /mnt/s 2>/dev/null
-    sudo mount -t drvfs '\\192.168.4.36\games\Roms' /mnt/s 2>/dev/null \
-        && echo "magiceyes-mcp: mounted romnas at /mnt/s" >&2 \
-        || echo "magiceyes-mcp: could not mount /mnt/s (corpus tools limited to F:)" >&2
+    if sudo mount -t drvfs "$MAGICEYES_CORPUS_UNC" /mnt/s 2>/dev/null; then
+        echo "magiceyes-mcp: mounted the corpus share at /mnt/s" >&2
+    else
+        echo "magiceyes-mcp: could not mount /mnt/s (corpus tools limited to the local corpus)" >&2
+    fi
 fi
 
 exec uv run --project "$HERE" --quiet magiceyes-mcp

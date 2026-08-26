@@ -94,7 +94,8 @@ chdirs into the game root, so a staged engine cannot discover `assets/rootfs*` b
 promote_as=...)` copies it into `tools/test/recordings/`, turning an exploratory session into a
 replayable regression test rather than something that evaporates.
 
-**The corpus is a network share.** `S:` = `\\192.168.4.36\games\Roms` (~1091 titles). WSL does not
+**The corpus is a network share** (~1091 titles), named by `MAGICEYES_CORPUS_UNC` in the
+environment or in `tools/local.env`, which is gitignored because this repo is public. WSL does not
 auto-mount network drives and the mount does not survive a WSL restart, so `run.sh` and
 `ensure_corpus_mount()` re-establish it. The older local `F:\Roms` corpus is still exposed as
 `legacy_gp2x` / `legacy_caanoo`; the committed baselines were recorded from those paths.

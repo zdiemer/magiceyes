@@ -24,3 +24,6 @@ __pycache__/
 # ad-hoc triage scripts a session writes while debugging (not part of the harness)
 /tools/test/scratch/
 
+
+# Local machine config: private hosts/paths that must never be committed.
+tools/local.env

@@ -189,14 +189,15 @@ in-process) need the engine-side control channel — not built yet.
 Large/firmware/game files live under `assets/` (gitignored), or point env vars at a
 shared dir (`MAGICEYES_ROOTFS`, `MAGICEYES_SDK`).
 
-**The corpus lives on `S:` — a NAS share, not a local disk.** `S:` = `\\192.168.4.36\games\Roms`
-(romnas), holding `S:\GP2X` (699), `S:\GP2X Wiz` (163) and `S:\GP2X Caanoo` (229) — ~1091 titles,
-vs the 32 in the older local `F:\Roms\GP2X` + `F:\Roms\GP2X Caanoo` (still present; the committed
+**The corpus lives on `S:` — a network share, not a local disk.** It holds `S:\GP2X` (699),
+`S:\GP2X Wiz` (163) and `S:\GP2X Caanoo` (229) — ~1091 titles, vs the 32 in the older local
+`F:\Roms\GP2X` + `F:\Roms\GP2X Caanoo` (still present; the committed
 `tools/test/baselines/` were recorded from the F: paths). **WSL does not auto-mount network drives**
 — `/mnt` has only `c,d,e,f,g,h`, so `/mnt/s` must be mounted explicitly, and the mount does *not*
 survive into a new `wsl.exe` session:
 ```sh
-sudo mkdir -p /mnt/s && sudo mount -t drvfs '\\192.168.4.36\games\Roms' /mnt/s   # ~56 MB/s
+. tools/local.env     # sets MAGICEYES_CORPUS_UNC; gitignored, this repo is public
+sudo mkdir -p /mnt/s && sudo mount -t drvfs "$MAGICEYES_CORPUS_UNC" /mnt/s   # ~56 MB/s
 ```
 Use the UNC form (the `S:` drive-letter form depends on the mapping being visible to WSL init).
 Any tooling that sweeps the corpus must ensure this mount itself rather than assume it.

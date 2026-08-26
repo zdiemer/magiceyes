@@ -40,11 +40,15 @@ done
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 STAGE=$HOME/me-sweep
 LOG=$STAGE/results/sweep.log
-NAS='\\192.168.4.36\games\Roms'
+# The share names a private host: set MAGICEYES_CORPUS_UNC in the environment or in
+# tools/local.env (gitignored). Never hardcode it here, this repo is public.
+[ -f "$REPO/tools/local.env" ] && . "$REPO/tools/local.env"
+NAS="${MAGICEYES_CORPUS_UNC:-}"
 
 mkdir -p "$STAGE/assets" "$STAGE/harness" "$STAGE/results"
 
 if [ ! -d /mnt/s/GP2X ]; then
+  [ -n "$NAS" ] || { echo "set MAGICEYES_CORPUS_UNC (or tools/local.env) to the corpus share"; exit 1; }
   echo "mounting the corpus share..."
   sudo mkdir -p /mnt/s
   sudo mount -t drvfs "$NAS" /mnt/s || { echo "could not mount $NAS"; exit 1; }
