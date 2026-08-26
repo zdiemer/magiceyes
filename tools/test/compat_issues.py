@@ -201,6 +201,21 @@ def body_for(r, shot_url, clip_url=""):
     A("| Video backend | %s |" % (r["backend"] or "unknown"))
     A("| Engine exit code | %s |" % r["exit_code"])
 
+    # What happened when the title was actually given input. Present only for runs driven by the
+    # pilot; the older fixed-script sweeps could not tell a live title from a deaf one.
+    if r.get("responsive") is not None:
+        if r.get("presses"):
+            hit = int(round(r["responsive"] * r["presses"]))
+            A("| Responded to input | %d of %d buttons |" % (hit, r["presses"]))
+        if r.get("screens") is not None:
+            A("| Distinct screens reached | %s |" % r["screens"])
+        # Reported even when nothing was pressed: a title that quits on ANY early input is one of
+        # the more useful things to know about it, and it is exactly the case with presses == 0.
+        if r.get("lethal_inputs"):
+            A("| Quits on | %s |" % ", ".join("`%s`" % b for b in r["lethal_inputs"]))
+        if r.get("pilot_hands_off"):
+            A("| Input note | quits on any early input, so it was watched without pressing |")
+
     blockers = []
     if r["unimplemented_named"]:
         blockers.append(("Unimplemented syscalls", r["unimplemented_named"]))

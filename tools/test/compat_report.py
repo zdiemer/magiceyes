@@ -274,6 +274,7 @@ def build(results_dir):
                 # leaving that to a hand session per title. Absent on fixed-script runs.
                 "screens": v.get("screens"),
                 "responsive": v.get("responsive"),
+                "presses": v.get("presses"),
                 "deepest_at": v.get("deepest_at"),
                 "lethal_inputs": v.get("lethal_inputs"),
                 "pilot_hands_off": v.get("pilot_hands_off"),
