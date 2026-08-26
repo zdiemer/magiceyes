@@ -24,6 +24,7 @@
  * enabling this there would mis-decode arguments. See caller in elf.c (guarded on g_device==0).
  */
 #include "engine.h"
+#include "armfp.h"
 #include <math.h>
 #include <string.h>
 
@@ -42,20 +43,7 @@ static int g_nshim = 0;
    game marshals via stfd->pop), reg_lo the low word. Verified against a live capture
    (0x3faacee9_f37c4b99 = 0.05235988 = pi/60). */
 static double rd_double(uint32_t reg_hi, uint32_t reg_lo) {
-    uint64_t u = ((uint64_t)gread(reg_hi) << 32) | gread(reg_lo);
-    double d; memcpy(&d, &u, 8); return d;
-}
-
-static double compute(int fn, double a, double b) {
-    switch (fn) {
-    case 0:  return cos(a);     case 1:  return sin(a);     case 2:  return tan(a);
-    case 3:  return floor(a);   case 4:  return ceil(a);    case 5:  return sqrt(a);
-    case 6:  return fabs(a);    case 7:  return exp(a);     case 8:  return log(a);
-    case 9:  return log10(a);   case 10: return asin(a);    case 11: return acos(a);
-    case 12: return atan(a);    case 13: return atan2(a, b); case 14: return pow(a, b);
-    case 15: return fmod(a, b); case 16: return hypot(a, b);
-    default: return a;
-    }
+    return fpa_words_to_double(gread(reg_hi), gread(reg_lo));
 }
 
 /* UC_HOOK_CODE at a (bx-lr-patched) shim stub: compute natively, put the result in f0 (+ r0/r1).
@@ -68,7 +56,7 @@ static void oabi_libm_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user
 
     double a = rd_double(UC_ARM_REG_R0, UC_ARM_REG_R1);
     double b = FNS[fn].argc == 2 ? rd_double(UC_ARM_REG_R2, UC_ARM_REG_R3) : 0.0;
-    double r = compute(fn, a, b);
+    double r = oabi_libm_compute(fn, a, b);
 
     fpa_write(0, r);                                    /* OABI: double result in FPA f0 */
     uint64_t u; memcpy(&u, &r, 8);                      /* also r0/r1 (r0=high word, r1=low word) */

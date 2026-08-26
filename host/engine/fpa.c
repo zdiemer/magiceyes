@@ -30,6 +30,7 @@
  *    Fd field = 0xf i.e. result -> PSR): Fn=bits[18:16], operand = bits[3:0] (bit3 set => an
  *    FPA constant index, else register), sets CPSR NZCV. */
 #include "engine.h"
+#include "armfp.h"
 #include <math.h>
 
 __thread int g_fpa_resume = 0;          /* set by the hook: guarded_emu_start must restart */
@@ -45,20 +46,6 @@ static struct thread *fpa_self(void) {
 /* FPA immediate constants (operand bit3 set, index in bits[2:0]). */
 static const double FPA_CONST[8] = { 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.5, 10.0 };
 
-/* Evaluate an ARM condition code (bits[31:28]) against CPSR NZCV. */
-static int cond_pass(uint32_t insn, uint32_t cpsr) {
-    int N = (cpsr >> 31) & 1, Z = (cpsr >> 30) & 1, C = (cpsr >> 29) & 1, V = (cpsr >> 28) & 1;
-    switch (insn >> 28) {
-    case 0x0: return Z;            case 0x1: return !Z;
-    case 0x2: return C;            case 0x3: return !C;
-    case 0x4: return N;            case 0x5: return !N;
-    case 0x6: return V;            case 0x7: return !V;
-    case 0x8: return C && !Z;      case 0x9: return !C || Z;
-    case 0xa: return N == V;       case 0xb: return N != V;
-    case 0xc: return !Z && N == V; case 0xd: return Z || N != V;
-    default:  return 1;            /* AL (0xe) / unconditional */
-    }
-}
 
 /* Compute the data address + apply base-register writeback, ARM LDC/STC style. `pc` is the
    CURRENT instruction's address (fpa_emulate's arg), needed for PC-relative literal loads. */
@@ -95,7 +82,7 @@ static int fpa_emulate(uc_engine *uc, uint32_t pc, uint32_t insn) {
     int cpnum = (insn >> 8) & 0xf;
     if ((!is_cpdt && !is_cpro) || (cpnum != 1 && cpnum != 2)) return 0;  /* not FPA (e.g. VFP cp10/11) */
 
-    if (!cond_pass(insn, cpsr)) return 1;              /* condition false: skip (PC still advances) */
+    if (!arm_cond_pass(insn, cpsr)) return 1;              /* condition false: skip (PC still advances) */
 
     if (is_cpdt) {
         int L = (insn >> 20) & 1;
