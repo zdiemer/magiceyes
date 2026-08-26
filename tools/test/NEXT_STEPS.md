@@ -1,5 +1,44 @@
 # What the corpus sweep says to fix next
 
+## SEVENTH full sweep, first with the pilot (2026-08-25): 739 / 55 / 52 / 126
+
+**739 playable, 55 ingame, 52 black, 126 incompatible, 0 crashed of 972**, against the sixth
+sweep's 736/56/54/126. Net +3 playable, -2 black; 13 titles up, 10 down. Same engine binary as
+sweep 6, same `--secs 25 --jobs 6`, cold start (no carried-over screen graphs), so the input driver
+is the only variable.
+
+The tier counts being near-flat is the expected result and the least interesting part. What the
+sweep actually produced is the first corpus-wide measurement of whether titles *respond*:
+
+| | of 1031 |
+|---|--:|
+| demonstrably respond to input | **625 (61%)** |
+| reached 3+ distinct screens | 258 (25%) |
+| **had a button that killed them** | **164** |
+| quit on ANY early input (hands-off) | 22 |
+| stuck on their first screen | 166 |
+| renders fine, answered nothing across 6+ buttons | 81 |
+
+**164 titles have a button that quits them, and the old rotation opened with START at every title
+in the corpus.** The tally of which button kills: START x48, A x34, B x31, SELECT x28, UP x13,
+LEFT x8, DOWN x7, X x7. The seven mislabeled titles in the wave-6 notes were the visible tip of a
+population twenty times that size.
+
+The ten regressions are individually understood, not a pattern: supertux-wiz (the documented
+heisenbug, and note the pilot scored it 0.455 responsive on the very run that graded black, so it
+was live and taking input); OpenBOR_v2.1933 and pintor2x (both still open, see below); PPlane
+(its B quits it; graded playable at 0.875 responsive when run solo); and five Caanoo/GP2X titles
+demoted to `ingame` because the pilot got *further in* and gameplay runs slower than a menu, or
+because the deeper screen trips `compat_visual`. That last mechanism needs attention: see below.
+
+**`compat_visual` is calibrated on menus, and now gets shown gameplay.** para3 renders its shooting
+gallery correctly and is flagged because it legitimately tiles a grid of identical sprites, which is
+exactly what the self-duplication check hunts for. Re-calibrate those thresholds against gameplay
+frames before trusting `ingame` on a pilot sweep.
+
+Still open, unchanged by all this: **rubik** (12 presses, nothing measurable, on a nearly
+featureless screen) and **OpenBOR_v2.1933** (exits ~22s with an exit-127 gp2xmenu tail).
+
 ## The press rotation is no longer the only option (2026-08-25)
 
 `tools/test/pilot/` is a closed-loop input driver: `run_title.py --pilot` / `run_corpus.py --pilot`
@@ -59,15 +98,19 @@ pressing buttons and the game answering, and by 17s it has usually exhausted the
 Volleyball and sudoku are static in every arm, correctly: a sudoku board does not move until it is
 played. For that class the screenshot is the artifact and no clip window helps.
 
-### Operational: the pilot makes a full sweep ~4x longer
+### Operational
 
-Sweep 6 (fixed rotation) ran 1031 titles in ~50 min. The pilot's first full sweep did 699 GP2X in
-42 min, and once the response detector was corrected the rate fell to ~4 titles/min, putting a full
-sweep near 4.5 hours. This is the pilot working, not a bug: titles that used to be killed early by
-a stray press now survive their whole 25s window, so the sweep pays for runs that used to abort.
-Budget for it, and note that the platform result dirs are reused per title, so an interrupted sweep
-leaves a MIXTURE of old and new verdicts that `compat_report.py` would silently report as one sweep.
-Clear `results/{gp2x,wiz,caanoo}` before a re-run.
+A full pilot sweep costs about what the fixed rotation did: **64.5 min** for 1091 folders
+(GP2X 41.5, Wiz 9.9, Caanoo 13.2) against sweep 6's ~50 min, at 16 titles/min.
+
+An earlier run of this looked 4x slower and that was a red herring worth recording: it was running
+code from before `_cycle_scale`, where a slow screen stretched every press window 4x and starved the
+title of coverage. Fixing the coverage bug fixed the sweep time with it. If a sweep ever crawls
+again, suspect the pacing, not the pilot.
+
+Note the platform result dirs are reused per title, so an interrupted sweep leaves a MIXTURE of old
+and new verdicts that `compat_report.py` would silently report as one sweep. Clear
+`results/{gp2x,wiz,caanoo}` before a re-run.
 
 
 Ranked by how many titles one fix would move. Updated from the SIXTH full sweep
