@@ -318,13 +318,41 @@ static const char *resolve_script(const char *gpe, char *out, size_t cap) {
     return out;
 }
 
-/* 64-bit FNV-1a over the whole .gpe image -> 16 hex chars. Keys the GPEComp decompress cache by
-   CONTENT (not filename), so a renamed/moved .gpe maps to the same entry and is reused. Same idiom
-   as syscalls.c path_ino, widened to 64 bits to make dir-name collisions negligible. */
-static void content_key(const uint8_t *buf, size_t len, char out[17]) {
+/* 64-bit FNV-1a over a whole binary image. Two users, both of which need identity to follow the
+   CONTENT rather than the filename: the GPEComp decompress cache (a renamed or moved .gpe maps to
+   the same entry and is reused) and savestates (a state refuses to load into a different build of
+   the same game, and still loads after the user reorganises their games folder). Same idiom as
+   syscalls.c path_ino, widened to 64 bits to make collisions negligible. */
+uint64_t me_content_key64(const uint8_t *buf, size_t len) {
     uint64_t h = 1469598103934665603ULL;
     for (size_t i = 0; i < len; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
-    snprintf(out, 17, "%016llx", (unsigned long long)h);
+    return h;
+}
+static void content_key(const uint8_t *buf, size_t len, char out[17]) {
+    snprintf(out, 17, "%016llx", (unsigned long long)me_content_key64(buf, len));
+}
+
+/* The running title's content key, published for the savestate layer. Set by finalize() for EVERY
+   title, not just GPEComp ones -- it is one pass over a file the loader already reads. */
+uint64_t g_game_key = 0;
+char     g_game_key_hex[17] = {0};
+
+/* Hash the binary the guest will actually execute. Best effort: a title whose file cannot be
+   re-read simply gets key 0, which savestates treat as "unverifiable" rather than as an error. */
+static void set_game_key(const char *elf) {
+    g_game_key = 0; g_game_key_hex[0] = 0;
+    FILE *f = fopen(elf, "rb");
+    if (!f) return;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    long sz = ftell(f);
+    if (sz <= 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return; }
+    uint8_t *buf = malloc((size_t)sz);
+    if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz) {
+        g_game_key = me_content_key64(buf, (size_t)sz);
+        snprintf(g_game_key_hex, sizeof g_game_key_hex, "%016llx", (unsigned long long)g_game_key);
+    }
+    free(buf);
+    fclose(f);
 }
 
 /* If `elf` is a GPEComp self-extractor, decompress its UCL payload into the portable Cache dir
@@ -424,6 +452,11 @@ static const char *finalize(const char *path, char *out, size_t cap) {
         }
     } else
         me_save_set_game(elf);
+    /* Identity for savestates, taken from the binary as the user launched it -- BEFORE any
+       GPEComp decompression. The decompressed payload is derived from this file and lives in a
+       cache that can legitimately be cleared, so hashing the .gpe is both more stable and still
+       re-checkable later. */
+    set_game_key(elf);
     if (gpecomp_to_tmp(elf, out, cap)) return out;   /* GPEComp stub -> decompressed static game */
     snprintf(out, cap, "%s", elf);
     return out;

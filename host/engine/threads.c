@@ -291,7 +291,15 @@ void sigsuspend_wait(void) {
         (unsigned long long)g_self->sig_blocked);
     pthread_mutex_lock(&g_sigm);
     BIGLOCK_UNLOCK();
-    while (!(g_self->sig_pending & ~g_self->sig_blocked) && !g_exit)
+    /* dbg_stop_pending(): a stop-the-world (debugger pause, or a savestate quiesce) must be able
+       to free this thread. engine_wake_sigwaiters() broadcasts, but a broadcast alone does not
+       satisfy this predicate, so the caller loop re-entered the wait and the thread could NEVER
+       reach the park point -- and LinuxThreads parks its workers in exactly this syscall
+       (__pthread_wait_for_restart_signal), so that was most titles. The caller (syscalls.c nr
+       29/72/179) sees the wakeup with nothing deliverable, undoes its entry bookkeeping and
+       rewinds PC to the SVC, so the suspend re-executes on resume -- what Linux does to
+       sigsuspend on a stop signal. */
+    while (!(g_self->sig_pending & ~g_self->sig_blocked) && !g_exit && !dbg_stop_pending())
         pthread_cond_wait(&g_sigc, &g_sigm);   /* g_exit: a teardown woke us to bail out */
     pthread_mutex_unlock(&g_sigm);
     BIGLOCK_LOCK();
@@ -427,10 +435,16 @@ void dump_threads_json(const char *path, const char *why) {
         struct thread *t = &g_th[i];
         uint32_t rg[17] = {0};
         if (t->uc) for (int k = 0; k < 17; k++) uc_reg_read(t->uc, g_sregs[k], &rg[k]);
+        /* sc_*: the syscall this thread is in the middle of, if any (intr_cb fills it). "parked
+           in nr=240" is far more actionable than a bare PC when triaging a futex pile-up. */
         fprintf(f, "%s{\"i\":%d,\"tid\":%d,\"ppid\":%d,\"state\":\"%s\",\"last_pc\":%u,"
-                   "\"sig_pending\":%llu,\"sig_blocked\":%llu,\"regs\":[",
+                   "\"sig_pending\":%llu,\"sig_blocked\":%llu,"
+                   "\"sc_nr\":%u,\"sc_pc\":%u,\"sc_active\":%d,\"sc_args\":[",
                 i ? "," : "", i, t->tid, t->ppid, sn[t->state & 7], t->last_pc,
-                (unsigned long long)t->sig_pending, (unsigned long long)t->sig_blocked);
+                (unsigned long long)t->sig_pending, (unsigned long long)t->sig_blocked,
+                t->sc_nr, t->sc_pc, t->sc_active);
+        for (int k = 0; k < 6; k++) fprintf(f, "%s%u", k ? "," : "", t->sc_arg[k]);
+        fprintf(f, "],\"regs\":[");
         for (int k = 0; k < 17; k++) fprintf(f, "%s%u", k ? "," : "", rg[k]);
         fprintf(f, "],\"fpa\":[");
         for (int k = 0; k < 8; k++) fprintf(f, "%s%.17g", k ? "," : "", t->fpa[k]);

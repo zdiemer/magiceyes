@@ -91,6 +91,13 @@ static char g_rootfs[PATH_MAX]; static int g_rootfs_ok = -1;
    The pin persists across reloads (syscalls_reset doesn't touch it) so a game chain-loaded
    from gp2xmenu keeps the same firmware rootfs. me_rootfs_set(NULL) unpins. */
 static int g_rootfs_pinned = 0;
+/* The rootfs currently in force, and whether it was PINNED (firmware boot) rather than picked by
+   PT_INTERP. A savestate has to put both back: the interp-based pick is deterministic and would
+   re-derive, but a pin is a session decision that no amount of re-deriving recovers. */
+const char *me_rootfs_current(int *pinned) {
+    if (pinned) *pinned = g_rootfs_pinned;
+    return g_rootfs_ok == 1 ? g_rootfs : "";
+}
 void me_rootfs_set(const char *dir) {
     if (!dir || !dir[0]) { g_rootfs_pinned = 0; return; }
     snprintf(g_rootfs, sizeof g_rootfs, "%s", dir);
@@ -710,6 +717,61 @@ static long dir_getdents(int fd, uint32_t gbuf, uint32_t count, int wide) {
     return (long)off;
 }
 
+/* Park an ENGINE-owned host fd above the range guest fds live in.
+ *
+ * Guest fd == host fd in this engine (see hostfd_guest_owned), so every descriptor we open for
+ * our own use -- the control-channel socket, the ME_LOGFILE, the audio dump -- is allocated from
+ * the same number space the guest's open() draws from. That is harmless during a run (the guest
+ * just gets the next free number), but a savestate restore has to put each guest fd back on its
+ * ORIGINAL number, and an engine fd squatting there would force a relocation dance. Parking ours
+ * out of the way deletes the collision class instead of handling it.
+ *
+ * ME_FD_RESERVE_BASE is 1100 rather than something roomier because the msvcrt CRT's fd table tops
+ * out at 2048: measured, _dup2 to 2047 succeeds and to 2048 fails. 1100 clears every synthetic
+ * guest fd (device 900-963, pipe 964/965, memfd 968-983, dirfd 984-999, FAKESOCK_FD 1000) and
+ * every real host fd, which HOSTFD_MAX caps at 512.
+ *
+ * Best effort by construction: on failure the caller keeps the fd it already had, so this can
+ * never make things worse than not calling it. */
+#define ME_FD_RESERVE_BASE 1100
+int me_fd_reserve_high(int fd) {
+    if (fd < 3 || fd >= ME_FD_RESERVE_BASE) return fd;   /* never relocate stdin/out/err */
+#ifndef _WIN32
+    int n = fcntl(fd, F_DUPFD, ME_FD_RESERVE_BASE);      /* lowest free >= base */
+    if (n >= 0) { close(fd); return n; }
+#else
+    /* No F_DUPFD on msvcrt, and _dup2 silently CLOSES whatever occupies the target, so probe for
+       a genuinely free slot first: _get_osfhandle returns -1 for an unused fd (and does so
+       safely -- it does not trip the invalid-parameter handler under msvcrt). */
+    for (int t = ME_FD_RESERVE_BASE; t < 2048; t++) {
+        if (_get_osfhandle(t) != -1) continue;
+        if (_dup2(fd, t) == 0) { _close(fd); return t; }
+    }
+#endif
+    return fd;
+}
+
+/* fopen() whose underlying descriptor is parked out of the guest fd range (see above). The
+   engine's own long-lived diagnostic sinks (ME_LOGFILE, ME_AUDIO_DUMP) open before any game
+   loads, so without this they take fd 3, 4, ... -- precisely the low numbers the guest allocates
+   first and a savestate restore then needs back. Mode is a plain fopen mode string; only the
+   handful of forms we actually use ("w", "wb", "a", "r", "rb") are honoured. */
+FILE *me_fopen_reserved(const char *path, const char *mode) {
+    int flags;
+    if      (*mode == 'w') flags = O_CREAT | O_WRONLY | O_TRUNC;
+    else if (*mode == 'a') flags = O_CREAT | O_WRONLY | O_APPEND;
+    else                   flags = O_RDONLY;
+#ifdef O_BINARY
+    if (strchr(mode, 'b')) flags |= O_BINARY;
+#endif
+    int fd = open(path, flags, 0644);
+    if (fd < 0) return NULL;
+    fd = me_fd_reserve_high(fd);
+    FILE *f = fdopen(fd, mode);
+    if (!f) close(fd);
+    return f;
+}
+
 /* Track the real host fds we hand back to the guest from open()/openat(). The guest closes
    most of them, but a game that exits/reloads mid-load leaks the rest; over many hot reloads
    that exhausts the msvcrt/posix fd table. syscalls_reset closes any still open. */
@@ -731,15 +793,24 @@ static uint32_t path_ino(const char *hp) {
    anything in a .so without knowing which file landed at which address. (ME_MMAPLOG used
    /proc/self/fd for this, which is Linux-only; this works on both platforms.) */
 static char *g_hostfd_path[HOSTFD_MAX];
-static void hostfd_track_path(int fd, uint32_t ino, const char *hp) {
+/* The GUEST open flags each tracked fd was opened with. A savestate has to reopen every file the
+   guest holds, and it must strip O_CREAT|O_TRUNC when it does -- reopening a game's save file
+   with its original flags would erase the save the state is supposed to be consistent with. */
+static int g_hostfd_flags[HOSTFD_MAX];
+static void hostfd_track_flags(int fd, uint32_t ino, const char *hp, int gflags) {
     if (fd < 0) return;
     int slot = -1;
     for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] < 0) { slot = i; break; }
     if (slot < 0 && g_nhostfd < HOSTFD_MAX) slot = g_nhostfd++;
     if (slot < 0) return;
-    g_hostfd[slot] = fd; g_hostfd_ino[slot] = ino;
+    g_hostfd[slot] = fd; g_hostfd_ino[slot] = ino; g_hostfd_flags[slot] = gflags;
     free(g_hostfd_path[slot]);
     g_hostfd_path[slot] = hp ? strdup(hp) : NULL;
+}
+/* Most call sites do not know or care about the flags (dup, a re-open of an already-tracked
+   path); they get read-only, which is the safe default for a restore. */
+static void hostfd_track_path(int fd, uint32_t ino, const char *hp) {
+    hostfd_track_flags(fd, ino, hp, 0);
 }
 static const char *hostfd_path(int fd) {
     for (int i = 0; i < g_nhostfd; i++)
@@ -752,7 +823,7 @@ static uint32_t hostfd_ino(int fd) {
 }
 static void hostfd_untrack(int fd) {
     for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] == fd) {
-        g_hostfd[i] = -1;
+        g_hostfd[i] = -1; g_hostfd_flags[i] = 0;
         free(g_hostfd_path[i]); g_hostfd_path[i] = NULL;
         return;
     }
@@ -867,7 +938,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                          uint32_t a3, uint32_t a4, uint32_t a5) {
     (void)a5;
     if (g_alarm_at) {   /* expired alarm -> SIGALRM to the thread that armed it */
-        struct timeval tv; gettimeofday(&tv, NULL);
+        struct timeval tv; guest_timeofday(&tv);
         if ((uint64_t)tv.tv_sec * 1000000 + tv.tv_usec >= g_alarm_at) {
             g_alarm_at = 0;
             send_sig(g_alarm_tid, 14 /*SIGALRM*/);
@@ -938,7 +1009,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
             BIGLOCK_UNLOCK();
             for (int i = 0; i < 100; i++) {         /* <= ~2s of catch-up, then give up */
                 uint32_t us = dsp_pace_us();
-                if (!us || g_exit || g_shutdown) break;
+                /* dbg_stop_pending(): a stop-the-world (debugger pause / savestate quiesce) must
+                   not have to wait out ~2s of catch-up. Break rather than rewind -- this syscall
+                   is NOT restartable, because dsp_write() already copied the PCM into the shm
+                   ring above, so re-executing the SVC would duplicate audio. Completing early is
+                   safe: dsp_vqueued()'s idle-gap rebase re-syncs the producer on the next write. */
+                if (!us || g_exit || g_shutdown || dbg_stop_pending()) break;
                 usleep(us > 20000 ? 20000 : us);
             }
             BIGLOCK_LOCK();
@@ -1168,7 +1244,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         return 0;
     }
     case 13: { /* time(t) */
-        uint32_t t = (uint32_t)time(NULL);
+        uint32_t t = (uint32_t)guest_now();
         if (a0) uc_mem_write(g_uc, a0, &t, 4); return t;
     }
     case 99: case 100: { /* statfs/fstatfs: report a roomy tmpfs */
@@ -1326,7 +1402,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         long r = open(hp, host_open_flags((int)a1), a2); int e2 = errno;
         if (getenv("ME_OPENLOG")) { char b[1300]; snprintf(b, sizeof b,
             "OPEN '%s' [%s] flags=%x -> %ld%s\n", p, hp, (int)a1, r, r < 0 ? " FAIL" : ""); fputs(b, stderr); }
-        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track_path((int)r, path_ino(hp), hp); return r; }
+        if (r >= 0) { g_self->enoent_streak = 0; hostfd_track_flags((int)r, path_ino(hp), hp, (int)a1); return r; }
         /* GP2X SD-root timidity convention: MIDI ports ship a cwd timidity.cfg whose
            instrument lines point at ../timidity/<name>.pat -- a shared patch pack the user
            was meant to unzip to the SD root, absent from most dumps, so the title's music
@@ -1370,7 +1446,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
               int dfd = dirfd_make(orig_d ? hp : NULL, ov_d ? ov : NULL);
               if (dfd >= 0) return dfd; } }
         long r = open(hp, host_open_flags((int)a2), a3);
-        if (r >= 0) { hostfd_track_path((int)r, path_ino(hp), hp); return r; }
+        if (r >= 0) { hostfd_track_flags((int)r, path_ino(hp), hp, (int)a2); return r; }
         return LERR(errno);
     }
     case 6:    /* close */
@@ -1423,7 +1499,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 263:   /* clock_gettime(clk, ts) */
     case 266: { /* clock_gettime64 */
-        struct timeval tv; gettimeofday(&tv, NULL);
+        struct timeval tv; guest_timeofday(&tv);
         uint32_t ts[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec * 1000 };
         if (a1) uc_mem_write(g_uc, a1, ts, 8);
         return 0;
@@ -1436,7 +1512,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 96:   return 20; /* getpriority: kernel encodes nice 0 as 20 - nice = 20 */
     case 43: { /* times(tms*): elapsed process ticks (USER_HZ=100). SDL_GetTicks on some builds
                   falls back to times() -- returning ENOSYS froze their game clock at 0. */
-        struct timeval tv; gettimeofday(&tv, NULL);
+        struct timeval tv; guest_timeofday(&tv);
         uint32_t ticks = (uint32_t)((uint64_t)tv.tv_sec * 100 + tv.tv_usec / 10000);
         if (a0) { uint32_t tms[4] = { ticks, 0, 0, 0 }; uc_mem_write(g_uc, a0, tms, 16); }
         return (long)ticks;
@@ -1449,7 +1525,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     case 27: { /* alarm(secs): one-shot SIGALRM, checked at syscall entry (games syscall
                   constantly, so delivery latency is fine for a watchdog/timer). Returns
                   seconds remaining on any previously scheduled alarm, like the kernel. */
-        struct timeval tv; gettimeofday(&tv, NULL);
+        struct timeval tv; guest_timeofday(&tv);
         uint64_t now = (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
         long left = g_alarm_at ? (long)((g_alarm_at - now + 999999) / 1000000) : 0;
         if (left < 0) left = 0;
@@ -1711,6 +1787,20 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            loader + all workers parked in __pthread_wait_for_restart_signal forever. */
         for (;;) {
             if (!(t->sig_pending & ~t->sig_blocked) && !g_exit) sigsuspend_wait();
+            /* Woken by a stop-the-world with nothing to deliver (debugger pause or a savestate
+               quiesce -- see sigsuspend_wait). An indefinite wait is the one thing that can keep
+               a thread off-CPU past the pause deadline, so bail out to the park point instead:
+               undo the only guest-visible mutation this syscall has made (the suspend mask) and
+               rewind PC to the SVC itself, so intr_cb re-enters the exact same sigsuspend once
+               the world resumes. R0 is deliberately left alone -- it is an argument on the
+               re-execution, not a return value -- which is why the EINTR write is below this. */
+            if (dbg_stop_pending() && !(t->sig_pending & ~t->sig_blocked) && !g_exit) {
+                t->sig_blocked = t->susp_oldmask; t->susp_active = 0;
+                uint32_t cpsr = gread(UC_ARM_REG_CPSR);
+                gwrite(UC_ARM_REG_PC, t->sc_pc - (((cpsr >> 5) & 1) ? 2u : 4u));
+                g_setpc = 1;
+                return 0;
+            }
             gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
             deliver_signals();
             if (t->has_sigsave && !entered_in_handler) break;  /* handler frame pushed;
@@ -1738,7 +1828,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
     case 78: {  /* gettimeofday(tv, tz): real wall-clock — games drive loading/animation
                    timing off this; returning 0 froze the elapsed-time delta (stuck screens). */
-        if (a0) { struct timeval tv; gettimeofday(&tv, NULL);
+        if (a0) { struct timeval tv; guest_timeofday(&tv);
                   uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec };
                   uc_mem_write(g_uc, a0, t, 8); }
         return 0;
@@ -1922,3 +2012,186 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
     }
 }
 
+#ifdef _WIN32
+#define ME_NULL_DEVICE "NUL"
+#else
+#define ME_NULL_DEVICE "/dev/null"
+#endif
+
+/* ---- savestates: the syscall layer ------------------------------------------
+ * The awkward part of a savestate, and the only place it is honestly lossy.
+ *
+ * Guest fd == host fd in this engine (see hostfd_guest_owned), so the guest is holding those
+ * integers in its own memory and a restore has to land each file back on the SAME number. Host
+ * descriptors cannot be serialised, so what travels is (path, guest flags, offset) and the
+ * restore reopens and re-seeks. Three details make that safe rather than nearly-safe:
+ *
+ *   - O_CREAT|O_TRUNC are stripped on reopen. Reopening a game's save file with the flags it was
+ *     originally created with would truncate the very file the state is meant to agree with.
+ *   - dup2 puts the fd back on its original number. syscalls_reset() has already closed every
+ *     guest fd by this point, and me_fd_reserve_high keeps the engine's own descriptors out of
+ *     the guest range, so the target is normally free; if it is not, we relocate the occupant
+ *     and say so, rather than silently handing the guest someone else's file.
+ *   - A file that has since vanished becomes the host null device at that number. The guest then
+ *     sees clean EOF, which every caller handles, instead of a wild descriptor that could land
+ *     on an engine resource -- which is the whole reason hostfd_guest_owned exists.
+ *
+ * memfd and dirfd are pure in-memory and travel exactly. The dirfd snapshot is written VERBATIM
+ * rather than re-scanned: the guest holds a cursor into one specific listing, and a fresh scan
+ * can legitimately return a different order or a different set.
+ */
+void syscalls_state_save(struct sbuf *b) {
+    /* --- host fds: path, guest flags, live offset --- */
+    int n = 0;
+    for (int i = 0; i < g_nhostfd; i++) if (g_hostfd[i] >= 0) n++;
+    sb_u32(b, (uint32_t)n);
+    for (int i = 0; i < g_nhostfd; i++) {
+        int fd = g_hostfd[i];
+        if (fd < 0) continue;
+        long long off = (long long)lseek(fd, 0, SEEK_CUR);
+        sb_u32(b, (uint32_t)fd);
+        sb_u32(b, g_hostfd_ino[i]);
+        sb_u32(b, (uint32_t)g_hostfd_flags[i]);
+        sb_u64(b, (uint64_t)(off < 0 ? 0 : off));
+        sb_str(b, g_hostfd_path[i] ? g_hostfd_path[i] : "");
+    }
+    /* --- memfd (fake /proc, /etc/localtime, /proc/self/maps): exact --- */
+    sb_u32(b, MEMFD_MAX);
+    for (int i = 0; i < MEMFD_MAX; i++) {
+        sb_u32(b, (uint32_t)g_memf[i].used);
+        sb_u32(b, g_memf[i].len);
+        sb_u32(b, g_memf[i].pos);
+        sb_bytes(b, g_memf[i].data, g_memf[i].used ? g_memf[i].len : 0);
+    }
+    /* --- dirfd: the snapshot the guest is walking, verbatim --- */
+    sb_u32(b, DIRFD_MAX);
+    for (int i = 0; i < DIRFD_MAX; i++) {
+        sb_u32(b, (uint32_t)g_dirf[i].used);
+        sb_u32(b, (uint32_t)g_dirf[i].n);
+        sb_u32(b, (uint32_t)g_dirf[i].pos);
+        for (int k = 0; g_dirf[i].used && k < g_dirf[i].n; k++) {
+            sb_str(b, g_dirf[i].name[k]);
+            sb_u8(b, g_dirf[i].type[k]);
+        }
+    }
+    /* --- the in-engine pipe --- */
+    sb_u32(b, g_pipe_w); sb_u32(b, g_pipe_r);
+    sb_bytes(b, g_pipebuf, g_pipebuf ? g_pipe_w : 0);
+    /* --- alarm: a guest-clock deadline, so it restores verbatim --- */
+    sb_u64(b, g_alarm_at); sb_u32(b, (uint32_t)g_alarm_tid);
+}
+
+static int g_statelog = -1;
+int syscalls_state_load(struct scur *c) {
+    if (g_statelog < 0) g_statelog = getenv("ME_STATELOG") ? 1 : 0;
+    char path[PATH_MAX];
+    uint32_t n = sc_u32(c);
+    if (c->failed || n > HOSTFD_MAX) return -1;
+    for (uint32_t i = 0; i < n; i++) {
+        int want   = (int)sc_u32(c);
+        uint32_t ino = sc_u32(c);
+        int gflags = (int)sc_u32(c);
+        uint64_t off = sc_u64(c);
+        if (!sc_str(c, path, sizeof path)) return -1;
+        if (want < 3) continue;                       /* stdin/out/err are inherited, never ours */
+
+        /* Strip creation flags: the file exists (or it does not, and creating an empty one would
+           be worse than the null device). Everything else about the access mode is preserved. */
+#ifdef _WIN32
+        int hf = host_open_flags(gflags & ~(0100 | 01000));     /* guest O_CREAT|O_TRUNC */
+#else
+        int hf = host_open_flags(gflags) & ~(O_CREAT | O_TRUNC);
+#endif
+        int fd = path[0] ? open(path, hf) : -1;
+        if (fd < 0 && path[0]) {
+            /* Try read-only before giving up: a file that was writable at save time may now be
+               on read-only media (an extracted zip, a ROM directory the user moved). */
+            fd = open(path, O_RDONLY
+#ifdef O_BINARY
+                      | O_BINARY
+#endif
+                      );
+        }
+        if (fd < 0) {
+            fd = open(ME_NULL_DEVICE, O_RDONLY
+#ifdef O_BINARY
+                      | O_BINARY
+#endif
+                      );
+            me_report(MR_STATE_MISSING_FILE, 0, path[0] ? path : "(unknown)", 0);
+            fprintf(DIAG, "state: '%s' is gone; guest fd %d now reads EOF\n",
+                    path[0] ? path : "(unknown)", want);
+            if (fd < 0) continue;                     /* nothing we can do; leave the fd unbound */
+        }
+        if (fd != want) {
+            /* The target number must be FREE before dup2, because dup2 closes whatever is there
+               without a word. syscalls_reset() has already closed every guest fd, and the
+               engine's own descriptors are parked above the guest range (me_fd_reserve_high, used
+               by the ctl listener and its accepted connections, the log sink and the audio dump),
+               so it normally is. If something is still there it belongs to the engine, and
+               silently closing it is how a savestate restore ends up killing the control channel
+               -- so move it out of the way instead, and say so. */
+            int occupied;
+#ifdef _WIN32
+            occupied = (_get_osfhandle(want) != -1);
+#else
+            occupied = (fcntl(want, F_GETFD) != -1);
+#endif
+            if (occupied) {
+                int moved = me_fd_reserve_high(want);
+                fprintf(DIAG, "state: guest fd %d was occupied at restore; moved that descriptor "
+                              "to %d\n", want, moved);
+            }
+            if (dup2(fd, want) < 0) { close(fd); continue; }
+            close(fd);
+        }
+        if (off) lseek(want, (long)off, SEEK_SET);
+        hostfd_track_flags(want, ino, path[0] ? path : NULL, gflags);
+        if (g_statelog)
+            fprintf(DIAG, "state: fd %d <- %s flags=%x off=%llu\n",
+                    want, path[0] ? path : "(none)", gflags, (unsigned long long)off);
+    }
+
+    uint32_t nm = sc_u32(c);
+    if (c->failed || nm != MEMFD_MAX) return -1;
+    for (uint32_t i = 0; i < nm; i++) {
+        int used = (int)sc_u32(c);
+        uint32_t len = sc_u32(c), pos = sc_u32(c);
+        free(g_memf[i].data);
+        g_memf[i].data = NULL; g_memf[i].used = used; g_memf[i].len = len; g_memf[i].pos = pos;
+        if (used && len) {
+            g_memf[i].data = malloc(len);
+            if (!g_memf[i].data || !sc_bytes(c, g_memf[i].data, len)) return -1;
+        } else if (used) {
+            g_memf[i].data = malloc(1);
+        }
+    }
+
+    uint32_t nd = sc_u32(c);
+    if (c->failed || nd != DIRFD_MAX) return -1;
+    for (uint32_t i = 0; i < nd; i++) {
+        int used = (int)sc_u32(c), cnt = (int)sc_u32(c), pos = (int)sc_u32(c);
+        g_dirf[i].used = used; g_dirf[i].n = cnt; g_dirf[i].pos = pos;
+        g_dirf[i].name = NULL; g_dirf[i].type = NULL;
+        if (!used || cnt <= 0) { g_dirf[i].n = 0; continue; }
+        g_dirf[i].name = calloc((size_t)cnt, sizeof(char *));
+        g_dirf[i].type = calloc((size_t)cnt, 1);
+        if (!g_dirf[i].name || !g_dirf[i].type) return -1;
+        for (int k = 0; k < cnt; k++) {
+            if (!sc_str(c, path, sizeof path)) return -1;
+            g_dirf[i].name[k] = strdup(path);
+            g_dirf[i].type[k] = sc_u8(c);
+        }
+    }
+
+    g_pipe_w = sc_u32(c); g_pipe_r = sc_u32(c);
+    if (c->failed) return -1;
+    free(g_pipebuf); g_pipebuf = NULL; g_pipe_cap = 0;
+    if (g_pipe_w) {
+        g_pipebuf = malloc(g_pipe_w);
+        g_pipe_cap = g_pipe_w;
+        if (!g_pipebuf || !sc_bytes(c, g_pipebuf, g_pipe_w)) return -1;
+    }
+    g_alarm_at = sc_u64(c); g_alarm_tid = (int)sc_u32(c);
+    return c->failed ? -1 : 0;
+}

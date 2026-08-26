@@ -169,23 +169,41 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     /* Debugger: mark this thread as off-CPU for the duration of the syscall. A thread blocked in
        a long syscall (futex, sigsuspend) is not executing TCG and cannot reach the park point in
        emu_run until it returns -- dbg_pause needs to tell that apart from "still running", and
-       t->state cannot (TH_BLOCKED/TH_SLEEPING are never assigned anywhere). */
-    if (g_dbg_armed) dbg_leave_tcg();
+       t->state cannot (TH_BLOCKED/TH_SLEEPING are never assigned anywhere).
+       UNCONDITIONAL, deliberately: these are two array stores, and gating them on g_dbg_armed
+       (which dbg_pause only sets once it is already pausing) meant a thread that entered a long
+       wait BEFORE the first pause stayed recorded as DTH_TCG and was counted as "running"
+       forever -- so the first pause of a session could never converge on any title with an idle
+       worker. The g_dbg_armed guard stays on the stop_pending/uc_emu_stop checks below, which is
+       where it actually saves work. */
+    dbg_leave_tcg();
+    if (g_self) { g_self->sc_nr = nr; g_self->sc_pc = pc; g_self->sc_active = 0; }
     if (!g_exit && (nr == 78 || nr == 263 || nr == 266)) {
-        struct timeval tv; gettimeofday(&tv, NULL);
+        struct timeval tv; guest_timeofday(&tv);   /* the guest clock -- see devices.c */
         if (nr == 78) { uint32_t tvp = gread(UC_ARM_REG_R0);
             if (tvp) { uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec }; uc_mem_write(uc, tvp, t, 8); } }
         else { uint32_t tsp = gread(UC_ARM_REG_R1);   /* clock_gettime(clk, timespec) */
             if (tsp) { uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec * 1000 }; uc_mem_write(uc, tsp, t, 8); } }
         gwrite(UC_ARM_REG_R0, 0);
-        if (g_dbg_armed) { dbg_enter_tcg(); if (dbg_stop_pending()) uc_emu_stop(uc); }
+        dbg_enter_tcg();
+        if (g_dbg_armed && dbg_stop_pending()) uc_emu_stop(uc);
         return;
     }
     BIGLOCK_LOCK();
     g_setpc = 0;
     uint32_t a0 = gread(UC_ARM_REG_R0), a1 = gread(UC_ARM_REG_R1), a2 = gread(UC_ARM_REG_R2);
-    long r = sys_dispatch(nr, a0, a1, a2,
-                          gread(UC_ARM_REG_R3), gread(UC_ARM_REG_R4), gread(UC_ARM_REG_R5));
+    uint32_t a3 = gread(UC_ARM_REG_R3), a4 = gread(UC_ARM_REG_R4), a5 = gread(UC_ARM_REG_R5);
+    /* sc_active goes up only once we hold the biglock and are about to dispatch, so a thread
+       merely QUEUED on the lock is distinguishable from one blocked inside a handler: the former
+       has committed nothing and is always safe to rewind, the latter only if its syscall is on
+       the restartable whitelist (host/engine/state.c). */
+    if (g_self) {
+        g_self->sc_arg[0] = a0; g_self->sc_arg[1] = a1; g_self->sc_arg[2] = a2;
+        g_self->sc_arg[3] = a3; g_self->sc_arg[4] = a4; g_self->sc_arg[5] = a5;
+        g_self->sc_active = 1;
+    }
+    long r = sys_dispatch(nr, a0, a1, a2, a3, a4, a5);
+    if (g_self) g_self->sc_active = 0;
     if (!g_setpc && !g_exit) gwrite(UC_ARM_REG_R0, (uint32_t)r);
     if (g_scret) {   /* deterministic per-thread syscall+return trace (single fprintf, no interleave) */
         char b[180];
@@ -196,7 +214,7 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     BIGLOCK_UNLOCK();
     /* Stopping here is what makes a thread that was blocked in a long syscall park as soon as it
        returns, with no code hook and no polling. */
-    if (g_dbg_armed) dbg_enter_tcg();
+    dbg_enter_tcg();
     if (g_exit || (g_dbg_armed && dbg_stop_pending())) uc_emu_stop(uc);
 }
 
@@ -259,6 +277,11 @@ static void *helper_thread(void *arg) {
             prof_fs = fs; prof_t = now; g_n_rd = g_n_wr = g_n_fault = 0; g_fpa_n = g_fpa_ops = 0;
             pm = g_uc_newmap; pu = g_uc_unmap;
         }
+        /* Savestate requests from the viewer. Polled HERE and not in the main loop: while a game
+           is running the main loop is blocked inside guarded_emu_start and never reaches its
+           dispatch point, which is exactly when a quicksave is wanted. A save runs inline (it is
+           non-destructive); a load only posts g_restore_path and lets the main loop tear down. */
+        me_state_poll_request();
         if (g_threaddump && now - tdp >= 2.0) { tdp = now; dump_threads("periodic"); }
         /* ME_THREADDUMP_JSON: same snapshot, machine-readable, refreshed on the same 2s cadence so
            a harness can poll a hung title's thread state without parsing stderr. Independent of
@@ -438,11 +461,37 @@ static uint32_t engine_reset_and_load(const char *path) {
     return entry;
 }
 
+
+/* Restore a savestate. Deliberately a sibling of engine_reset_and_load rather than a variant of
+   it: the teardown is IDENTICAL (and that ordering is load-bearing -- see the comments there and
+   gp2x-static-titles-and-reload-crash), but where a reload then calls engine_load_game to build a
+   fresh address space from the ELF, a restore rebuilds the exact one the state recorded.
+   engine_load_game is never called, because it could not reproduce the layout anyway: for a
+   dynamic title the final map is whatever the guest ld.so's interleaved mmap history produced. */
+static uint32_t engine_restore_state_run(const char *path) {
+    pthread_mutex_lock(&g_present_lock);
+    g_reloading = 1;
+    me940_stop();                                       /* before mem_reset frees g_pram */
+    engine_stop_all_threads();                          /* join workers, close their ucs */
+    BIGLOCK_LOCK();
+    if (g_th[0].uc) { uc_close(g_th[0].uc); g_th[0].uc = NULL; }
+    BIGLOCK_UNLOCK();
+    mem_reset();                                        /* free guest RAM (every uc now closed) */
+    engine_reset_globals();
+    g_exit = 0; g_exit_code = 0;
+    /* Zero ucs, one host thread: the rebuild below is single-threaded by construction. */
+    uint32_t entry = engine_restore_state_apply(path);
+    g_reloading = 0;
+    pthread_mutex_unlock(&g_present_lock);
+    if (!entry) fprintf(stderr, "magiceyes: restore of '%s' failed\n", path);
+    return entry;
+}
+uint32_t engine_restore_state(const char *path) { return engine_restore_state_run(path); }
 int main(int argc, char **argv) {
     const char *logf = getenv("ME_LOGFILE");   /* divert diagnostics to a file -- the only way to
                                                   see logs from the -mwindows bundle (no console) */
     if (logf && *logf) {
-        g_log = fopen(logf, "w");               /* a dedicated FILE* the rest of the engine never
+        g_log = me_fopen_reserved(logf, "w");   /* a dedicated FILE* the rest of the engine never
                                                    reopens (stderr redirection is fragile in the
                                                    GUI-subsystem bundle); held for the whole run. */
         if (g_log) { setvbuf(g_log, NULL, _IONBF, 0); fputs("== magiceyes log start ==\n", g_log); }
@@ -627,7 +676,10 @@ int main(int argc, char **argv) {
                                                  crash from a clean exit (standalone exits here) */
 #endif
             }
-            if (!g_reload_path[0]) {           /* game ended on its own (exit/return/error) */
+            /* A pending reload OR restore means the CPU was stopped deliberately, not that the
+               game ended. Missing g_restore_path here made the standalone engine treat a
+               savestate load as "the game finished" and exit the process. */
+            if (!g_reload_path[0] && !g_restore_path[0]) {   /* game ended on its own */
                 if (e != UC_ERR_OK && !g_exit && !flt.faulted) {
                     uint32_t pc = gread(UC_ARM_REG_PC), insn = 0, cpsr = gread(UC_ARM_REG_CPSR);
                     uc_mem_read(g_th[0].uc, pc, &insn, 4);
@@ -650,6 +702,12 @@ int main(int argc, char **argv) {
 #endif
                 }
             }
+        }
+        if (g_restore_path[0]) {               /* a savestate load, requested from the viewer, the
+                                                  helper thread's shm poll, or the ctl channel */
+            char sp[PATH_MAX]; snprintf(sp, sizeof sp, "%s", g_restore_path); g_restore_path[0] = 0;
+            entry = engine_restore_state(sp);
+            continue;
         }
         if (g_reload_path[0]) {                /* GPEComp re-exec or File->Open */
             char path[PATH_MAX]; snprintf(path, sizeof path, "%s", g_reload_path); g_reload_path[0] = 0;

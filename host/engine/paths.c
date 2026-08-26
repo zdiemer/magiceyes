@@ -60,8 +60,10 @@ static void anchor_path(char *out, size_t cap) {
     snprintf(out, cap, "%s/paths.conf", dir);
 }
 
-/* mkdir -p of `dir` (every component, then the leaf). */
-static void mkdirs(const char *dir) {
+/* mkdir -p of `dir` (every component, then the leaf). Exported because the savestate layer
+   needs the same thing for <exe_dir>/states/<gamekey>/ and a third copy of six lines that every
+   caller has to get exactly right is how they drift apart. */
+void me_mkdirs(const char *dir) {
     char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s", dir);
     for (char *p = tmp + 1; *p; p++)
         if (*p == '/' || *p == '\\') { char c = *p; *p = 0; ME_MKDIR(tmp); *p = c; }
@@ -117,14 +119,14 @@ void me_paths_dir(me_path_kind k, char *out, size_t cap) {
        (backslashes). Normalise to a single separator so the UI never shows mixed slashes. */
     for (char *p = out; *p; p++) if (*p == '/') *p = '\\';
 #endif
-    mkdirs(out);
+    me_mkdirs(out);
 }
 
 int me_paths_set(me_path_kind k, const char *dir) {
     load_once();
     if (k < 0 || k >= ME_PATH_NKINDS) return -1;
     if (!dir || !dir[0]) s_override[k][0] = 0;             /* clear -> portable default */
-    else { snprintf(s_override[k], PATH_MAX, "%s", dir); mkdirs(s_override[k]); }
+    else { snprintf(s_override[k], PATH_MAX, "%s", dir); me_mkdirs(s_override[k]); }
     save();
     return 0;
 }

@@ -22,7 +22,7 @@ static char            g_mr_path[PATH_MAX];
 static const char *KIND_STR[MR_KIND_COUNT] = {
     "host_fault", "guest_fatal", "missing_rootfs_lib", "missing_symbol", "unimpl_syscall",
     "unknown_dev", "unknown_ioctl", "unknown_mmio", "unsupported_blit", "unsupported_gles",
-    "unsupported_audio", "unsupported_sdl",
+    "unsupported_audio", "unsupported_sdl", "state_missing_file",
 };
 
 const char *me_report_kind_str(int kind) {

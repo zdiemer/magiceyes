@@ -11,6 +11,10 @@
 
 #include "ctl_json.h"
 
+/* Stringify a constant so an error message cannot drift away from the value it describes. */
+#define ME_STR2(x) #x
+#define ME_STR(x)  ME_STR2(x)
+
 #define CTL_MAXREAD (1u << 20)   /* 1 MB per mem.read; the client pages larger dumps */
 
 /* Guest-memory read, executed under the fault guard (guarded_ctl) because a stale address from a
@@ -65,6 +69,9 @@ static void cmd_status(struct jw *w) {
     jw_kv_i64(w, "fault_addr", (long long)g_fault_addr);
     jw_kv_u32(w, "brk", g_brk);
     jw_kv_u32(w, "mmap_next", g_mmap_next);
+    /* Bumped by every completed savestate restore. state.load only QUEUES a load (the main loop
+       applies it), so this is the observable that turns "queued" into an event to wait on. */
+    jw_kv_u32(w, "state_epoch", g_state_epoch);
     if (g_shm) {
         jw_key(w, "shm"); jw_raw(w, "{");
         jw_kv_u32(w, "frame_seq", g_shm->frame_seq);
@@ -110,6 +117,13 @@ static void cmd_threads(struct jw *w) {
         jw_kv_u32(w, "last_pc", t->last_pc);
         jw_kv_i64(w, "sig_pending", (long long)t->sig_pending);
         jw_kv_i64(w, "sig_blocked", (long long)t->sig_blocked);
+        /* The syscall this thread is in the middle of, if any (intr_cb records it). sc_active
+           separates "queued on the engine lock, nothing dispatched" from "inside a handler,
+           blocked" -- the distinction a savestate quiesce needs, and the one that turns a bare
+           PC into an actionable answer when triaging a futex pile-up. */
+        jw_kv_u32(w, "sc_nr", t->sc_nr);
+        jw_kv_u32(w, "sc_pc", t->sc_pc);
+        jw_kv_bool(w, "sc_active", t->sc_active);
         jw_key(w, "regs"); jw_raw(w, "[");
         for (int k = 0; k < 17; k++) { jw_comma(w); char b[16];
             snprintf(b, sizeof b, "%u", r[k]); jw_raw(w, b); }
@@ -322,10 +336,24 @@ static void emit_stop(struct jw *w) {
 
 static void cmd_pause(const struct jp *req, struct jw *w) {
     int parked = 0, blocked = 0, running = 0;
-    int rc = dbg_pause((int)jp_int(req, "timeout_ms", 2000), &parked, &blocked, &running);
-    if (rc < 0) {
+    /* "full":true waits for every thread to reach the park point rather than merely to stop
+       executing (dbg_quiesce). That is what a savestate needs; a debugger reading registers off
+       a thread parked inside a syscall does not. */
+    int full = (int)jp_int(req, "full", 0);
+    int ms = (int)jp_int(req, "timeout_ms", 2000);
+    int rc = full ? dbg_quiesce(ms, &parked, &blocked, &running)
+                  : dbg_pause(ms, &parked, &blocked, &running);
+    if (rc == -2 || (rc < 0 && !full)) {
         jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "busy");
         jw_kv_str(w, "detail", "pause requested from a thread holding the engine lock");
+        return;
+    }
+    if (rc < 0) {   /* full quiesce that did not settle: report who is holding it up */
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "not_quiesced");
+        jw_kv_i64(w, "parked", parked);
+        jw_kv_i64(w, "blocked_in_syscall", blocked);
+        jw_kv_i64(w, "still_running", running);
+        jw_kv_str(w, "detail", "threads did not all reach a park point; see threads[].sc_nr");
         return;
     }
     jw_kv_bool(w, "ok", 1);
@@ -541,6 +569,132 @@ static void cmd_report(struct jw *w) {
     if (buf) { jw_key(w, "report"); jw_raw(w, buf); free(buf); }
 }
 
+
+/* ---- savestates -------------------------------------------------------------
+ * Neither command requires the caller to have paused first, unlike mem.write. That is
+ * deliberate: me_state_save acquires quiescence itself, and requiring a client-side pause would
+ * make the ctl path behave differently from the F5 hotkey -- which is the divergence that would
+ * actually bite, since the harness is meant to be testing what a user does.
+ *
+ * A load is QUEUED to the engine main loop (it needs the same teardown a hot reload does), so the
+ * reply says so and a client waits on status.state_epoch rather than on this response. */
+static void cmd_state_save(const struct jp *req, struct jw *w) {
+    long long slot = jp_int(req, "slot", ME_STATE_SLOT_QUICK);
+    char err[192], path[PATH_MAX];
+    double t0 = host_now();
+    int was_paused = dbg_is_paused();
+
+    if (slot < 0 || slot > ME_STATE_NSLOTS) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "bad_slot");
+        jw_kv_str(w, "detail", "slot must be 0 (quick) to " ME_STR(ME_STATE_NSLOTS));
+        return;
+    }
+    if (me_state_save_slot((int)slot, err, sizeof err) != 0) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "save_failed"); jw_kv_str(w, "detail", err);
+        return;
+    }
+    jw_kv_bool(w, "ok", 1);
+    jw_kv_i64(w, "slot", slot);
+    jw_kv_str(w, "name", me_state_slot_name((int)slot));
+    if (me_state_slot_path_for_current((int)slot, path, sizeof path) == 0) {
+        jw_kv_str(w, "path", path);
+        struct stat st;
+        if (stat(path, &st) == 0) jw_kv_i64(w, "bytes", (long long)st.st_size);
+    }
+    jw_kv_i64(w, "frame_seq", g_shm ? (long long)g_shm->frame_seq : 0);
+    jw_kv_i64(w, "ms", (long long)((host_now() - t0) * 1000.0));
+    /* Which quiesce the caller got: a harness comparing timings wants to know whether the world
+       was already stopped when it asked. */
+    jw_kv_bool(w, "was_paused", was_paused != 0);
+}
+
+static void cmd_state_load(const struct jp *req, struct jw *w) {
+    long long slot = jp_int(req, "slot", ME_STATE_SLOT_QUICK);
+    char err[192];
+    if (slot < 0 || slot > ME_STATE_NSLOTS) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "bad_slot");
+        jw_kv_str(w, "detail", "slot must be 0 (quick) to " ME_STR(ME_STATE_NSLOTS));
+        return;
+    }
+    if (me_state_load_slot((int)slot, err, sizeof err) != 0) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "load_refused"); jw_kv_str(w, "detail", err);
+        return;
+    }
+    jw_kv_bool(w, "ok", 1);
+    jw_kv_i64(w, "slot", slot);
+    jw_kv_bool(w, "queued", 1);
+    jw_kv_i64(w, "state_epoch", (long long)g_state_epoch);
+    jw_kv_str(w, "note", "applied on the engine main loop; poll status.state_epoch for the bump");
+    /* A paused debugger would sit on this forever without knowing why, so say it outright. */
+    if (dbg_is_paused())
+        jw_kv_str(w, "warning", "execution is paused; the load will apply on resume");
+}
+
+static void cmd_state_list(struct jw *w) {
+    char path[PATH_MAX];
+    jw_kv_bool(w, "ok", 1);
+    jw_key(w, "slots"); jw_raw(w, "[");
+    for (int s = 0; s <= ME_STATE_NSLOTS; s++) {
+        jw_comma(w); jw_raw(w, "{");
+        jw_kv_i64(w, "slot", s);
+        jw_kv_str(w, "name", me_state_slot_name(s));
+        if (me_state_slot_path_for_current(s, path, sizeof path) != 0) {
+            jw_kv_bool(w, "present", 0);
+            jw_raw(w, "}");
+            continue;
+        }
+        jw_kv_str(w, "path", path);
+        struct mst_info info;
+        char *meta = NULL; size_t mlen = 0;
+        int rc = mst_probe(path, &info, &meta, &mlen, NULL, NULL);
+        if (rc != MST_OK) {
+            jw_kv_bool(w, "present", 0);
+            if (rc != MST_ERR_IO) jw_kv_str(w, "err", mst_strerror(rc));
+        } else {
+            jw_kv_bool(w, "present", 1);
+            jw_kv_i64(w, "save_time", (long long)info.save_time);
+            jw_kv_i64(w, "frame_seq", (long long)info.frame_seq);
+            jw_kv_i64(w, "abi", (long long)info.engine_abi);
+            jw_kv_i64(w, "thumb_w", info.thumb_w);
+            jw_kv_i64(w, "thumb_h", info.thumb_h);
+            char v[128];
+            if (meta && mst_meta_get(meta, mlen, "saved", v, sizeof v)) jw_kv_str(w, "saved", v);
+            if (meta && mst_meta_get(meta, mlen, "game", v, sizeof v)) jw_kv_str(w, "game", v);
+        }
+        free(meta);
+        jw_raw(w, "}");
+    }
+    jw_raw(w, "]");
+}
+
+/* The slot's thumbnail as raw RGB565, so an agent can SEE which state a slot holds rather than
+   inferring it from a timestamp. Same binary-payload shape as frame.get. */
+static void cmd_state_thumb(const struct jp *req, struct jw *w,
+                            const uint8_t **bin, size_t *binlen, void **binown) {
+    long long slot = jp_int(req, "slot", ME_STATE_SLOT_QUICK);
+    char path[PATH_MAX];
+    if (slot < 0 || slot > ME_STATE_NSLOTS ||
+        me_state_slot_path_for_current((int)slot, path, sizeof path) != 0) {
+        jw_kv_bool(w, "ok", 0); jw_kv_str(w, "err", "bad_slot");
+        return;
+    }
+    struct mst_info info;
+    uint8_t *thumb = NULL; size_t tlen = 0;
+    int rc = mst_probe(path, &info, NULL, NULL, &thumb, &tlen);
+    if (rc != MST_OK || !thumb || !tlen) {
+        free(thumb);
+        jw_kv_bool(w, "ok", 0);
+        jw_kv_str(w, "err", rc == MST_OK ? "no_thumbnail" : "unreadable");
+        if (rc != MST_OK) jw_kv_str(w, "detail", mst_strerror(rc));
+        return;
+    }
+    jw_kv_bool(w, "ok", 1);
+    jw_kv_i64(w, "slot", slot);
+    jw_kv_i64(w, "w", info.thumb_w);
+    jw_kv_i64(w, "h", info.thumb_h);
+    jw_kv_str(w, "format", "rgb565");
+    *bin = thumb; *binlen = tlen; *binown = thumb;
+}
 /* ---- dispatch -------------------------------------------------------------- */
 int ctl_dispatch(const struct jp *req, struct jw *w, const uint8_t **bin, size_t *binlen,
                  void **binown, const uint8_t *payload, size_t paylen) {
@@ -560,6 +714,10 @@ int ctl_dispatch(const struct jp *req, struct jw *w, const uint8_t **bin, size_t
     else if (!strcmp(cmd, "dev.state")) cmd_dev_state(w);
     else if (!strcmp(cmd, "frame.get")) cmd_frame(w, bin, binlen, binown);
     else if (!strcmp(cmd, "report"))    cmd_report(w);
+    else if (!strcmp(cmd, "state.save"))  cmd_state_save(req, w);
+    else if (!strcmp(cmd, "state.load"))  cmd_state_load(req, w);
+    else if (!strcmp(cmd, "state.list"))  cmd_state_list(w);
+    else if (!strcmp(cmd, "state.thumb")) cmd_state_thumb(req, w, bin, binlen, binown);
     else if (!strcmp(cmd, "pause"))     cmd_pause(req, w);
     else if (!strcmp(cmd, "resume"))    cmd_resume(w);
     else if (!strcmp(cmd, "step"))      cmd_step(req, w);
@@ -570,7 +728,8 @@ int ctl_dispatch(const struct jp *req, struct jw *w, const uint8_t **bin, size_t
         jw_kv_bool(w, "ok", 0);
         jw_kv_str(w, "err", "unknown_cmd");
         jw_kv_str(w, "detail", "known: hello status threads mem.map mem.read mem.write dev.state "
-                               "frame.get report pause resume step bp.add bp.del bp.list bp.clear "
+                               "frame.get report state.save state.load state.list state.thumb "
+                               "pause resume step bp.add bp.del bp.list bp.clear "
                                "wp.add wp.del wp.list sym.at sym.find sym.list");
     }
     jw_raw(w, "}");

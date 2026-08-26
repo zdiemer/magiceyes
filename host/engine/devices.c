@@ -337,18 +337,29 @@ uint32_t buf_hash(uint32_t g) {
 }
 /* present whichever fb the game just rendered to (its content changed since last
    frame); fall back to the non-blank one for a fully static screen. */
+/* present_active's inter-frame guesses, at file scope rather than as function statics so a
+   savestate restore can clear them (present_reset_heuristics). After a load the honest answer to
+   "what did the previous frame look like" is "we do not know": zeroing these makes the first
+   present unconditional, which is exactly what a just-restored machine wants. */
+static double   g_present_last = 0;                  /* ~60fps rate cap */
+static uint32_t g_present_hf = 0, g_present_ha = 0;  /* flip-locked / alternate page hashes */
+static int      g_present_front_frozen = 0;          /* consecutive static samples of the front */
+static uint32_t g_present_h0 = 0, g_present_h1 = 0;  /* fb0 / fb1 page hashes */
 void present_active(void) {
     if (gl_owns_screen()) return;   /* a GLES title (offload) owns shm; don't let the hybrid title's
                                        real-libSDL 2D framebuffer present alternate with it -> flicker */
     if (me940_active()) {   /* gpu940 client: present follows the 940's rendered framebuffer */
         static int n = 0; if (++n % 12 == 0) me940_scan_fb();
     }
-    static double last = 0;            /* cap to ~60fps: the game's tiny nanosleeps call
-                                          this ~2000/s, and hashing+copying every time
-                                          (300MB/s) was choking the emulator. */
+    /* Inter-frame guesses about what the game did last frame: the ~60fps rate cap (the game's
+       tiny nanosleeps call this ~2000/s, and hashing+copying every time cost 300MB/s), the
+       stale-page hashes, and the alternate-page comparison. File scope rather than function
+       statics so a savestate restore can clear them -- after a load the honest answer to "what
+       did the last frame look like" is "we do not know", and zeroing makes the first present
+       unconditional, which is what a just-restored machine wants. */
     double now = host_now();
-    if (now - last < 0.008) return;  /* dedupe the OADRL+OADRH pair; allow up to ~100fps */
-    last = now;
+    if (now - g_present_last < 0.008) return;  /* dedupe the OADRL+OADRH pair; allow up to ~100fps */
+    g_present_last = now;
     if (g_flip_active) {              /* double-buffered: show the flipped-to front buffer only */
         /* Staleness rescue: with no flip signal for >250ms (g_present_stale), check whether the
            pinned page is frozen while the OTHER fb page is the live one, and auto-pan to it.
@@ -359,26 +370,24 @@ void present_active(void) {
         if (g_present_stale && g_fb_guest && g_flip_guest) {
             uint32_t page = (uint32_t)g_fbv_h * g_fb_stride;
             uint32_t alt = (g_flip_guest == g_fb_guest) ? g_fb_guest + page : g_fb_guest;
-            static uint32_t hf = 0, ha = 0; static int front_frozen = 0;
             uint32_t nf = buf_hash(g_flip_guest), na = buf_hash(alt);
-            int alt_changed = (na != ha);
-            front_frozen = (nf == hf) ? front_frozen + 1 : 0;
-            hf = nf; ha = na;
-            if (front_frozen >= 3 &&
+            int alt_changed = (na != g_present_ha);
+            g_present_front_frozen = (nf == g_present_hf) ? g_present_front_frozen + 1 : 0;
+            g_present_hf = nf; g_present_ha = na;
+            if (g_present_front_frozen >= 3 &&
                 (alt_changed || (buf_score(g_flip_guest) == 0 && buf_score(alt) > 0))) {
                 fprintf(DIAG, "present: flip-locked page %08x stale, auto-pan to %08x\n",
                         g_flip_guest, alt);
                 g_flip_guest = alt;
-                front_frozen = 0; hf = ha = 0;
+                g_present_front_frozen = 0; g_present_hf = g_present_ha = 0;
             }
         }
         if (g_flip_guest) present_guest(g_flip_guest);
         return;
     }
-    static uint32_t h0 = 0, h1 = 0;
     uint32_t n0 = buf_hash(g_fb_guest), n1 = buf_hash(g_fb_guest2);
-    int c0 = (n0 != h0), c1 = (n1 != h1);
-    h0 = n0; h1 = n1;
+    int c0 = (n0 != g_present_h0), c1 = (n1 != g_present_h1);
+    g_present_h0 = n0; g_present_h1 = n1;
     if (c1 && g_fb_guest2) present_guest(g_fb_guest2);
     else if (c0) present_guest(g_fb_guest);
     else present_guest(buf_score(g_fb_guest2) > buf_score(g_fb_guest) ? g_fb_guest2 : g_fb_guest);
@@ -625,7 +634,7 @@ long gpio_read(uint32_t gbuf, uint32_t n) {
    frame loop still always runs dry. */
 static struct { int16_t x, y; uint32_t down; uint64_t last_us; } g_ts_last;
 static uint64_t ts_now_us(void) {
-    struct timeval tv; gettimeofday(&tv, NULL);
+    struct timeval tv; guest_timeofday(&tv);
     return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
 }
 int ts_pending(void) {
@@ -816,6 +825,35 @@ double g_tcount_t0 = 0;            /* TCOUNT free-running-timer epoch */
 double host_now(void) {
     struct timeval tv; gettimeofday(&tv, NULL); return tv.tv_sec + tv.tv_usec * 1e-6;
 }
+
+/* ---- the guest's clock ------------------------------------------------------
+ * Everything the GUEST can observe as a time reads through guest_now()/guest_timeofday(),
+ * which are host time plus a constant skew. The skew is 0 for a normal run and is set exactly
+ * once, by a savestate restore, to (time when the state was saved) - (time now).
+ *
+ * Why one global skew rather than rebasing each epoch (g_tcount_t0, g_aud_t0, g_prod_t0,
+ * g_alarm_at) individually: rebasing those fixes the engine's own bookkeeping but not the
+ * game's. A title that stashed an absolute gettimeofday() in its OWN memory at level start --
+ * and plenty do, for elapsed-time HUDs and timeouts -- would come back from a restore and see a
+ * jump of exactly (restore wall time - save wall time). With a single skew, every DELTA is
+ * unchanged and every ABSOLUTE is continuous, so TCOUNT, the audio drain, the DSP producer
+ * model, alarm(), times() and the game's own stashed timestamps all stay consistent at once,
+ * and the epochs above restore verbatim with no arithmetic at all.
+ *
+ * HOST pacing deliberately stays on host_now(): the present rate cap, the viewer heartbeat
+ * window, dbg_pause's deadline and ME_RUN_SECS are all about real elapsed wall time and must
+ * not move when the guest's clock does. spin_throttle() is the exception that proves the rule --
+ * it is pure delta detection, but it compares against a `now` its CALLERS read, so it has to
+ * read the same clock they do or a restore would hand it one skew-sized bogus delta. */
+double g_clock_skew = 0.0;
+double guest_now(void) { return host_now() + g_clock_skew; }
+void guest_timeofday(struct timeval *tv) {
+    double t = guest_now();
+    tv->tv_sec  = (time_t)t;
+    tv->tv_usec = (long)((t - (double)tv->tv_sec) * 1e6);   /* MinGW has no suseconds_t */
+    if (tv->tv_usec < 0) tv->tv_usec = 0;
+    if (tv->tv_usec > 999999) tv->tv_usec = 999999;
+}
 /* Advance the read cursor as if played in real time, so the ring drains and the game keeps
    producing at the right rate even with NO viewer attached. When a viewer IS attached it owns
    a_read (it advances it as it feeds SDL); draining here too makes BOTH move a_read and they
@@ -834,10 +872,10 @@ int viewer_attached(void) {
 void aud_drain(void) {
     if (!g_shm) return;
     if (viewer_attached()) { g_aud_on = 0; return; }   /* viewer owns a_read; rebase our clock */
-    if (!g_aud_on) { g_aud_t0 = host_now(); g_aud_on = 1; }
+    if (!g_aud_on) { g_aud_t0 = guest_now(); g_aud_on = 1; }
     uint32_t bps = g_aud_freq * g_aud_ch * (g_aud_bits / 8);
     if (!bps) return;
-    uint64_t consumed = (uint64_t)((host_now() - g_aud_t0) * bps);
+    uint64_t consumed = (uint64_t)((guest_now() - g_aud_t0) * bps);
     if (consumed > g_shm->a_write) consumed = g_shm->a_write;
     if (consumed > g_shm->a_read) g_shm->a_read = (uint32_t)consumed;  /* viewer may be ahead */
 }
@@ -867,7 +905,7 @@ static void adump_write(const uint8_t *pcm, uint32_t n) {
     if (!g_adump_tried) {
         g_adump_tried = 1;
         const char *p = getenv("ME_AUDIO_DUMP");
-        if (p && *p && (g_adump = fopen(p, "wb"))) {
+        if (p && *p && (g_adump = me_fopen_reserved(p, "wb"))) {
             char mp[PATH_MAX]; FILE *m;
             snprintf(mp, sizeof mp, "%s.meta", p);
             if ((m = fopen(mp, "w"))) {   /* format is settled by dsp_ioctl before the first write */
@@ -916,7 +954,7 @@ static uint32_t dsp_vbuf(void) { return g_dsp_fragsz * g_dsp_frags; }
 static uint32_t dsp_vqueued(void) {
     uint32_t bps = g_aud_freq * g_aud_ch * (g_aud_bits / 8);
     if (!bps) return 0;
-    double now = host_now();
+    double now = guest_now();
     if (!g_prod_on) { g_prod_on = 1; g_prod_t0 = now; g_prod_bytes = 0; }
     double played = (now - g_prod_t0) * bps;
     if (played >= (double)g_prod_bytes) {
@@ -1217,8 +1255,7 @@ static void spin_throttle(double now) {
     static __thread int streak = 0;
     if (now - last < 5e-6) {
         if (++streak >= 100) { me_usleep(500); streak = 0;
-                               struct timeval tv; gettimeofday(&tv, NULL);
-                               last = tv.tv_sec + tv.tv_usec * 1e-6; return; }
+                               last = guest_now(); return; }
     } else streak = 0;
     last = now;
 }
@@ -1239,8 +1276,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         if (hz == 0) { const char *e = getenv("ME_GP2X_TIMESCALE");
                        double mhz = e ? atof(e) : 7.3728; if (mhz <= 0) mhz = 7.3728;
                        hz = mhz * 1e6; }
-        struct timeval tv; gettimeofday(&tv, NULL);
-        double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        double now = guest_now();
         spin_throttle(now);
         if (g_tcount_t0 == 0) g_tcount_t0 = now;
         uint32_t us = (uint32_t)((now - g_tcount_t0) * hz);
@@ -1256,8 +1292,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
        edge that never came). Model bit 10 as a 60Hz vsync: high for ~1ms of each 16.7ms
        period; bit 15 stays high always. */
     if ((off == 0x308c || off == 0x348c) && g_device != 0) {
-        struct timeval tv; gettimeofday(&tv, NULL);
-        double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        double now = guest_now();
         spin_throttle(now);
         uint16_t v = 0; uc_mem_read(uc, (uint32_t)addr & ~1u, &v, 2);
         uint64_t us = (uint64_t)(now * 1e6);
@@ -1273,8 +1308,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
        a 1 MHz tick, the rate wiz homebrew configures. */
     if (off == 0x1980 && (g_device != 0 || g_is_dynamic) && !getenv("ME_NO_PTIMER")) {
         static double pt0 = 0;
-        struct timeval tv; gettimeofday(&tv, NULL);
-        double now = tv.tv_sec + tv.tv_usec * 1e-6;
+        double now = guest_now();
         spin_throttle(now);
         if (pt0 == 0) pt0 = now;
         uint32_t us = (uint32_t)((now - pt0) * 1e6);
@@ -1306,8 +1340,7 @@ void mmsp2_read_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
        the duty cycle only has to be plausibly short. HSYNC toggles fast (~15.6kHz); any
        spin loop samples far faster than it flips. Other bits keep their stored value. */
     if (off == 0x1182) {
-        struct timeval tv; gettimeofday(&tv, NULL);
-        uint64_t us = (uint64_t)tv.tv_sec * 1000000ull + tv.tv_usec;
+        uint64_t us = (uint64_t)(guest_now() * 1e6);
         spin_throttle(us * 1e-6);
         uint16_t v = 0; uc_mem_read(uc, (uint32_t)addr, &v, 2);
         v &= (uint16_t)~0x30;
@@ -1367,3 +1400,156 @@ void devices_reset(void) {
 /* mmap free-list: recycle freed regions instead of uc_mem_unmap, which flushes
    Unicorn's JIT translation cache (the game churns same-size anon maps ~150/s, which
    otherwise re-translates everything -> ~21 MIPS / single-digit fps). */
+
+/* ---- savestates: the device model -------------------------------------------
+ * devices_reset() is the inventory of what a new game must start clean, so it is also the
+ * inventory of what a savestate has to carry. Two categories go beyond it and are the reason
+ * this cannot just be "memcpy the globals":
+ *
+ *   - The MLC palette. PALLT_D is WRITE-ONLY hardware: the value never lands in guest RAM, so
+ *     g_pal is reconstructed from the writes as they go past and exists nowhere else. An 8-bit
+ *     title restored without it comes back with the right pixels and the wrong colours.
+ *   - The touch sampler and the palette PORT state machine (which halfword of which entry is
+ *     next), which are mid-sequence state rather than settings.
+ *
+ * Deliberately NOT saved: present_active's inter-frame heuristics (the rate cap, the page hashes,
+ * the front-frozen latch). They are guesses about what the game did last frame, and after a
+ * restore the honest answer is "we do not know" -- zeroing them makes the first present
+ * unconditional, which is exactly what a just-restored machine wants.
+ */
+void present_reset_heuristics(void) {
+    g_present_last = 0;
+    g_present_hf = g_present_ha = 0;
+    g_present_front_frozen = 0;
+    g_present_h0 = g_present_h1 = 0;
+}
+
+void devices_state_save(struct sbuf *b) {
+    /* device fd table */
+    sb_u32(b, (uint32_t)g_devn);
+    for (int i = 0; i < 64; i++) { sb_u32(b, (uint32_t)g_devtype[i]); sb_u32(b, (uint32_t)g_fbnum[i]); }
+    /* phys -> guest map for /dev/mem windows */
+    sb_u32(b, (uint32_t)g_nmem);
+    for (int i = 0; i < 64; i++) { sb_u32(b, g_mem[i].phys); sb_u32(b, g_mem[i].guest); sb_u32(b, g_mem[i].len); }
+    /* framebuffer + present */
+    sb_u32(b, g_mmsp2_guest); sb_u32(b, g_fb_guest); sb_u32(b, g_fb_guest2);
+    sb_u32(b, (uint32_t)g_fb_from_devmem);
+    sb_u32(b, g_fb_stride); sb_u32(b, (uint32_t)g_fb_bpp); sb_u32(b, g_fb_xoff);
+    sb_u32(b, (uint32_t)g_caanoo_bpp); sb_u32(b, g_caanoo_pitch);
+    sb_u32(b, (uint32_t)g_fb8_mode);
+    sb_u32(b, (uint32_t)g_fbv_w); sb_u32(b, (uint32_t)g_fbv_h);
+    sb_u32(b, g_mlc_hsc); sb_u32(b, g_mlc_vscl); sb_u32(b, g_mlc_vsch); sb_u32(b, g_mlc_hw);
+    sb_u32(b, (uint32_t)g_mlc_rot); sb_u32(b, g_mlc_rot_w); sb_u32(b, g_mlc_rot_h);
+    sb_u32(b, g_mlc_rot_pitch); sb_u32(b, g_mlc_rot_bypp);
+    sb_u32(b, (uint32_t)g_flip_active); sb_u32(b, g_flip_guest);
+    sb_u32(b, (uint32_t)g_oadr_driven); sb_u32(b, (uint32_t)g_frame_ready);
+    /* the write-only MLC palette, plus where the port sequence had got to */
+    sb_u32(b, (uint32_t)g_pal_have);
+    sb_bytes(b, g_pal, sizeof g_pal);
+    sb_u16(b, g_pal_idx); sb_u8(b, g_pal_phase); sb_u16(b, g_pal_gb);
+    sb_u32(b, (uint32_t)g_stl_bpp);
+    /* MESG 2D blitter */
+    sb_u32(b, g_blit_guest);
+    sb_u32(b, g_blt.dstctrl); sb_u32(b, g_blt.dstaddr); sb_u32(b, g_blt.dststride);
+    sb_u32(b, g_blt.srcctrl); sb_u32(b, g_blt.srcaddr); sb_u32(b, g_blt.srcstride);
+    sb_u32(b, g_blt.patctrl); sb_u32(b, g_blt.forcolor); sb_u32(b, g_blt.backcolor);
+    sb_u32(b, g_blt.size);    sb_u32(b, g_blt.ctrl);
+    /* audio format + the two pacing models. The epochs go over VERBATIM: they are guest-clock
+       values and guest_now() is rebased on restore, so they stay continuous with no arithmetic
+       here (see the g_clock_skew note above). */
+    sb_u32(b, g_aud_freq); sb_u32(b, g_aud_ch); sb_u32(b, g_aud_bits);
+    sb_f64(b, g_aud_t0); sb_u32(b, (uint32_t)g_aud_on);
+    sb_u32(b, (uint32_t)g_prod_on); sb_f64(b, g_prod_t0); sb_u64(b, g_prod_bytes);
+    sb_u32(b, g_dsp_fragsz); sb_u32(b, g_dsp_frags);
+    sb_f64(b, g_tcount_t0);
+    /* touchscreen sampler */
+    sb_u16(b, (uint16_t)g_ts_last.x); sb_u16(b, (uint16_t)g_ts_last.y);
+    sb_u32(b, g_ts_last.down); sb_u64(b, g_ts_last.last_us);
+    /* the shm audio FORMAT (not the ring: see devices_state_load) */
+    if (g_shm) {
+        sb_u32(b, g_shm->audio_freq); sb_u32(b, g_shm->audio_format);
+        sb_u32(b, g_shm->audio_channels); sb_u32(b, g_shm->audio_active);
+        sb_u32(b, g_shm->width); sb_u32(b, g_shm->height);
+    } else {
+        for (int i = 0; i < 6; i++) sb_u32(b, 0);
+    }
+}
+
+int devices_state_load(struct scur *c) {
+    g_devn = (int)sc_u32(c);
+    for (int i = 0; i < 64; i++) { g_devtype[i] = (int)sc_u32(c); g_fbnum[i] = (int)sc_u32(c); }
+    g_nmem = (int)sc_u32(c);
+    for (int i = 0; i < 64; i++) { g_mem[i].phys = sc_u32(c); g_mem[i].guest = sc_u32(c); g_mem[i].len = sc_u32(c); }
+    g_mmsp2_guest = sc_u32(c); g_fb_guest = sc_u32(c); g_fb_guest2 = sc_u32(c);
+    g_fb_from_devmem = (int)sc_u32(c);
+    g_fb_stride = sc_u32(c); g_fb_bpp = (int)sc_u32(c); g_fb_xoff = sc_u32(c);
+    g_caanoo_bpp = (int)sc_u32(c); g_caanoo_pitch = sc_u32(c);
+    g_fb8_mode = (int)sc_u32(c);
+    g_fbv_w = (int)sc_u32(c); g_fbv_h = (int)sc_u32(c);
+    g_mlc_hsc = sc_u32(c); g_mlc_vscl = sc_u32(c); g_mlc_vsch = sc_u32(c); g_mlc_hw = sc_u32(c);
+    g_mlc_rot = (int)sc_u32(c); g_mlc_rot_w = sc_u32(c); g_mlc_rot_h = sc_u32(c);
+    g_mlc_rot_pitch = sc_u32(c); g_mlc_rot_bypp = sc_u32(c);
+    g_flip_active = (int)sc_u32(c); g_flip_guest = sc_u32(c);
+    g_oadr_driven = (int)sc_u32(c); g_frame_ready = (int)sc_u32(c);
+    g_pal_have = (int)sc_u32(c);
+    sc_bytes(c, g_pal, sizeof g_pal);
+    g_pal_idx = sc_u16(c); g_pal_phase = sc_u8(c); g_pal_gb = sc_u16(c);
+    g_stl_bpp = (int)sc_u32(c);
+    g_blit_guest = sc_u32(c);
+    g_blt.dstctrl = sc_u32(c); g_blt.dstaddr = sc_u32(c); g_blt.dststride = sc_u32(c);
+    g_blt.srcctrl = sc_u32(c); g_blt.srcaddr = sc_u32(c); g_blt.srcstride = sc_u32(c);
+    g_blt.patctrl = sc_u32(c); g_blt.forcolor = sc_u32(c); g_blt.backcolor = sc_u32(c);
+    g_blt.size    = sc_u32(c); g_blt.ctrl     = sc_u32(c);
+    g_aud_freq = sc_u32(c); g_aud_ch = sc_u32(c); g_aud_bits = sc_u32(c);
+    g_aud_t0 = sc_f64(c); g_aud_on = (int)sc_u32(c);
+    g_prod_on = (int)sc_u32(c); g_prod_t0 = sc_f64(c); g_prod_bytes = sc_u64(c);
+    g_dsp_fragsz = sc_u32(c); g_dsp_frags = sc_u32(c);
+    g_tcount_t0 = sc_f64(c);
+    g_ts_last.x = (int16_t)sc_u16(c); g_ts_last.y = (int16_t)sc_u16(c);
+    g_ts_last.down = sc_u32(c); g_ts_last.last_us = sc_u64(c);
+
+    uint32_t afreq = sc_u32(c), afmt = sc_u32(c), ach = sc_u32(c), aon = sc_u32(c);
+    uint32_t sw = sc_u32(c), sh = sc_u32(c);
+    if (c->failed) return -1;
+
+    if (g_shm) {
+        /* FLUSH the audio ring rather than restoring its cursors. The ring holds up to ~3s of
+           PCM the viewer has not played yet; restoring a_write/a_read would replay all of it as
+           the first thing you hear after a load. Then re-apply the negotiated FORMAT immediately,
+           so the viewer reopens the right output without waiting for the guest to re-issue its
+           OSS ioctls (which it will not: it already did that, before the save). */
+        shm_reset_for_new_game();
+        g_shm->audio_freq = afreq; g_shm->audio_format = afmt;
+        g_shm->audio_channels = ach; g_shm->audio_active = aon;
+        if (sw && sh) { g_shm->width = sw; g_shm->height = sh; }
+        /* frame_seq is deliberately left alone: it must stay MONOTONIC or the viewer decides the
+           frame it is looking at is older than the one it drew and skips it. */
+    }
+    present_reset_heuristics();
+    return 0;
+}
+
+/* Install the MMSP2 register-window and MESG-blitter hooks on one uc, using the window lengths
+   the guest actually mapped (recorded in g_mem). A restore rebuilds the address space without
+   replaying dev_mmap, so the hooks it installs have to come from somewhere: here.
+
+   Scope note: dev_mmap still hooks only g_uc, so worker ucs go without, exactly as before. That
+   is a real pre-existing gap (a worker writing OADR does not trigger a flip), but closing it
+   would change present behaviour for every threaded title, which is not a savestate's business.
+   Restore therefore installs these on the main uc only, matching the running engine. */
+static uint32_t memmap_len_for(uint32_t guest) {
+    for (int i = 0; i < g_nmem; i++) if (g_mem[i].guest == guest) return g_mem[i].len;
+    return 0;
+}
+void devices_install_mmio_hooks(uc_engine *u) {
+    uc_hook h;
+    uint32_t l;
+    if (g_mmsp2_guest && (l = memmap_len_for(g_mmsp2_guest)) != 0) {
+        uc_hook_add(u, &h, UC_HOOK_MEM_WRITE, mmsp2_write_cb, NULL, g_mmsp2_guest, g_mmsp2_guest + l - 1);
+        uc_hook_add(u, &h, UC_HOOK_MEM_READ,  mmsp2_read_cb,  NULL, g_mmsp2_guest, g_mmsp2_guest + l - 1);
+    }
+    if (g_blit_guest && (l = memmap_len_for(g_blit_guest)) != 0 && !getenv("ME_GP2X_NOBLIT")) {
+        uc_hook_add(u, &h, UC_HOOK_MEM_WRITE, blitter_write_cb, NULL, g_blit_guest, g_blit_guest + l - 1);
+        uc_hook_add(u, &h, UC_HOOK_MEM_READ,  blitter_read_cb,  NULL, g_blit_guest, g_blit_guest + l - 1);
+    }
+}

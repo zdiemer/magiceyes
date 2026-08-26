@@ -13,7 +13,11 @@ else
   OUT="$REPO/bin/me_unicorn";     OPT="-O2"
 fi
 mkdir -p "$(dirname "$OUT")"   # bin/ is gitignored -> absent on a clean CI checkout
+# host/state_file.c is the savestate CONTAINER: it links into the engine, into the standalone
+# viewer, and into the unit test, and includes no engine header of its own.
 cc $OPT -Wall -o "$OUT" "$REPO"/host/engine/*.c "$REPO"/host/engine/extract/*.c \
-  -I "$REPO/host/engine" -I "$FORK/include" -I "$REPO/guest/src" \
+  "$REPO/host/state_file.c" \
+  -I "$REPO/host/engine" -I "$REPO/host" -I "$REPO/host/engine/extract" \
+  -I "$FORK/include" -I "$REPO/guest/src" \
   "$FORK/build/libunicorn.a" -lpthread -lm -lrt
 echo "built $OUT (engine: host/engine/*.c, fork: $FORK)"

@@ -50,7 +50,7 @@ static int setup(void **st) {
     snprintf(g_tmp, sizeof g_tmp, "%s/me_paths_test_%u_%d",
              base, (unsigned)(uintptr_t)&seq, seq);
     seq++;
-    mkdirs(g_tmp);
+    me_mkdirs(g_tmp);
 
     snprintf(g_exe_dir, sizeof g_exe_dir, "%s", g_tmp);
     s_loaded = 0;                       /* the latch: without this only the first conf is read */

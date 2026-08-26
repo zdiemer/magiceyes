@@ -564,3 +564,139 @@ bool mem_invalid_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
    hook or uc_emu_start's instruction-count limit (both disable Unicorn's block
    chaining -> ~21 MIPS), an external uc_emu_stop keeps chaining enabled (fast) while
    still letting the main loop time-slice between guest threads. */
+
+/* ---- savestates: the region registry, out and back in -----------------------
+ * The registry is the only place that knows a region's HOST pointer, so classification has to
+ * happen here: a region is a window onto shared physical RAM if its backing lies inside g_pram,
+ * the shim's framebuffer alias if it lies inside g_shm, and an ordinary engine-owned mapping
+ * otherwise. That distinction is what stops a naive per-region dump from writing the 32MB pram
+ * pool once per aliasing window, and from trying to serialise memory the VIEWER owns.
+ *
+ * The rebuild runs with zero ucs in existence (see state.h), which is why it can be a plain
+ * sequence of mmaps: nothing is executing, so there is no TLB, no translation cache and no other
+ * thread to race.
+ */
+static int reg_kind(const struct gregion *r) {
+    if (g_pram && (uint8_t *)r->host >= g_pram && (uint8_t *)r->host < g_pram + PRAM_SIZE)
+        return MST_RGN_PRAM;
+    if (g_shm && (uint8_t *)r->host >= (uint8_t *)g_shm
+        && (uint8_t *)r->host < (uint8_t *)g_shm + sizeof(gp2x_shm_t))
+        return MST_RGN_SHMFB;
+    return MST_RGN_ANON;
+}
+
+int mem_state_region_count(void) { return mem_nreg(); }
+
+int mem_state_region_at(int i, uint32_t *addr, uint32_t *len, int *perms, int *kind) {
+    int ok = 0;
+    REGLOCK_LOCK();
+    if (i >= 0 && i < g_nreg) {
+        if (addr)  *addr  = g_reg[i].addr;
+        if (len)   *len   = g_reg[i].len;
+        if (perms) *perms = g_reg[i].perms;
+        if (kind)  *kind  = reg_kind(&g_reg[i]);
+        ok = 1;
+    }
+    REGLOCK_UNLOCK();
+    return ok;
+}
+
+int mem_state_index(struct sbuf *b) {
+    int bad = 0;
+    REGLOCK_LOCK();
+    sb_u32(b, (uint32_t)g_nreg);
+    for (int i = 0; i < g_nreg; i++) {
+        int kind = reg_kind(&g_reg[i]);
+        uint32_t phys = 0;
+        if (kind == MST_RGN_PRAM) phys = PRAM_BASE + (uint32_t)((uint8_t *)g_reg[i].host - g_pram);
+        /* An external region that is neither pram nor the shm framebuffer is something this code
+           does not know about. Refusing the save names it; guessing would restore a window onto
+           memory of the wrong identity, which is a silent, title-specific corruption. */
+        if (g_reg[i].external && kind == MST_RGN_ANON) bad = (int)g_reg[i].addr ? (int)i + 1 : 1;
+        sb_u32(b, g_reg[i].addr);
+        sb_u32(b, g_reg[i].len);
+        sb_u32(b, (uint32_t)g_reg[i].perms);
+        sb_u32(b, (uint32_t)kind);
+        sb_u32(b, phys);
+    }
+    REGLOCK_UNLOCK();
+    if (bad) {
+        fprintf(DIAG, "state: region %d is externally backed but is neither pram nor shm\n", bad - 1);
+        return -1;
+    }
+    return b->failed ? -1 : 0;
+}
+
+/* Add a registry entry WITHOUT touching any uc. Used only by the rebuild, where by construction
+   no uc exists yet; every uc created afterwards picks the whole map up through uc_map_all. */
+static int reg_add_raw(uint32_t addr, uint32_t len, int perms, void *host, int external) {
+    int ok = 0;
+    REGLOCK_LOCK();
+    if (g_nreg < (int)(sizeof g_reg / sizeof g_reg[0])) {
+        g_reg[g_nreg++] = (struct gregion){addr, len, perms, host, external};
+        ok = 1;
+    }
+    REGLOCK_UNLOCK();
+    return ok;
+}
+
+int mem_state_rebuild(struct scur *c) {
+    uint32_t n = sc_u32(c);
+    if (c->failed || n > sizeof g_reg / sizeof g_reg[0]) return -1;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t addr = sc_u32(c), len = sc_u32(c);
+        int perms = (int)sc_u32(c), kind = (int)sc_u32(c);
+        uint32_t phys = sc_u32(c);
+        if (c->failed) return -1;
+        void *host = NULL;
+        int external = 0;
+        switch (kind) {
+        case MST_RGN_PRAM:
+            ensure_pram();
+            if (!phys_in_pram(phys, len)) return -1;
+            host = g_pram + (phys - PRAM_BASE);
+            external = 1;
+            break;
+        case MST_RGN_SHMFB:
+            /* Re-alias onto whatever g_shm is NOW. The shm outlives every reload and belongs to
+               the viewer, so the saved contents are irrelevant and the saved pointer is a
+               different process's business; only the guest address matters. */
+            if (!g_shm) continue;
+            host = g_shm;
+            external = 1;
+            break;
+        default:
+            host = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (host == MAP_FAILED) return -1;
+            break;
+        }
+        if (!reg_add_raw(addr, len, perms, host, external)) return -1;
+    }
+    return 0;
+}
+
+void mem_state_pram(uint8_t **out, uint32_t *len) {
+    *out = g_pram;
+    *len = g_pram ? PRAM_SIZE : 0;
+}
+
+int mem_state_pram_load(const void *d, size_t n) {
+    if (n != PRAM_SIZE) return -1;
+    ensure_pram();
+    if (!g_pram) return -1;
+    memcpy(g_pram, d, n);
+    return 0;
+}
+
+/* Map every region into a fresh uc BY POINTER, including the kuser page. Only the MAIN uc gets
+   this. uc_map_all deliberately gives each WORKER a private kuser page, because the TLS word at
+   0xffff0ff0 is per-thread on ARMv5 and a shared backing let the last thread to start clobber
+   every other thread's TCB. The main thread's kuser page, by contrast, is an ordinary registry
+   region created by map_kuser_page, and its live TLS word is part of the saved bytes -- so it
+   must come back by pointer, not as a freshly populated copy. */
+void uc_map_all_shared(uc_engine *u) {
+    REGLOCK_LOCK();
+    for (int i = 0; i < g_nreg; i++)
+        uc_mem_map_ptr(u, g_reg[i].addr, g_reg[i].len, g_reg[i].perms, g_reg[i].host);
+    REGLOCK_UNLOCK();
+}

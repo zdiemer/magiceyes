@@ -65,6 +65,7 @@ headers because `engine.h` includes them.
 | `test_extract.c` | the tar and YAFFS firmware image walkers |
 | `test_ubifs.c` | the UBI + UBIFS reader, including zlib and LZO blocks |
 | `test_png_write.c` | the dependency-free PNG writer |
+| `test_state.c` | the savestate container: header, chunk framing, CRCs, deflate, the picker probe |
 | `test_posix_compat.c` | `pread`/`mmap`/`shm_open` over Win32 (**Windows only**) |
 
 The last three C modules were extracted out of `syscalls.c`, `devices.c`, `fpa.c` and

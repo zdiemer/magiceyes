@@ -22,4 +22,8 @@ int         me_paths_set(me_path_kind k, const char *dir);           /* set over
 void        me_paths_reset(void);                                    /* all kinds back to portable default + persist */
 const char *me_paths_label(me_path_kind k);                          /* "Settings"/"Firmware"/"Cache" (UI label) */
 
+/* mkdir -p. Exported for the savestate layer, which needs <exe_dir>/states/<gamekey>/ created
+   the same way the configured roots are. */
+void me_mkdirs(const char *dir);
+
 #endif /* MAGICEYES_PATHS_H */

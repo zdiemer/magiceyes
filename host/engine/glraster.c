@@ -325,3 +325,42 @@ void glsw_draw(uint32_t desc_ptr) {
         fprintf(DIAG, "   ^text frags_written=%ld (quadpath=%d)\n", g_glr_frags - frags0, handled_quad); }
     free(v);
 }
+
+/* ---- savestates: the software GL colour buffers -----------------------------
+ * These two buffers are real state, not a cache. The comment at the top of this file spells out
+ * why: GLES titles draw into ALTERNATING buffers across frames and lean on EGL's two-buffer
+ * persistence, so Propis puts its dialogue text in one buffer and the scene in the other and
+ * then just swaps. Restore without them and the text is gone for good, because nothing ever
+ * redraws it. So both buffers travel, along with which one the game is currently drawing into.
+ *
+ * They are plain host memory read on the guest's render thread, which is parked for the whole
+ * capture, so no synchronisation is needed here beyond that. */
+void glsw_state_save(struct sbuf *b) {
+    sb_u32(b, (uint32_t)g_glw);
+    sb_u32(b, (uint32_t)g_glh);
+    sb_u32(b, (uint32_t)g_back);
+    size_t n = (size_t)g_glw * g_glh * 4;
+    int have = g_buf[0] && g_buf[1];
+    sb_u32(b, (uint32_t)(have ? 1 : 0));
+    if (have) { sb_bytes(b, g_buf[0], n); sb_bytes(b, g_buf[1], n); }
+}
+
+int glsw_state_load(struct scur *c) {
+    int w = (int)sc_u32(c), h = (int)sc_u32(c), back = (int)sc_u32(c);
+    int have = (int)sc_u32(c);
+    if (c->failed || w <= 0 || h <= 0 || w > GP2XSHM_MAXW || h > GP2XSHM_MAXH) return -1;
+    glsw_resize(w, h);          /* (re)allocates at the saved geometry */
+    ensure_cbuf();
+    size_t n = (size_t)w * h * 4;
+    if (have) {
+        if (!g_buf[0] || !g_buf[1]) return -1;
+        if (!sc_bytes(c, g_buf[0], n)) return -1;
+        /* In single-buffer mode both pointers alias one allocation, so the second read would
+           overwrite the first. Consume the bytes either way to keep the cursor aligned. */
+        if (g_buf[1] != g_buf[0]) { if (!sc_bytes(c, g_buf[1], n)) return -1; }
+        else if (!sc_skip(c, n)) return -1;
+    }
+    g_back = back & 1;
+    g_glcbuf = g_buf[g_back];
+    return c->failed ? -1 : 0;
+}

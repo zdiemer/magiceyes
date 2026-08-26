@@ -29,6 +29,7 @@
 #include "ctl.h"      /* debug control channel (ME_CTL); compiled out of release bundles */
 #include "dbg.h"      /* pause / step / breakpoints (inert until armed) */
 #include "symbols.h"  /* addr <-> symbol, where a symbol table survives */
+#include "state.h"    /* savestates: capture/restore of the whole guest machine */
 #include "paths.h"    /* portable, user-configurable storage roots (settings/firmware/cache) */
 
 /* ---- guest virtual memory layout ---- */
@@ -87,6 +88,13 @@ void syscalls_reset(void);                          /* close host fds, free memf
 const char *resolve_input(const char *in, char *out, size_t cap);  /* NULL + message on error */
 extern char g_launch_args[8][256];  /* launcher-script args to forward to the guest argv */
 extern int  g_launch_nargs;
+/* Content identity (loader.c). g_game_key/g_game_key_hex are the running title's 64-bit FNV-1a,
+   set for EVERY title on each resolve_input (0 if the binary could not be re-read). Savestates
+   use it to refuse loading into a different game; the GPEComp cache uses the same hash to key a
+   decompressed payload by content rather than by filename. */
+uint64_t me_content_key64(const uint8_t *buf, size_t len);
+extern uint64_t g_game_key;
+extern char     g_game_key_hex[17];
 int classify_elf(const char *path);   /* 0 = static ET_EXEC ok, 1 = dynamic (deferred), -1 = error */
 int read_elf_interp(const char *path, char *out, size_t cap);  /* PT_INTERP string; 1 if found */
 
@@ -144,6 +152,7 @@ void me_rootfs_init(void);   /* pick the rootfs (ME_GP2X_ROOTFS or a default); i
 int  me_rootfs_resolve(const char *guest, char *out, size_t cap);  /* 1 = host path in out */
 int  me_rootfs_select(const char *interp);  /* pick the rootfs holding this PT_INTERP (so.2 vs .3) */
 void me_rootfs_set(const char *dir);        /* firmware boot: pin a specific rootfs; NULL = unpin */
+const char *me_rootfs_current(int *pinned); /* the active rootfs, for savestate identity */
 
 /* ---- firmware.c: locate / install a device firmware ---- */
 int  me_writable_root(char *out, size_t cap);  /* configured Firmware dir (me_paths, portable default); 1=ok */
@@ -202,6 +211,13 @@ uint32_t buf_hash(uint32_t g);
 void present_active(void);
 void gp2x_cacheflush(uint32_t guest);   /* cacheflush(r3=fb base) -> present that buffer */
 double host_now(void);
+/* The GUEST's clock: host time plus a constant skew, 0 except after a savestate restore. Every
+   time value a game can observe (gettimeofday, clock_gettime, time, times, alarm, TCOUNT, the
+   audio/DSP pacing epochs) must read through these, so a restored state resumes at the instant
+   it was saved instead of jumping forward. Host pacing stays on host_now(). See devices.c. */
+extern double g_clock_skew;
+double guest_now(void);
+void   guest_timeofday(struct timeval *tv);
 void aud_drain(void);
 uint32_t aud_free(void);
 long dsp_write(uint32_t gbuf, uint32_t n);
@@ -258,6 +274,14 @@ struct thread {
     uint32_t sigsave[17];   /* r0..r15 + cpsr, restored by (rt_)sigreturn */
     int enoent_streak;      /* consecutive failed opens -> back off (music worker) */
     uint32_t last_pc;       /* diagnostics */
+    /* Syscall-in-flight record, filled on every SVC entry (intr_cb) and cleared on return. Two
+       users: the thread dumps, where "blocked in nr=240" beats a bare PC when triaging a hang;
+       and the savestate quiesce, which must know whether a thread still off-CPU at the pause
+       deadline sits in a RESTARTABLE wait (futex/sigsuspend/nanosleep -- rewind PC to the SVC and
+       re-execute it after the restore) or in something that already committed side effects (in
+       which case the save is refused, naming the syscall, rather than writing a torn file). */
+    uint32_t sc_nr, sc_arg[6], sc_pc;   /* sc_pc = PC AFTER the SVC instruction */
+    int      sc_active;                 /* 1 between SVC entry and the R0 write */
     double   fpa[8];        /* FPA f0-f7 register file (fpa.c) -- see the note there on why this
                                lives here rather than in __thread storage */
     uint32_t fpsr;          /* FPA status register (WFS/RFS) */
@@ -388,5 +412,10 @@ extern char g_game_root[PATH_MAX];
 extern char g_save_root[PATH_MAX];
 void me_save_set_game(const char *elf_path);   /* derive g_game_root + g_save_root from the .gpe/ELF */
 void syscalls_flush_all(void);                 /* fsync every tracked host fd (flush-on-quit) */
+/* Park an engine-owned host fd above the guest fd range, so a savestate restore can put every
+   guest fd back on its original number without having to evict us. Best effort: returns the new
+   fd, or the original one unchanged if it could not be moved. See syscalls.c. */
+int  me_fd_reserve_high(int fd);
+FILE *me_fopen_reserved(const char *path, const char *mode);   /* fopen + me_fd_reserve_high */
 
 #endif /* MAGICEYES_ENGINE_H */

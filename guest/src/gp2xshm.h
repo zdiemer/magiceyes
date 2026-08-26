@@ -52,7 +52,16 @@ typedef struct {
     /* status for the viewer header (engine sets device; the shim/engine sets backend on present) */
     volatile uint8_t  device;           /* 0=GP2X  1=GP2X Wiz  2=GP2X Caanoo */
     volatile uint8_t  backend;          /* 0=framebuffer  1=SDL (2D)  2=OpenGL ES */
-    uint8_t  reserved[2];               /* keep this block 12 bytes so pixels[]/aring[] don't move */
+    /* Savestate request, viewer -> engine. These two bytes were the `reserved` padding that kept
+       the block above 12 bytes, so claiming them moves NOTHING: sizeof(gp2x_shm_t) and the offset
+       of pixels[]/aring[] are unchanged, and an ARM guest shim built before this header still
+       matches byte for byte (it never read `reserved`, and never touches these). That property is
+       why the request lives here rather than in the ctl channel, which is compiled out of release
+       builds. Only the viewer writes them and only the engine clears state_req, so there is one
+       writer per field and no CAS is needed; write state_slot FIRST, then state_req, which is the
+       publish point. Non-zero state_req means "not yet consumed". */
+    volatile uint8_t  state_req;        /* 0 = idle, 1 = save, 2 = load */
+    volatile uint8_t  state_slot;       /* 0 = the quick slot, 1..ME_STATE_NSLOTS */
     uint8_t  pixels[GP2XSHM_FBBYTES]; /* RGB565, width*height valid */
     uint8_t  aring[GP2XSHM_ARING];    /* PCM ring buffer (shim->viewer) */
 } gp2x_shm_t;

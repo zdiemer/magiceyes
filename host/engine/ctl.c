@@ -174,6 +174,14 @@ static void *accept_thread(void *arg) {
             me_usleep(20000);
             continue;
         }
+        /* Park the accepted socket above the guest fd range too, not just the listener. On POSIX
+           a socket IS an fd drawn from the same table the guest's open() draws from, and a
+           savestate restore has to put each guest fd back on its ORIGINAL number -- so a client
+           connection sitting on a low number is a descriptor the restore would dup2 straight
+           over, killing the connection (and, before this, the game with it). */
+#ifndef _WIN32
+        c = me_fd_reserve_high(c);
+#endif
         pthread_t th;
         g_nconn++;
         if (pthread_create(&th, NULL, conn_thread, (void *)(intptr_t)c) == 0)
@@ -195,6 +203,12 @@ void ctl_init(void) {
     int port = atoi(p);
     g_lsock = socket(AF_INET, SOCK_STREAM, 0);
     if (g_lsock == INVALID_SOCKET) { fprintf(DIAG, "[ctl] socket() failed\n"); return; }
+#ifndef _WIN32
+    /* On POSIX a socket IS an fd, drawn from the same table the guest's open() draws from, so
+       park it above the guest range (see me_fd_reserve_high). Not on Windows: a SOCKET there is
+       a kernel handle, not a CRT fd, so it never collides in the first place. */
+    g_lsock = me_fd_reserve_high(g_lsock);
+#endif
 
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);

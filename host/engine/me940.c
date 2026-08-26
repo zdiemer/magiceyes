@@ -63,14 +63,31 @@ static void me940_mmio(uc_engine *uc, uc_mem_type type, uint64_t addr, int size,
     }
 }
 
+static void me940_park(void);            /* savestate park point; defined with the state hooks */
+static volatile int g_940_pausereq;      /* likewise */
+static uint32_t g_940_restart_pc = 0;    /* non-zero: resume here instead of the reset vector */
+
 static void *me940_thread(void *arg) {
     (void)arg;
-    /* Run the firmware from its reset vector (addr 0). Returns on uc_emu_stop (clean halt) or a
-       fault; either way the 940 just stops — it must never tear down the 920/the window. */
-    uc_err e = uc_emu_start(g_uc940, 0, PRAM_SIZE, 0, 0);
-    if (e != UC_ERR_OK && !g_940_stop) {
-        uint32_t pc = 0; uc_reg_read(g_uc940, UC_ARM_REG_PC, &pc);
-        fprintf(stderr, "[940] stopped on fault: %s pc=%08x\n", uc_strerror(e), pc);
+    /* Run the firmware from its reset vector (addr 0), or from a restored PC after a savestate
+       load. Returns on uc_emu_stop (clean halt) or a fault; either way the 940 just stops -- it
+       must never tear down the 920 or the window.
+       The loop exists only so a savestate can stop the core and let it carry on afterwards: a
+       genuine end of run or a fault still breaks out on the first pass, exactly as before. */
+    uint32_t pc = g_940_restart_pc;
+    g_940_restart_pc = 0;
+    for (;;) {
+        me940_park();
+        if (g_940_stop) break;
+        uc_err e = uc_emu_start(g_uc940, pc, PRAM_SIZE, 0, 0);
+        if (g_940_stop) break;
+        if (e != UC_ERR_OK) {
+            uint32_t fpc = 0; uc_reg_read(g_uc940, UC_ARM_REG_PC, &fpc);
+            fprintf(stderr, "[940] stopped on fault: %s pc=%08x\n", uc_strerror(e), fpc);
+            break;
+        }
+        if (!g_940_pausereq) break;       /* ended on its own, not because we paused it */
+        uc_reg_read(g_uc940, UC_ARM_REG_PC, &pc);
     }
     return NULL;
 }
@@ -223,4 +240,150 @@ void me940_selftest(const char *fw) {
     me940_stop();
     fprintf(stderr, "[940 selftest] executed %ld insns, pc range %08x..%08x (main is 0x6b8: %s)\n",
             g_st_insns, g_st_pcmin, g_st_pcmax, g_st_pcmax >= 0x6b8 ? "REACHED" : "not reached");
+}
+
+/* ---- savestates: the second core --------------------------------------------
+ * dbg_quiesce cannot see the 940: it is not in g_th, it never takes g_biglock, and it writes
+ * g_pram continuously. Capture it while it is running and the 32MB pram blob is torn -- the 920's
+ * view of the shared command queue and the 940's would come from different instants.
+ *
+ * So it gets the same shape as the guest threads' park point: a flag the run loop checks, and an
+ * acknowledgement the pauser waits for. me940_thread had no loop at all before (one uc_emu_start
+ * to completion), so the loop is new; the semantics are not.
+ */
+static pthread_mutex_t g_940_pm = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_940_pc = PTHREAD_COND_INITIALIZER;
+static volatile int g_940_pausereq = 0;   /* pauser -> core (forward-declared above) */
+static volatile int g_940_parked   = 0;   /* core -> pauser */
+
+void me940_pause(void) {
+    if (!g_940_running) return;
+    pthread_mutex_lock(&g_940_pm);
+    g_940_pausereq = 1;
+    pthread_mutex_unlock(&g_940_pm);
+    uc_emu_stop(g_uc940);                 /* kick it out of TCG so it reaches the park check */
+    pthread_mutex_lock(&g_940_pm);
+    /* Bounded: the 940 runs firmware that can in principle sit in a tight loop, and a savestate
+       must not hang the GUI waiting for it. If it does not park we carry on -- the pram blob may
+       be slightly inconsistent, which is a real but far smaller problem than a wedged emulator. */
+    for (int i = 0; i < 200 && !g_940_parked && g_940_running; i++) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 5000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_940_pc, &g_940_pm, &ts);
+    }
+    if (!g_940_parked)
+        fprintf(stderr, "[940] did not park for the savestate; shared RAM may be inconsistent\n");
+    pthread_mutex_unlock(&g_940_pm);
+}
+
+void me940_resume(void) {
+    pthread_mutex_lock(&g_940_pm);
+    g_940_pausereq = 0;
+    pthread_cond_broadcast(&g_940_pc);
+    pthread_mutex_unlock(&g_940_pm);
+}
+
+/* The park point, called from me940_thread between uc_emu_start rounds (no lock held). */
+static void me940_park(void) {
+    pthread_mutex_lock(&g_940_pm);
+    if (g_940_pausereq) {
+        g_940_parked = 1;
+        pthread_cond_broadcast(&g_940_pc);
+        while (g_940_pausereq && !g_940_stop) pthread_cond_wait(&g_940_pc, &g_940_pm);
+        g_940_parked = 0;
+    }
+    pthread_mutex_unlock(&g_940_pm);
+}
+
+void me940_state_save(struct sbuf *b) {
+    sb_u32(b, (uint32_t)(g_940_running ? 1 : 0));
+    sb_u32(b, (uint32_t)g_940_bank);
+    sb_u32(b, (uint32_t)g_940_clock);
+    if (!g_940_running || !g_uc940) { sb_u32(b, 0); sb_u32(b, 0); return; }
+    /* Its own view of the MMSP2 register page: separate memory from the 920's window, and the
+       only place the 940's DUALINT/MLC programming lives. */
+    sb_u32(b, MMSP2_LEN);
+    sb_bytes(b, g_mmsp940, g_mmsp940 ? MMSP2_LEN : 0);
+    size_t csz = uc_context_size(g_uc940);
+    uc_context *ctx = NULL;
+    if (uc_context_alloc(g_uc940, &ctx) == UC_ERR_OK && uc_context_save(g_uc940, ctx) == UC_ERR_OK) {
+        sb_u32(b, (uint32_t)csz);
+        sb_bytes(b, ctx, csz);
+    } else {
+        sb_u32(b, 0);
+    }
+    if (ctx) uc_context_free(ctx);
+}
+
+/* Held between me940_state_load (which runs before pram is guaranteed final) and
+   me940_state_restore_start (which runs after everything is in place). */
+static uint8_t *g_940_pending_ctx = NULL;
+static uint32_t g_940_pending_ctxlen = 0;
+static int      g_940_pending_bank = -1, g_940_pending_run = 0, g_940_pending_clock = 0;
+
+int me940_state_load(struct scur *c) {
+    free(g_940_pending_ctx); g_940_pending_ctx = NULL; g_940_pending_ctxlen = 0;
+    g_940_pending_run   = (int)sc_u32(c);
+    g_940_pending_bank  = (int)sc_u32(c);
+    g_940_pending_clock = (int)sc_u32(c);
+    uint32_t mlen = sc_u32(c);
+    if (mlen) {
+        if (mlen != MMSP2_LEN) return -1;
+        if (!g_mmsp940) g_mmsp940 = calloc(1, MMSP2_LEN);
+        if (!g_mmsp940 || !sc_bytes(c, g_mmsp940, MMSP2_LEN)) return -1;
+    }
+    uint32_t clen = sc_u32(c);
+    if (clen) {
+        g_940_pending_ctx = malloc(clen);
+        if (!g_940_pending_ctx || !sc_bytes(c, g_940_pending_ctx, clen)) {
+            free(g_940_pending_ctx); g_940_pending_ctx = NULL;
+            return -1;
+        }
+        g_940_pending_ctxlen = clen;
+    }
+    return c->failed ? -1 : 0;
+}
+
+/* Bring the core back up on the restored shared RAM. Deliberately NOT me940_load_and_start: that
+   freads the firmware image straight over pram_host(PRAM_BASE), which would overwrite the command
+   queue and rendered buffers the savestate just restored. The firmware is already in pram -- it
+   came back with the rest of the memory. */
+void me940_state_restore_start(void) {
+    if (!g_940_pending_run || !g_pram) return;
+    if (g_940_running) me940_stop();
+
+    if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &g_uc940) != UC_ERR_OK) return;
+    uc_ctl_set_cpu_model(g_uc940, UC_CPU_ARM_946);
+    if (uc_mem_map_ptr(g_uc940, 0, PRAM_SIZE, UC_PROT_ALL, g_pram) != UC_ERR_OK) {
+        uc_close(g_uc940); g_uc940 = NULL; return;
+    }
+    if (!g_mmsp940) g_mmsp940 = calloc(1, MMSP2_LEN);
+    uc_mem_map_ptr(g_uc940, MMSP2_PHYS, MMSP2_LEN, UC_PROT_READ | UC_PROT_WRITE, g_mmsp940);
+    uc_hook h;
+    uc_hook_add(g_uc940, &h, UC_HOOK_MEM_WRITE, me940_mmio, NULL, MMSP2_PHYS, MMSP2_PHYS + MMSP2_LEN - 1);
+
+    uint32_t pc = 0;
+    if (g_940_pending_ctx && g_940_pending_ctxlen == uc_context_size(g_uc940)) {
+        uc_context *ctx = NULL;
+        if (uc_context_alloc(g_uc940, &ctx) == UC_ERR_OK) {
+            memcpy(ctx, g_940_pending_ctx, g_940_pending_ctxlen);
+            /* This is the one place the opaque blob is genuinely load-bearing: gpu940 programs the
+               ARM946's MPU (CP15 cr2/3/5/6) at boot, and those registers are in the context but
+               not in any register list we could write by hand. */
+            uc_context_restore(g_uc940, ctx);
+            uc_context_free(ctx);
+            uc_reg_read(g_uc940, UC_ARM_REG_PC, &pc);
+        }
+    }
+    free(g_940_pending_ctx); g_940_pending_ctx = NULL; g_940_pending_ctxlen = 0;
+
+    g_940_bank = g_940_pending_bank; g_940_clock = g_940_pending_clock;
+    g_940_stop = 0; g_940_running = 1;
+    g_940_restart_pc = pc;
+    if (pthread_create(&g_th940, NULL, me940_thread, NULL) != 0) {
+        g_940_running = 0; uc_close(g_uc940); g_uc940 = NULL;
+        return;
+    }
+    fprintf(stderr, "[940] restored at pc=%08x\n", pc);
 }

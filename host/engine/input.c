@@ -309,3 +309,50 @@ long input_ioctl(int fd, uint32_t cmd, uint32_t arg) {
         return 0;                                                         /* GRAB/REP/etc: accept */
     }
 }
+
+/* ---- savestates: the Linux input subsystem ----------------------------------
+ * g_inp[] is per-open "what did I last report" state. Restoring it matters for one specific
+ * reason: input_pending() and input_read() emit events for the DIFFERENCE between the live shm
+ * state and these last_* values. Come back from a restore with them zeroed and the first read
+ * synthesises a burst of phantom events -- every button that happens to be held, a jump to the
+ * current stick position, a touch-down that never happened. The pending touch queue (tq) is
+ * mid-report state: tslib reads one 16-byte event per read(), so a half-drained report has to
+ * survive or tslib sees a truncated packet.
+ *
+ * g_cal (/etc/pointercal) is deliberately NOT saved: it is read from the rootfs, not derived
+ * from the run, so it reloads itself and would only go stale if it travelled. */
+void input_state_save(struct sbuf *b) {
+    sb_u32(b, 64);
+    for (int i = 0; i < 64; i++) {
+        struct inpst *s = &g_inp[i];
+        sb_u32(b, (uint32_t)s->used); sb_u32(b, (uint32_t)s->type);
+        sb_u32(b, s->last_btns);
+        sb_u32(b, (uint32_t)s->last_ax); sb_u32(b, (uint32_t)s->last_ay);
+        sb_u32(b, (uint32_t)s->js_synced);
+        sb_u32(b, s->last_tdown);
+        sb_u32(b, (uint32_t)s->last_tx); sb_u32(b, (uint32_t)s->last_ty);
+        sb_u64(b, s->last_tus);
+        sb_u32(b, s->tq_len); sb_u32(b, s->tq_off);
+        sb_bytes(b, s->tq, sizeof s->tq);
+    }
+}
+
+int input_state_load(struct scur *c) {
+    uint32_t n = sc_u32(c);
+    if (c->failed || n != 64) return -1;
+    for (uint32_t i = 0; i < n; i++) {
+        struct inpst *s = &g_inp[i];
+        s->used = (int)sc_u32(c); s->type = (int)sc_u32(c);
+        s->last_btns = sc_u32(c);
+        s->last_ax = (int)sc_u32(c); s->last_ay = (int)sc_u32(c);
+        s->js_synced = (int)sc_u32(c);
+        s->last_tdown = sc_u32(c);
+        s->last_tx = (int)sc_u32(c); s->last_ty = (int)sc_u32(c);
+        s->last_tus = sc_u64(c);
+        s->tq_len = sc_u32(c); s->tq_off = sc_u32(c);
+        sc_bytes(c, s->tq, sizeof s->tq);
+        if (s->tq_len > sizeof s->tq) s->tq_len = 0;      /* refuse a nonsense queue length */
+        if (s->tq_off > s->tq_len) s->tq_off = s->tq_len;
+    }
+    return c->failed ? -1 : 0;
+}

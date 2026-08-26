@@ -183,10 +183,13 @@ int dbg_park(void *ucv, uint32_t *pc) {
 }
 
 /* ---- control --------------------------------------------------------------- */
-int dbg_pause(int timeout_ms, int *parked, int *blocked, int *running) {
+/* Shared body of dbg_pause and dbg_quiesce. `all_parked` picks the stop condition: a debugger
+   only needs nothing to be RUNNING, a savestate needs everything actually PARKED (see dbg.h). */
+static int dbg_stop_world(int timeout_ms, int all_parked,
+                          int *parked, int *blocked, int *running) {
     /* Deadlock guard: a thread that needs g_biglock to reach the park point can never get there
        if the pauser is holding it. */
-    if (g_holds_biglock) return -1;
+    if (g_holds_biglock) return -2;   /* caller error, distinct from a timeout */
 
     g_dbg_armed = 1;
     pthread_mutex_lock(&g_dbg_lock);
@@ -197,14 +200,20 @@ int dbg_pause(int timeout_ms, int *parked, int *blocked, int *running) {
     g_dbg_stop = 1;
     pthread_mutex_unlock(&g_dbg_lock);
 
-    /* Kick every CPU out of TCG, then release anything blocked so it can reach a park point. */
-    for (int i = 0; i < g_nth; i++)
-        if (g_th[i].uc && g_th[i].state != TH_DEAD) uc_emu_stop(g_th[i].uc);
-    futex_wake_all();
-    engine_wake_sigwaiters();
-
     double deadline = host_now() + (timeout_ms > 0 ? timeout_ms : 2000) / 1000.0;
+    double next_kick = 0;
     for (;;) {
+        /* Kick every CPU out of TCG, then release anything blocked so it can reach a park point.
+           REPEATED, not done once: a thread freed from futex_wait re-checks its predicate and can
+           go straight back to sleep before it ever reaches the park point, so a single broadcast
+           loses the race. Rate-limited so this stays cheap while we spin. */
+        if (host_now() >= next_kick) {
+            next_kick = host_now() + 0.01;
+            for (int i = 0; i < g_nth; i++)
+                if (g_th[i].uc && g_th[i].state != TH_DEAD) uc_emu_stop(g_th[i].uc);
+            futex_wake_all();
+            engine_wake_sigwaiters();
+        }
         int p = 0, b = 0, r = 0;
         pthread_mutex_lock(&g_dbg_lock);
         for (int i = 0; i < g_nth; i++) {
@@ -214,14 +223,25 @@ int dbg_pause(int timeout_ms, int *parked, int *blocked, int *running) {
             else                                r++;
         }
         pthread_mutex_unlock(&g_dbg_lock);
-        if (!r || host_now() >= deadline) {
+        int done = all_parked ? (!r && !b) : !r;
+        if (done || host_now() >= deadline) {
             if (parked) *parked = p;
             if (blocked) *blocked = b;
             if (running) *running = r;
-            return 0;
+            return done ? 0 : (all_parked ? -1 : 0);
         }
         me_usleep(2000);
     }
+}
+
+int dbg_pause(int timeout_ms, int *parked, int *blocked, int *running) {
+    /* Keeps its historical contract: <0 means only "called from the wrong thread", never
+       "did not settle" -- dbg_pause is satisfied by nothing running. */
+    return dbg_stop_world(timeout_ms, 0, parked, blocked, running) == -2 ? -1 : 0;
+}
+
+int dbg_quiesce(int timeout_ms, int *parked, int *blocked, int *running) {
+    return dbg_stop_world(timeout_ms, 1, parked, blocked, running);
 }
 
 void dbg_resume(void) {

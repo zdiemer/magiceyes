@@ -28,7 +28,8 @@ enum me_report_kind {
     MR_UNSUPPORTED_BLIT,      /* the 2D blitter was asked for an op we don't execute */
     MR_UNSUPPORTED_GLES,      /* fakegles: an enable/feature/format it can't honour */
     MR_UNSUPPORTED_AUDIO,     /* an OSS/SDL audio format we can't convert */
-    MR_UNSUPPORTED_SDL,       /* fakesdl: an SDL feature/format we don't implement (e.g. JPEG) */
+    MR_UNSUPPORTED_SDL,       /* fakesdl: an SDL feature/format we do not implement (e.g. JPEG) */
+    MR_STATE_MISSING_FILE,    /* a savestate referenced a file that is no longer there */
     MR_KIND_COUNT
 };
 

@@ -17,6 +17,8 @@ void glsw_resize(int w, int h);
 void glsw_clear(uint32_t packed);
 void glsw_draw(uint32_t desc_ptr);
 void glsw_present(void);
+void glsw_state_save(struct sbuf *b);   /* the two software colour buffers (glraster.c) */
+int  glsw_state_load(struct scur *c);
 
 /* The host-GPU backend is the DEFAULT for GL-offload (GLES) titles (validated on Propis OABI+EABI
    and Rhythmos). It still falls back to software automatically when a GL context can't be created
@@ -69,6 +71,8 @@ typedef float GLfloat; typedef float GLclampf; typedef unsigned char GLboolean; 
 #define GL_TEXTURE_ENV_MODE 0x2200
 #define GL_MODULATE 0x2100
 #define GL_UNPACK_ALIGNMENT 0x0CF5
+#define GL_NEAREST 0x2600
+#define GL_TRIANGLE_STRIP 0x0005
 
 #define GLFNS \
   X(void,Viewport,(GLint,GLint,GLsizei,GLsizei)) \
@@ -96,6 +100,14 @@ static SDL_GLContext g_ctx = NULL;
 static int g_ok = -1, g_w = 320, g_h = 240;
 static GLuint g_tex = 0;
 static uint8_t *g_rb = NULL;   /* readback scratch (g_w*g_h*4) */
+
+/* A savestate's captured GL framebuffer, waiting to be uploaded. Filled by gl_state_load (which
+   runs on the restore path, off the render thread) and consumed by the first glgpu_* call after
+   it -- which by construction IS the render thread, with the context current. Deferring the
+   upload is the whole point: touching GL from a thread where the context is not current is not
+   a thing that works. */
+static uint8_t *g_restore_px = NULL;
+static int g_restore_w = 0, g_restore_h = 0;
 
 static int gl_load(void) {
 #define X(ret,name,args) p_gl##name = (ret(GLAPI_*)args)SDL_GL_GetProcAddress("gl" #name); if (!p_gl##name) return 0;
@@ -130,7 +142,43 @@ void glgpu_resize(int w, int h) {
     g_w = w; g_h = h;
     if (g_ok == 1) { SDL_SetWindowSize(g_win, g_w, g_h); free(g_rb); g_rb = malloc((size_t)g_w * g_h * 4); }
 }
+/* Upload a savestate's captured framebuffer, if one is pending. Runs on the render thread with
+   the context current -- the reason gl_state_load only stashes the pixels and does not upload
+   them itself. Draws a viewport-filling textured quad with identity matrices and no blend or
+   depth test, using only entry points GLFNS already resolves. GL_RGBA both ways so destination
+   alpha survives: glgpu_present composites the SDL 2D background wherever alpha < 24, so losing
+   alpha here would make a restored frame opaque and hide the 2D layer under it. */
+static void gl_consume_restore(void) {
+    if (!g_restore_px) return;
+    uint8_t *px = g_restore_px; int rw = g_restore_w, rh = g_restore_h;
+    g_restore_px = NULL; g_restore_w = g_restore_h = 0;      /* consume exactly once */
+    if (g_ok == 1 && rw > 0 && rh > 0) {
+        SDL_GL_MakeCurrent(g_win, g_ctx);
+        p_glBindTexture(GL_TEXTURE_2D, g_tex);
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rw, rh, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        p_glEnable(GL_TEXTURE_2D);
+        p_glDisable(GL_BLEND);
+        p_glDisable(GL_DEPTH_TEST);
+        p_glMatrixMode(GL_PROJECTION); p_glLoadIdentity();
+        p_glMatrixMode(GL_MODELVIEW);  p_glLoadIdentity();
+        p_glViewport(0, 0, g_w, g_h);
+        static const float vtx[8] = { -1,-1,  1,-1,  -1,1,  1,1 };
+        static const float uv[8]  = {  0, 0,  1, 0,   0,1,  1,1 };
+        p_glEnableClientState(GL_VERTEX_ARRAY);
+        p_glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        p_glVertexPointer(2, GL_FLOAT, 0, vtx);
+        p_glTexCoordPointer(2, GL_FLOAT, 0, uv);
+        p_glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        p_glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        p_glDisableClientState(GL_VERTEX_ARRAY);
+    }
+    free(px);
+}
+
 void glgpu_clear(uint32_t packed) {
+    if (g_restore_px) { free(g_restore_px); g_restore_px = NULL; }   /* cleared: pixels are moot */
     if (!gpu_init()) return;
     SDL_GL_MakeCurrent(g_win, g_ctx);
     float r = (packed & 0xff) / 255.f, g = ((packed >> 8) & 0xff) / 255.f,
@@ -162,6 +210,7 @@ static int rd_elem(const struct gl_array *a, int idx, uint8_t *buf, int bufsz) {
 }
 
 void glgpu_draw(uint32_t desc_ptr) {
+    gl_consume_restore();
     if (!gpu_init()) return;
     struct gl_draw d;
     if (read_guest(&d, desc_ptr, sizeof d) != 0) return;
@@ -255,6 +304,7 @@ extern uint32_t g_fb_guest;
 extern uint32_t g_fb_stride;
 
 void glgpu_present(void) {
+    gl_consume_restore();
     if (g_ok != 1 || !g_shm || !g_rb) return;
     SDL_GL_MakeCurrent(g_win, g_ctx);
     p_glReadPixels(0, 0, g_w, g_h, GL_RGBA, GL_UNSIGNED_BYTE, g_rb);
@@ -303,9 +353,71 @@ void glr_draw(uint32_t desc)    { if (use_gpu()) glgpu_draw(desc);      else gls
 /* When a GLES title (fakegles offload) is presenting, it owns the shm framebuffer. A hybrid Caanoo
    title ALSO drives the real libSDL, whose 2D framebuffer present (present_active) would otherwise
    alternate with the GL output -> flicker. Gate present_active on this while GL is recently active. */
+
 static double g_gl_last_present = 0;
+static void gl_restore_owns_screen(int owned);   /* defined below; re-primes that window */
 int gl_owns_screen(void) { return g_gl_last_present != 0 && (host_now() - g_gl_last_present) < 0.3; }
 void glr_present(void) {
     if (use_gpu()) glgpu_present(); else glsw_present();
     g_gl_last_present = host_now();
+}
+
+/* ---- savestates: GL ----------------------------------------------------------
+ * Split by what is reconstructible.
+ *
+ * The SOFTWARE rasterizer's two colour buffers are real inter-frame state and travel in full
+ * (glraster.c explains why). The host-GPU backend's window, context, texture and readback buffer
+ * are not state at all: gpu_init() rebuilds every one of them, so none of it is saved.
+ *
+ * What IS state on the GPU path is the default framebuffer's CONTENTS, for the same reason as
+ * the software buffers: glgpu only clears when the guest asks it to, so pixels persist between
+ * frames. Capturing it needs no GL calls at all, which is the point -- glgpu_present already
+ * reads the whole buffer back into g_rb on every present, so a save is a memcpy off a buffer
+ * that is already in host memory, safe to take from the saving thread while the guest's render
+ * thread is parked. Restore stashes the pixels and lets the next glgpu_* call upload them, since
+ * that call runs on the render thread with the context current.
+ *
+ * gl_owns_screen() gates the 2D framebuffer present. Whether GL owned the screen has to travel
+ * too, or the first frames after a restore flicker between the GL layer and the title's own 2D
+ * framebuffer while the 300ms window re-establishes itself. */
+void gl_state_save(struct sbuf *b) {
+    glsw_state_save(b);
+    sb_u32(b, (uint32_t)(gl_owns_screen() ? 1 : 0));
+#ifdef ME_BUNDLED
+    int have = (g_use_gpu == 1 && g_rb && g_w > 0 && g_h > 0);
+    sb_u32(b, (uint32_t)(have ? 1 : 0));
+    sb_u32(b, (uint32_t)g_w); sb_u32(b, (uint32_t)g_h);
+    if (have) sb_bytes(b, g_rb, (size_t)g_w * g_h * 4);
+#else
+    sb_u32(b, 0); sb_u32(b, 0); sb_u32(b, 0);
+#endif
+}
+
+int gl_state_load(struct scur *c) {
+    if (glsw_state_load(c) != 0) return -1;
+    int owned = (int)sc_u32(c);
+    int have = (int)sc_u32(c);
+    int w = (int)sc_u32(c), h = (int)sc_u32(c);
+#ifdef ME_BUNDLED
+    free(g_restore_px); g_restore_px = NULL; g_restore_w = g_restore_h = 0;
+    if (have && w > 0 && h > 0) {
+        size_t n = (size_t)w * h * 4;
+        g_restore_px = malloc(n);
+        if (g_restore_px && sc_bytes(c, g_restore_px, n)) { g_restore_w = w; g_restore_h = h; }
+        else { free(g_restore_px); g_restore_px = NULL; }
+    }
+#else
+    (void)w; (void)h;
+    if (have) return -1;      /* a GPU-path state cannot be restored into a build without one */
+#endif
+    /* Re-prime the "GL is driving the screen" window so present_active stays gated from the
+       first frame rather than fighting the GL layer for the first 300ms. */
+    gl_restore_owns_screen(owned);
+    return c->failed ? -1 : 0;
+}
+
+static void gl_restore_owns_screen(int owned) {
+    /* host_now(), not guest_now(): this is a real-wall-time window for suppressing the 2D
+       present, not something the guest observes. */
+    g_gl_last_present = owned ? host_now() : 0;
 }
