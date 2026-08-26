@@ -27,3 +27,7 @@ __pycache__/
 
 # Local machine config: private hosts/paths that must never be committed.
 tools/local.env
+
+# MCP server config: holds an absolute path to this checkout, so it is per-developer.
+# Copy .mcp.json.example to .mcp.json and edit the path.
+.mcp.json

@@ -96,6 +96,12 @@ export MAGICEYES_CORPUS_UNC='\\your-nas\share\Roms'
 variable. With it unset, the corpus tools say so and degrade instead of failing, and explicit
 game paths keep working. Use the UNC form rather than a mapped drive letter: the mapping is not
 reliably visible to WSL's init process.
-
 `MAGICEYES_LOCAL_CORPUS` names a second, local corpus directory (containing `GP2X`,
 `GP2X Wiz`, `GP2X Caanoo`), exposed to the MCP server as `legacy_*`.
+
+## The MCP debug server
+
+`tools/mcp/` keeps an engine alive across calls and exposes screenshots, input injection, audio
+analysis and the debugger. Claude Code launches it from a repo-root `.mcp.json`, which names an
+absolute path into your checkout: copy `.mcp.json.example` to `.mcp.json`, set the path, and
+restart Claude Code. `.mcp.json` is gitignored for the same reason `tools/local.env` is.

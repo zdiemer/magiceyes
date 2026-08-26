@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "Copy to .mcp.json (gitignored) and set the path to tools/mcp/run.sh in this checkout.",
+    "On Windows the server runs under WSL, so the path is a /mnt/... path, which is why this",
+    "file is per-developer. On Linux, drop the wsl.exe wrapper: \"command\": \"bash\",",
+    "\"args\": [\"/path/to/magiceyes/tools/mcp/run.sh\"]."
+  ],
+  "mcpServers": {
+    "magiceyes": {
+      "command": "wsl.exe",
+      "args": [
+        "-e",
+        "bash",
+        "/mnt/<drive>/<path-to>/magiceyes/tools/mcp/run.sh"
+      ]
+    }
+  }
+}

@@ -6,6 +6,8 @@ actually on screen?", no more guessing whether audio is playing or is garbage.
 
 Runs **in WSL** (that is where `/dev/shm`, the engine, the corpus mounts and the harness live) and
 is launched from the repo-root `.mcp.json` through `wsl.exe -e bash tools/mcp/run.sh`.
+That file names an absolute path into your checkout, so it is per-developer and gitignored:
+copy `.mcp.json.example` to `.mcp.json` and set the path.
 
 ## Setup
 
