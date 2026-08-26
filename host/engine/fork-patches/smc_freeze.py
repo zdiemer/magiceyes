@@ -8,7 +8,7 @@ not this script). Idempotent.
 GP2X games co-locate hot .iwram scratch DATA with hot CODE on one guest page, so every
 data store to such a page triggers a false self-modifying-code TB invalidation
 (notdirty_write -> tb_invalidate_phys_page_fast). On qemu-user this capped Payback
-gameplay at 6.6fps; the fix there (host/qemu/apply_gp2x.py) lived in user-exec.c's
+gameplay at 6.6fps; the fix there lived in user-exec.c's
 page_protect. Unicorn is softmmu, so the analog is two spots in cputlb.c:
   1. notdirty_write(): once a page thrashes past a threshold, SKIP the TB invalidation.
   2. tlb_set_page_with_attrs(): stop re-arming TLB_NOTDIRTY for frozen pages, so data

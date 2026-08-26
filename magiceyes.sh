@@ -1,43 +1,57 @@
 #!/bin/bash
-# magiceyes launcher: run a GP2X/Wiz/Caanoo .gpe under qemu-user with our guest
-# libs, and show it in the native viewer.
+# magiceyes launcher (Linux/WSL): run a GP2X/Wiz/Caanoo game on the native engine
+# (bin/me_unicorn) and show it in the SDL2 viewer (bin/viewer).
 #
-#   MAGICEYES_ROOTFS=/path/to/device-rootfs ./magiceyes.sh /path/to/game.gpe
+#   ./magiceyes.sh [options] <game.gpe | folder | game.zip>
+#
+# The engine unpacks GPEComp self-extractors and .zip archives, picks the runtime
+# each title needs, and emulates the device hardware, so there is nothing to stage
+# by hand. Options are the engine's own -- run `bin/me_unicorn --help` for the list;
+# the display ones (-s/--scale, -f/--fullscreen, --mute, --volume) also reach the
+# viewer. They must come BEFORE the game: the engine stops reading options at the
+# first non-flag argument and silently ignores anything after it.
 #
 # Env:
-#   MAGICEYES_ROOTFS  device root filesystem (glibc/SDL/real DRM libs)  [required]
-#   MAGICEYES_QEMU    qemu binary  [default: qemu-arm-static]
-#   MAGICEYES_SCALE   window scale  [default 3]
-#   MAGICEYES_FPS     frame cap     [default 60]
+#   MAGICEYES_DEVICE  force the input map: gp2x | wiz | caanoo  [default: auto]
+#   MAGICEYES_SCALE   window scale when -s is not passed        [default: 3]
+#   MAGICEYES_ENGINE / MAGICEYES_VIEWER   override the binaries
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
-GPE="${1:?usage: magiceyes.sh <game.gpe> [args...]}"; shift || true
-ROOTFS="${MAGICEYES_ROOTFS:?set MAGICEYES_ROOTFS to the device rootfs}"
-QEMU="${MAGICEYES_QEMU:-qemu-arm-static}"
-SCALE="${MAGICEYES_SCALE:-3}"
-VIEWER="$HERE/bin/viewer"
+ENGINE="${MAGICEYES_ENGINE:-$HERE/bin/me_unicorn}"
+VIEWER="${MAGICEYES_VIEWER:-$HERE/bin/viewer}"
 
-# ensure our guest libs are staged where the guest loader will find them first
-mkdir -p "$ROOTFS/opt/shim"
-cp -f "$HERE/bin/guest/"*.so.0 "$ROOTFS/opt/shim/" 2>/dev/null || true
-rm -rf "$ROOTFS/dev/shm" 2>/dev/null || true   # so the guest uses host /dev/shm
+[ -x "$ENGINE" ] || { echo "magiceyes: engine not built: $ENGINE" >&2
+                      echo "  build it with host/engine/build_engine.sh" >&2; exit 1; }
+[ -x "$VIEWER" ] || { echo "magiceyes: viewer not built: $VIEWER" >&2
+                      echo "  build it with host/build_viewer.sh" >&2; exit 1; }
 
-GDIR="$(cd "$(dirname "$GPE")" && pwd)"
-GNAME="$(basename "$GPE")"
-cd "$GDIR"
-# shadow any bundled device libSDL so ours (in /opt/shim) wins regardless of RPATH
-for f in libSDL-1.2.so.0 libSDL-1.2.so.0.11.2; do
-  [ -f "$f" ] && [ ! -f "$f.orig" ] && mv -f "$f" "$f.orig"
+# The viewer shares the display flags with the engine, but reads a bare argument as a
+# window scale -- so hand it only the flags it knows, never the game path.
+VIEWER_ARGS=()
+takes_value=0
+for a in "$@"; do
+    if [ "$takes_value" = 1 ]; then VIEWER_ARGS+=("$a"); takes_value=0; continue; fi
+    case "$a" in
+        -s|--scale|--volume)    VIEWER_ARGS+=("$a"); takes_value=1 ;;
+        -f|--fullscreen|--mute) VIEWER_ARGS+=("$a") ;;
+    esac
 done
-rm -f /dev/shm/gp2x_fb
+if [ ${#VIEWER_ARGS[@]} -eq 0 ] && [ -n "${MAGICEYES_SCALE:-}" ]; then
+    VIEWER_ARGS=(--scale "$MAGICEYES_SCALE")
+fi
 
-STRACE=""
-[ -n "${MAGICEYES_STRACE:-}" ] && STRACE="-strace -D /tmp/magiceyes.strace"
-"$QEMU" $STRACE -L "$ROOTFS" \
-  -E LD_LIBRARY_PATH=/opt/shim:/lib:/usr/lib -E HOME=/tmp \
-  -E "FAKESDL_FPS=${MAGICEYES_FPS:-60}" \
-  "./$GNAME" "$@" >/tmp/magiceyes_game.log 2>&1 &
-GPID=$!
-trap 'kill $GPID 2>/dev/null' EXIT
-sleep 1
-"$VIEWER" "$SCALE"
+rm -f /dev/shm/gp2x_fb          # start on a clean framebuffer, not the last run's frame
+
+"$ENGINE" "$@" & EPID=$!
+"$VIEWER" ${VIEWER_ARGS[@]+"${VIEWER_ARGS[@]}"} & VPID=$!
+trap 'kill "$EPID" "$VPID" 2>/dev/null' EXIT
+
+# Either side ending ends the session: the game finishing closes the window, and closing
+# the window stops the game. The viewer's status only describes the window, so report the
+# engine's -- a closed window is a normal quit whatever the game was doing.
+set +e
+wait -n
+first=$?
+if kill -0 "$EPID" 2>/dev/null; then rc=0; else rc=$first; fi
+kill "$EPID" "$VPID" 2>/dev/null
+exit "$rc"

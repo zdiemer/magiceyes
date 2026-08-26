@@ -110,9 +110,10 @@ the emulator) and a per-platform **host** side (the CPU engine + the SDL2 viewer
   `host/win/build_fork_win.sh` (the forked Unicorn CPU core) → `host/win/get_sdl2.sh` →
   `host/win/build_bundle_win.sh` → `bin/magiceyes.exe`. `host/win/build_release.sh`
   reproduces the whole chain and packages a release zip.
-- **Linux / WSL build** (qemu-user backend, needed today for most Wiz/dynamic titles):
-  builds the guest libs with the GPH SDK toolchain and a native SDL2 viewer. See
-  `guest/build_guest.sh`, `host/build_viewer.sh`, and `host/qemu/`.
+- **Linux / WSL build**: the same engine, built native, plus a standalone SDL2 viewer.
+  `host/engine/build_engine.sh` → `bin/me_unicorn`, `host/build_viewer.sh` → `bin/viewer`,
+  then `./magiceyes.sh <game>` runs the pair. `guest/build_guest.sh` builds the ARM guest
+  libraries with the GPH SDK toolchain (needed only for EABI titles).
 
 The full architecture, the device hardware contract, and every hard-won gotcha live in
 [`CLAUDE.md`](CLAUDE.md); the roadmap is in [`TODOS.md`](TODOS.md).

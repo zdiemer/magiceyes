@@ -2,7 +2,7 @@
 
 The cross-platform magiceyes engine runs on a **fork of Unicorn 2.0.1** (= qemu's TCG
 JIT as a portable library, builds native on Windows/macOS/Linux). The fork carries the
-hard-won GP2X fixes we originally made in the qemu-user backend (`host/qemu/apply_gp2x.py`),
+hard-won GP2X fixes we originally made in the qemu-user backend (retired in 0.5.0),
 ported to Unicorn's **softmmu** internals.
 
 The fork itself is a git clone with our patches as **real commits** on a `magiceyes`

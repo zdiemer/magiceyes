@@ -2,7 +2,13 @@
 
 Scratch scripts from bringing up the GP2X path (mostly bash run under WSL; many have
 hardcoded `/home/zachd/...` or `/mnt/e/...` paths — adjust for your tree). They document
-the workflow and are handy for the upcoming QEMU backend too.
+the workflow.
+
+**Historical.** Most of these drive a stock `qemu-arm` and date from before the engine
+could do the same job. The qemu-user backend was retired in 0.5.0, and the engine now
+unpacks GPEComp itself (`host/engine/gpecomp.c`, `tools/un-gpecomp`), so nothing here is
+part of the normal workflow. Kept for the recon recipes, not because they are current;
+`play.sh`, which launched the qemu backend, went with it (use `./magiceyes.sh` instead).
 
 Key ones:
 - **decomp_payback.sh / decomp_kl.sh** — recover the decompressed *static* binary from a

@@ -712,7 +712,7 @@ void gp2x_mmio_palette(uint32_t off, uint32_t val) {
    hook on the mapped window and run the blit when MESGSTATUS is written BUSY (the hw
    run-trigger). Handles solid fill (forecolor) + video->video copy with colour-key
    transparency, 8/16bpp. FIFO (system-mem) sources, 1-bpp expand, and blend ROPs are
-   skipped (logged). Ported from host/common/gp2x_device.c. Reg map: paeryn mmsp2_regs.h. */
+   skipped (logged). Reg map: paeryn mmsp2_regs.h. */
 #define MESG_DSTCTRL 0x00
 #define MESG_DSTADDR 0x04
 #define MESG_DSTSTRIDE 0x08

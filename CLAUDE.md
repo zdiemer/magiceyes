@@ -11,15 +11,14 @@ live in the memory files (see `MEMORY.md`) and `host/*/README.md`; read `README.
 
 ## Status (what works right now)
 
-- **Wiz** — fully working via qemu+shim: **Deicide 3** (commercial, Inka DRM) and **Cave
-  Story / NXEngine**. On the native Windows engine: **Her Knights**, **Deicide 3**,
-  **Patissier** (EABI) boot to render+audio. *Open:* Her Knights BGM is radio static
-  (8-bit sound bank corrupt before our SDL layer). See `wiz-titles-revival`.
+- **Wiz** — **Her Knights**, **Deicide 3** (commercial, Inka DRM) and **Patissier**
+  (EABI) boot to render+audio on the engine. (**Cave Story / NXEngine** was verified on
+  the retired qemu+shim path and has not been re-checked since.) *Open:* Her Knights BGM
+  is radio static (8-bit sound bank corrupt before our SDL layer). See `wiz-titles-revival`.
 - **GP2X** — **Payback** (commercial, static) playable end-to-end @ 30fps with video,
-  audio, input, native threads, no crash — on both the qemu backend (`host/qemu/`) and
-  the native Windows engine (`bin/magiceyes.exe`). More static titles render on the
-  native engine: **Blazar, Quartz2, Vektar, Knight Lore**; dynamic: **Odonata, Wind &
-  Water**. See `payback-loading-deadlock`, `windows-bundle-next`,
+  audio, input, native threads, no crash — on the native engine (`bin/magiceyes.exe`,
+  `bin/me_unicorn`). More static titles render: **Blazar, Quartz2, Vektar, Knight Lore**;
+  dynamic: **Odonata, Wind & Water**. See `payback-loading-deadlock`, `windows-bundle-next`,
   `gp2x-static-titles-and-reload-crash`, `dynamic-gp2x-games-unicorn`.
 - **Caanoo** (Pollux) — **Propis, Rhythmos, Liar** all run and render (software
   GLES1.1/EGL shim). Remaining: Rhythmos AVI-video background. See
@@ -29,14 +28,31 @@ live in the memory files (see `MEMORY.md`) and `host/*/README.md`; read `README.
 MinGW `qemu_vfree` releasing CRT-heap pointers with `VirtualFree` — fixed by
 `host/engine/fork-patches/mingw_vfree.py`. See `gp2x-static-titles-and-reload-crash`.)
 
-## Two backends (core design)
+## Core design
 
-### 1. qemu-user + fake-SDL shim → Wiz (and any dynamic-libSDL title)
-Wiz `.gpe` are EABI/glibc-2.3.6 ELF that dynamically link `libSDL-1.2.so.0`. Run under
-`qemu-arm-static -L <wiz-rootfs>` and **replace `libSDL` with our own**
-(`guest/src/fakesdl.c`) rendering into a `/dev/shm` framebuffer; native SDL2 viewer
-(`host/viewer.c`) shows it + feeds input. DRM stubbed (`guest/src/drmstub.c`). Linux/WSL
-only.
+**One backend on every platform: the Unicorn engine** (`host/engine/`). The qemu-user
+backend (`host/qemu/`) was retired in 0.5.0 — the engine had been the only thing under
+test for months, and keeping a second copy of the device model in sync (`host/common/`,
+also removed) cost more than the reference was worth. Anything below that reads "the
+qemu backend did X" is history, not a live code path.
+
+### The engine → every device, every platform
+GP2X `.gpe` are **GPEComp** self-extractors that decompress to a **statically-linked**
+binary → no dynamic linker → `LD_PRELOAD` can't intercept. So GP2X needs syscall-level
+emulation. `host/engine/` is a portable `qemu-user`-equivalent: **forked-Unicorn ARM CPU
++ ELF loader + Linux-ARM syscall shim + GP2X/Pollux hardware emulation**, presenting to
+the shm viewer. It also carries a dynamic-ELF loader + rootfs path for Wiz/Caanoo titles
+and an offline GPEComp decompressor (`host/engine/gpecomp.c`). See
+`cross-platform-fork-unicorn-plan`.
+
+Dynamic **OABI** titles run on the firmware's **real libSDL** (see
+`real-sdl-stack-migration`); the fake-SDL shim below is now only for **EABI** titles,
+staged into `assets/rootfs-eabi` and loaded by the engine's dynamic loader.
+
+### The guest shim → EABI titles
+Wiz/Caanoo EABI `.gpe` dynamically link `libSDL-1.2.so.0`. We **replace `libSDL` with our
+own** (`guest/src/fakesdl.c`) rendering into a `/dev/shm` framebuffer; the viewer
+(`host/viewer.c`) shows it + feeds input. DRM stubbed (`guest/src/drmstub.c`).
 
 Shim gotchas (each was a real bug):
 - SDL 1.2 **pre-silences the audio callback buffer** every callback (`memset` to
@@ -52,31 +68,14 @@ Shim gotchas (each was a real bug):
 - `tools/extract_dat.py`: Deicide's `.dat` is a plaintext packed archive (fixed 140-byte
   header/entry; filename cstr, size u32 @+132, data @+140). Must extract or audio is garbage.
 
-### 2. Unicorn engine → GP2X (static) + native cross-platform goal
-GP2X `.gpe` are **GPEComp** self-extractors that decompress to a **statically-linked**
-binary → no dynamic linker → `LD_PRELOAD` can't intercept. So GP2X needs syscall-level
-emulation. `host/engine/` (split from the original `host/unicorn/me_unicorn.c`) is a
-portable `qemu-user`-equivalent: **forked-Unicorn ARM CPU + ELF loader + Linux-ARM
-syscall shim + GP2X hardware emulation**, presenting to the same shm viewer. This is the
-path to native Windows/macOS/Linux binaries (no qemu/WSL). It also now has a dynamic-ELF
-loader + rootfs path for Wiz/Caanoo titles, and an offline GPEComp decompressor
-(`host/engine/gpecomp.c`).
-
-The **qemu-user backend** (`host/qemu/`) is the verified-fast GP2X reference (full TCG
-chaining + native threads); the Unicorn engine is being brought to parity and is the
-shipping cross-platform path. See `cross-platform-fork-unicorn-plan`.
-
 ## Repo layout
 
 ```
 guest/   src/{fakesdl.c, fakegles.c, drmstub.c, gp2xshm.h}  build_guest.sh  (ARM)
 host/    viewer.c  build_viewer.sh                            (native SDL2 viewer)
-host/    common/{gp2x_device.c, gp2x_device.h}               (engine-agnostic GP2X model)
-host/    engine/{loader,elf,mem,devices,syscalls,gpecomp,guard,...}.c  (native engine)
-host/    unicorn/{me_unicorn.c, build.sh}                     (original monolith / fallback)
-host/    qemu/{gp2x.c, gp2x.h, apply_gp2x.py, build_qemu.sh, run-gp2x-qemu.sh, README.md}
+host/    engine/{loader,elf,mem,devices,syscalls,gpecomp,guard,...}.c  (the engine)
 host/    win/{stage_rootfs*.sh, build_*_win.sh, compat/, posix_compat.c, README.md}
-tools/   extract_dat.py  un-gpecomp  gp2x/{decomp_*.sh, play.sh, ...}
+tools/   extract_dat.py  un-gpecomp  gp2x/{decomp_*.sh, ...}  (old qemu-era debug probes)
 README.md  TODOS.md  CLAUDE.md  .gitattributes  .gitignore
 bin/     (build outputs, gitignored)
 ```
@@ -85,16 +84,16 @@ shared by the shims, viewer, and engine.
 
 ## Build & run
 
-**Wiz path (qemu+shim, Linux/WSL):**
+**Linux/WSL (engine + standalone viewer):**
 ```sh
-MAGICEYES_SDK=<GPH SDK>  guest/build_guest.sh   # builds libSDL/libinkadrm/libdrmcode (ARM)
-host/build_viewer.sh
-MAGICEYES_ROOTFS=<wiz-rootfs> ./magiceyes.sh game.gpe
+host/engine/build_engine.sh                     # -> bin/me_unicorn
+host/build_viewer.sh                            # -> bin/viewer
+MAGICEYES_SDK=<GPH SDK>  guest/build_guest.sh   # ARM guest libs, EABI titles only
+./magiceyes.sh <game.gpe | folder | game.zip>   # runs the engine + viewer pair
 ```
-**Native Windows (preferred, single-process bundle):**
+**Native Windows (single-process bundle):**
 `host/win/{get_sdl2,build_fork_win,build_bundle_win}.sh` (cross from WSL via MinGW) →
 `bin/magiceyes.exe <binary> [scale]`. See `host/win/README.md`.
-**GP2X qemu reference:** `bash host/qemu/run-gp2x-qemu.sh <static-binary>`.
 
 Controls (viewer): arrows=D-pad, Z/X/A/S=A/B/X/Y, Enter=Start, RShift/Backspace=Select,
 Q/W=L/R, Esc=quit. Mouse → touchscreen (Caanoo).
@@ -161,7 +160,7 @@ in-process) need the engine-side control channel — not built yet.
 
 ## Dev environment & gotchas (IMPORTANT)
 
-- Host dev is **WSL Ubuntu 24.04** + `qemu-user-static`, the **forked Unicorn** (`~/me-unicorn-fork`,
+- Host dev is **WSL Ubuntu 24.04** + the **forked Unicorn** (`~/me-unicorn-fork`,
   branch `magiceyes`), `gcc-arm-linux-gnueabi`, MinGW-w64 (Windows cross), `python3-lzo`+`ubi_reader`.
   Passwordless sudo; `/mnt/tmp` is `1777`. F: is `/mnt/f`, E: is `/mnt/e`.
 - **`wsl.exe ... bash -lc '...'` mangles inline shell vars and `VAR=/path` assignments**

@@ -1027,8 +1027,8 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if ((int)a0 == PIPEFD_W) { pipe_put(tmp, a2); free(tmp); return a2; }
         if (dev_type((int)a0) == DEV_DSP) { free(tmp); long r = dsp_write(a1, a2);
             /* Pace like a blocking OSS write (frees the mixer mutex + CPU; else the audio thread
-               free-runs). This must LOOP until dsp_pace_us() reports we are caught up, exactly as
-               the qemu backend does (host/qemu/gp2x.c). Sleeping once and capping it meant that a
+               free-runs). This must LOOP until dsp_pace_us() reports we are caught up.
+               Sleeping once and capping it meant that a
                write which put the producer further ahead than the cap could never be absorbed, so
                the producer gained a little on every write and kept it: Her Knights (Wiz) emitted a
                steady 1.71 seconds of audio per wall second, i.e. audio ran ~71% ahead of the

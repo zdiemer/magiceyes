@@ -1,7 +1,7 @@
 # magiceyes — TODOs
 
 Status: broad multi-title support working across all three devices on the native
-Windows engine + qemu/Unicorn backends (see CLAUDE.md "Status"). What's left is
+engine, one backend on every platform (see CLAUDE.md "Status"). What's left is
 per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Open per-title bugs (native Windows engine unless noted)
@@ -10,14 +10,15 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 > AND dynamic OABI games on the firmware's REAL libSDL instead of the brittle fake-SDL shim. This
 > fixed the shim's `SDL_Surface`/blit ABI corruption — **Deicide 3 and Her Knights render correctly
 > now**, and the white-rectangle/wrong-blit class (RetroVirus, Wiz menu) is the same root cause.
-> The shim is retained only for the qemu backend. EABI titles (Patissier/rg_ura) still use the shim
-> (no prebuilt real EABI libSDL — see `third_party/README.md`).
+> EABI titles (Patissier/rg_ura) still use the shim (no prebuilt real EABI libSDL — see
+> `third_party/README.md`).
 
 - **Her Knights — BGM is radio static.** Gameplay otherwise perfect. PCM is already noise
   in the ring (zcr≈0.5) *before* our SDL conversion — HK's 8-bit (U8 22050) custom sound
-  bank through firmware `libSDL_mixer`. Next: run under reference `qemu-arm` to the menu
-  music — static there ⇒ shim/SDL_mixer bug; clean ⇒ engine DSP/CPU bug. Trace HK's BGM
-  loader (no symbols). `ME_FAKESDL_AUDIO_DUMP`, zcr analysis. See `wiz-titles-revival`.
+  bank through firmware `libSDL_mixer`. Next: play the menu music under a stock
+  `qemu-arm` for comparison — static there ⇒ shim/SDL_mixer bug; clean ⇒ engine DSP/CPU
+  bug. Trace HK's BGM loader (no symbols). `ME_FAKESDL_AUDIO_DUMP`, zcr analysis.
+  See `wiz-titles-revival`.
 - **Deicide 3 — rendering FIXED (real libSDL); audio TBD.** Renders correctly on the real-libSDL
   bundle (intro cutscenes verified) — the shim's surface/blit ABI mismatch was the cause. Remaining:
   confirm audio (dump the ring vs the game's `SDL_OpenAudio`), confirm `.dat` assets extracted.
@@ -29,16 +30,17 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
   real-libSDL bundle to confirm.
 - **Odonata — gameplay object-pool crash (PARKED).** Title+menu render, but a few seconds
   into gameplay hits the game's own assert (object.cpp:297) — dead sprites never freed.
-  Decisive next test: compare under the qemu backend (correct nwfpe FPA + cooperative threads).
-- **Blazar — guest SIGSEGV (qemu backend only).** Inits gfx+audio ~2s then null+offset deref.
-  Runs fine as a static title on the native engine; re-confirm the qemu-backend status.
+  Decisive next test: compare against a stock `qemu-arm` run (correct nwfpe FPA +
+  cooperative threads).
+- **Blazar — guest SIGSEGV, qemu backend only (CLOSED).** Ran fine as a static title on
+  the engine; the backend that showed the fault is gone.
 - **Knight Lore — red error screen (minor).** Missing `timidity.cfg` ⇒ no MIDI music;
   dismissable (press B), gameplay proceeds. Missing asset, not an engine bug.
 
 ## Features / roadmap
 
 - **Save support — finish.** Native engine DONE (per-game write overlay, merged enumeration,
-  chdir-anchored writes). *Remaining:* confirm the qemu backend and Wiz/Caanoo titles persist;
+  chdir-anchored writes). *Remaining:* confirm Wiz/Caanoo titles persist;
   absolute writes OUTSIDE the game dir and `truncate`/`link`/`symlink`/`utime`-by-path aren't
   redirected (no known title needs it).
 - **End-to-end firmware support.** Boot the device firmware, then launch games from the SD card.
@@ -81,14 +83,6 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 - **Engine headless self-drain.** The Unicorn engine's audio producer paces against the viewer
   consuming the shm ring, so a headless run blocks once the ring fills. Self-drain `a_read` by
   wall clock when no viewer is attached (`viewer_heartbeat` already distinguishes the two).
-- **Migrate Linux to the Unicorn backend; deprecate qemu.** Make the native Unicorn engine
-  (`host/engine/`) the sole backend on Linux/WSL too, retiring the qemu-user path (`host/qemu/`,
-  the fake-SDL shim's qemu role, `magiceyes.sh`'s qemu branch). The native engine is already the
-  shipping cross-platform path; qemu has been the verified-fast GP2X reference. Before flipping:
-  confirm input + the remaining qemu-only titles (e.g. Wiz dynamic-libSDL games) run on the engine.
-  Then drop the qemu build/run scripts + docs. One backend = less to maintain.
-- **Fold the Unicorn backend onto the shared `gp2x_device.c`** — it still has its own copy of the
-  device logic; unify so there's one implementation. Low priority (fallback, and it works).
 - **Consolidate debug switches.** Fold the env-gated probes in `fakesdl.c` (`FAKESDL_BLIT_LOG`,
   `FAKESDL_SRC_DUMP`, `FAKESDL_DISPFMT`, `FAKESDL_NO_COLORKEY`, `FAKESDL_AUDIO_TEST/DUMP`) into one
   `MAGICEYES_DEBUG=blit,audio,src,...`.
@@ -112,7 +106,7 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Packaging / distribution
 
-- **Per-OS bundles.** Linux AppImage (qemu-arm-static + rootfs + guest libs + viewer); Windows
+- **Per-OS bundles.** Linux AppImage (engine + rootfs + guest libs + viewer); Windows
   installer; macOS via container. Single `magiceyes` entrypoint that picks the backend.
 - **romnas wiring.** Point `gp2x-wiz` (then `gp2x`, `gp2x-caanoo`) at magiceyes in
   `config/emulators.yaml` + `config/systems.yaml`: launcher invokes `magiceyes.sh`,

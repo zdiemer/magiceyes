@@ -15,7 +15,7 @@ OS, and what you observed. We'll acknowledge your report and work on a fix.
 ## Scope
 
 magiceyes runs untrusted ARM game binaries inside an emulated CPU. The host-facing attack
-surface is the syscall/device emulation layer (`host/engine/`, `host/common/`) and file
+surface is the syscall/device emulation layer (`host/engine/`) and file
 parsing (ELF/GPEComp loaders). Bugs that let guest code read or write host memory, host
 files outside the game directory, or execute host code are in scope.
 
