@@ -84,8 +84,8 @@ Known gaps
 - 111 games run at speed with no audio, 42 run below 20 fps, 12 render a wrong picture.
 - Of the 126 that never render: 44 are not 32-bit ARM binaries, 12 are incomplete or
   unextractable dumps, 62 are unexplained.
-- Her Knights music is static, Patissier renders incorrectly, the Rhythmos video background is
-  Linux-only, the Caanoo firmware menu does not take touch input.
+- Patissier renders incorrectly, the Rhythmos video background is Linux-only, and the Caanoo
+  firmware menu does not take touch input.
 - These numbers come from the Linux build. The Windows build compiles from the same engine
   sources, but its file, memory-mapping and timing layers differ and it has not been run game
   by game, so results on Windows may not match.
