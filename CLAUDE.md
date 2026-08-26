@@ -11,10 +11,9 @@ live in the memory files (see `MEMORY.md`) and `host/*/README.md`; read `README.
 
 ## Status (what works right now)
 
-- **Wiz** — **Her Knights**, **Deicide 3** (commercial, Inka DRM) and **Patissier**
-  (EABI) boot to render+audio on the engine. (**Cave Story / NXEngine** was verified on
-  the retired qemu+shim path and has not been re-checked since.) *Open:* Her Knights BGM
-  is radio static (8-bit sound bank corrupt before our SDL layer). See `wiz-titles-revival`.
+- **Wiz** — **Her Knights** (render + audio, BGM included), **Deicide 3** (commercial, Inka
+  DRM) and **Patissier** (EABI) boot on the engine. (**Cave Story / NXEngine** was verified on
+  the retired qemu+shim path and has not been re-checked since.) See `wiz-titles-revival`.
 - **GP2X** — **Payback** (commercial, static) playable end-to-end @ 30fps with video,
   audio, input, native threads, no crash — on the native engine (`bin/magiceyes.exe`,
   `bin/me_unicorn`). More static titles render: **Blazar, Quartz2, Vektar, Knight Lore**;

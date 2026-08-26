@@ -6,20 +6,12 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Open per-title bugs (native Windows engine unless noted)
 
-- **Her Knights — BGM is radio static.** Gameplay otherwise perfect. PCM is already noise
-  in the ring (zcr≈0.5) *before* our SDL conversion — HK's 8-bit (U8 22050) custom sound
-  bank through firmware `libSDL_mixer`. Next: play the menu music under a stock
-  `qemu-arm` for comparison — static there ⇒ shim/SDL_mixer bug; clean ⇒ engine DSP/CPU
-  bug. Trace HK's BGM loader (no symbols). `ME_FAKESDL_AUDIO_DUMP`, zcr analysis.
-  See `wiz-titles-revival`.
 - **Patissier — incorrect rendering (EABI, still on the shim).** Renders wrong / green screen via
   the EABI rootfs shim. The real-libSDL switch is OABI-only so far; EABI has no prebuilt real libSDL
   (see `third_party/README.md` "EABI: deferred").
 
 ## Features / roadmap
 
-- **Save support — confirm Wiz/Caanoo titles persist.** Absolute writes OUTSIDE the game dir and
-  `truncate`/`link`/`symlink`/`utime`-by-path aren't redirected (no known title needs it).
 - **End-to-end firmware support.** Boot the device firmware, then launch games from the SD card.
   (In-process firmware install + gp2xmenu staging exist; see `firmware-boot-support`.)
 - **Caanoo firmware-menu touchscreen — BLOCKED inside the firmware libSDL.** The FW menu (gp2xmenu)
@@ -64,11 +56,8 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 - **Per-OS bundles.** Linux AppImage (engine + rootfs + guest libs + viewer); Windows
   installer; macOS via container.
-- **romnas wiring.** Point `gp2x-wiz` (then `gp2x`, `gp2x-caanoo`) at magiceyes in
-  `config/emulators.yaml` + `config/systems.yaml`: launcher invokes `magiceyes.sh`,
-  `frontend_entrypoint: *.gpe`, and a `.dat`-extraction post_process (Deicide etc.). Linux/WSL2 only.
 - **Audio: per-title robustness.** Pre-buffer + closed-loop pump verified on Wiz; re-check on GP2X
-  titles (different SDL build/rates). Re-check any other 8-bit-audio title (cf. Her Knights).
+  titles (different SDL build/rates) and on other 8-bit-audio titles.
 
 ## Known environmental limitations (not bugs in our code)
 
