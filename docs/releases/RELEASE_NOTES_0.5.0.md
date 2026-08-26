@@ -56,8 +56,8 @@ Compatibility tracker
 
 Per-game compatibility is at
 [zdiemer/magiceyes-compat](https://github.com/zdiemer/magiceyes-compat): one issue per game
-with a screenshot, a clip, the status, and what stopped it. COMPATIBILITY.md here remains the
-short list of commercial titles.
+with a screenshot, a clip, the status, and what stopped it. It replaces the short
+hand-written list this repo used to carry.
 
 Tooling (developer-facing)
 

@@ -1,10 +1,22 @@
-# magiceyes
+<div align="center">
 
-**Play Game Park Holdings handheld games on your PC.** magiceyes runs games written for
-the **GP2X** (F100/F200), **GP2X Wiz**, and **GP2X Caanoo** — including DRM-locked
-commercial titles — by emulating the device's ARM CPU and reimplementing its video,
-audio, input, and DRM hardware. On Windows it's a single self-contained `.exe`: no
-emulator setup, no virtual machine, no firmware flashing.
+<img src="docs/img/banner.svg" alt="magiceyes" width="760">
+
+**Play Game Park Holdings handheld games on your PC.**
+
+[![Release](https://img.shields.io/github/v/release/zdiemer/magiceyes?style=flat-square&label=release&color=7f6bff)](https://github.com/zdiemer/magiceyes/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/zdiemer/magiceyes/ci.yml?branch=main&style=flat-square&label=build)](https://github.com/zdiemer/magiceyes/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/github/downloads/zdiemer/magiceyes/total?style=flat-square&color=2fd4c6)](https://github.com/zdiemer/magiceyes/releases)
+[![Games playable](https://img.shields.io/badge/games%20playable-739%20%2F%20972-2fd4c6?style=flat-square)](https://github.com/zdiemer/magiceyes-compat)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-9d8ed6?style=flat-square)](#download--run-windows)
+[![License](https://img.shields.io/badge/license-GPL--2.0-9d8ed6?style=flat-square)](LICENSE)
+
+</div>
+
+magiceyes runs games written for the **GP2X** (F100/F200), **GP2X Wiz**, and **GP2X
+Caanoo** — including DRM-locked commercial titles — by emulating the device's ARM CPU and
+reimplementing its video, audio, input, and DRM hardware. On Windows it's a single
+self-contained `.exe`: no emulator setup, no virtual machine, no firmware flashing.
 
 The name comes from the **MagicEyes** SoCs inside those handhelds (MMSP2 in the GP2X,
 Pollux in the Wiz/Caanoo).
@@ -73,8 +85,9 @@ magiceyes.exe [options] [game]
 ## Supported games
 
 magiceyes is under active development; coverage grows as device features and games are
-exercised. See [`COMPATIBILITY.md`](COMPATIBILITY.md) for the per-title compatibility map
-across GP2X, Wiz, and Caanoo.
+exercised. Per-game status lives in the
+[**magiceyes-compat**](https://github.com/zdiemer/magiceyes-compat) tracker: one issue per game, with a
+screenshot, a short clip, how it scored, and what stopped it if it failed.
 
 As of the 25 August 2026 run of 972 games (all three handhelds), **739 are playable** and
 794 put real gameplay on screen. Of the 126 that never render, 56 are not ARM binaries at all

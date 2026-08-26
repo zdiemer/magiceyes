@@ -416,7 +416,7 @@ run_nas_sweep's staged layout does implicitly.
   **BareFistFighter + 4WE_GP2x** (NAS), + Sopwith (Wiz) and sopwith_camel_rc3 spot checks,
   engine copied to ext4 first. (supertux-wiz is in the spot list but its grade is a coin
   flip solo: see above; don't chase it as a regression.)
-- **Do not write to the top-level `COMPATIBILITY.md`** (hand-curated, commercial-only) and
-  don't hand-edit `tools/test/CORPUS_SWEEP.md` (generated).
+- **Don't hand-edit `tools/test/CORPUS_SWEEP.md`** (generated). The old hand-curated
+  top-level `COMPATIBILITY.md` is gone; the tracker is the published per-game view.
 - **No em dashes in prose.** Zach's preference, project-wide: use commas, colons, or
   parentheses.

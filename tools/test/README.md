@@ -140,8 +140,8 @@ buttons and the game answering, and the last `DWELL_SECS` of a run are deliberat
 NEXT_STEPS.md for the measured A/B/C.
 
 `CORPUS_SWEEP.md` is the generated whole-corpus report (every title, homebrew included). The
-top-level `COMPATIBILITY.md` is a different, hand-curated document covering commercial titles only;
-these tools never write to it.
+published per-game view of the same data is the magiceyes-compat tracker, which `compat_publish.py`
+writes to; nothing here writes to this repo's own docs.
 
 The grouping is the point: a title lands in exactly one bucket, chosen by what actually stopped it,
 so a group's size is the number of titles one fix would unblock. Blocker lists (unimplemented

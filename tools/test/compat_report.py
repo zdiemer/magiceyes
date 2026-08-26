@@ -29,8 +29,7 @@ STATUS_ORDER = ["error", "crashed", "incompatible", "black", "renders", "playabl
 
 # The harness tiers answer "did it run". They cannot see that the picture is sheared, tiled or a
 # single flat colour, so a visibly broken title still scores `playable`. TIER is the reported
-# grade and adds `ingame`, matching the vocabulary the curated COMPATIBILITY.md already uses:
-# boots and renders gameplay, but with a notable gap. The raw harness status is kept alongside it
+# grade and adds `ingame`: boots and renders gameplay, but with a notable gap. The raw harness status is kept alongside it
 # (and baseline.py still gates on that, so its committed baselines are unaffected).
 TIER_ORDER = ["error", "crashed", "incompatible", "black", "ingame", "playable"]
 
@@ -447,8 +446,8 @@ def write_md(records, path, ndropped=0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
-    # NOT the top-level COMPATIBILITY.md: that one is hand-curated and covers commercial titles
-    # only. This is the generated whole-corpus sweep, so it lives with the harness that makes it.
+    # The generated whole-corpus sweep lives with the harness that makes it. compat_publish.py
+    # is what copies a summary into the tracker repo.
     ap.add_argument("--out-md", default=os.path.join(REPO, "tools", "test", "CORPUS_SWEEP.md"))
     ap.add_argument("--out-json", default=os.path.join(REPO, "tools", "test", "compat_manifest.json"))
     a = ap.parse_args()
