@@ -50,9 +50,19 @@ jobs:
             echo "::error::magiceyes.exe contains the debug control channel"
             exit 1
           fi
+          # Read the symbols ONCE and prove we actually got some. Piping nm straight into grep
+          # meant that if nm ever failed or the format changed, grep saw empty input and every
+          # check "passed" -- a false green on the one guarantee this step exists to make.
+          if ! syms="$(x86_64-w64-mingw32-nm -C --extern-only bin/magiceyes.exe)"; then
+            echo "::error::could not read symbols from magiceyes.exe"
+            exit 1
+          fi
+          if [ -z "$syms" ]; then
+            echo "::error::nm produced no symbols for magiceyes.exe -- cannot verify anything"
+            exit 1
+          fi
           for sym in WSAStartup bind listen accept; do
-            if x86_64-w64-mingw32-nm -C --extern-only bin/magiceyes.exe 2>/dev/null \
-                 | grep -qw "$sym"; then
+            if printf '%s\n' "$syms" | grep -qw "$sym"; then
               echo "::error::magiceyes.exe imports $sym -- a listening socket must not ship"
               exit 1
             fi
@@ -101,3 +111,83 @@ jobs:
         run: |
           bash host/engine/build_engine.sh
           bash tools/test/smoke.sh
+
+  # Unit tests over the pure logic: the GPEComp decompressor, the control-channel JSON codec, the
+  # run-report sink, ELF symbol indexing, the storage paths, the firmware image walkers, the PNG
+  # writer -- plus the whole Python harness layer (status tiers, the regression gate, the visual
+  # grader, the pilot, the MCP data layer).
+  #
+  # Needs NO Unicorn fork build and NO ARM toolchain, so it is by far the fastest signal here: the
+  # C files under test make zero uc_* calls and only need the unicorn HEADERS on the include path.
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libcmocka-dev git \
+                                  gcc-mingw-w64-x86-64-posix cmake ninja-build
+
+      - name: Fetch unicorn headers
+        run: |
+          # A shallow clone takes seconds; building the fork takes minutes, and nothing here
+          # links against it.
+          git clone --depth 1 --branch 2.0.1 \
+            https://github.com/unicorn-engine/unicorn "$HOME/me-unicorn-fork"
+
+      - name: C unit tests (Linux)
+        run: bash tests/c/build_tests.sh
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Python unit tests
+        run: bash tests/python/run_tests.sh
+
+      - name: Cache cmocka (MinGW)
+        id: cmockacache
+        uses: actions/cache@v4
+        with:
+          path: ~/cmocka-mingw
+          key: cmocka-mingw-1.1.7
+
+      - name: Build cmocka (MinGW)
+        if: steps.cmockacache.outputs.cache-hit != 'true'
+        run: bash host/win/get_cmocka.sh
+
+      # Cross-compiled here rather than on the Windows runner, so that runner needs no toolchain
+      # at all: the binaries are -static.
+      - name: Cross-build the C unit tests for Windows
+        run: ME_TEST_WIN=1 ME_TEST_BUILD_ONLY=1 bash tests/c/build_tests.sh
+
+      - name: Upload Windows test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-tests-win64
+          path: bin/tests/*.exe
+          if-no-files-found: error
+
+  # The same C tests again on real Windows. Worth the extra job because several of the things
+  # under test are exactly where the platforms differ: the storage paths normalise separators, and
+  # host/win/posix_compat.c (pread, mmap, the shm bridge) only exists on this side and is where
+  # the native-Windows black-screen bugs lived.
+  unit-tests-windows:
+    runs-on: windows-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unit-tests-win64
+          path: tests-win
+
+      - name: Run the C unit tests (native Windows)
+        shell: bash
+        run: |
+          fail=0
+          for f in tests-win/*.exe; do
+            echo "--- $(basename "$f")"
+            "./$f" || fail=1
+          done
+          exit "$fail"
