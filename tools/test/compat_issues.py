@@ -27,6 +27,9 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MARKER = "magiceyes-compat-id"
 
 GROUP_BLURB = {
+    "error":                "The harness could not produce a usable verdict for this title. That is "
+                            "a fault in the test tooling rather than a statement about the game, so "
+                            "it needs a re-run before anything can be concluded from it.",
     "playable":             "This title runs. It held at or above 20 fps, rendered real frames, and "
                             "produced audio for the whole sampled run. Tracked here so regressions "
                             "have somewhere to land.",
