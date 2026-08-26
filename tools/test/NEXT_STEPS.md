@@ -32,6 +32,43 @@ of twenty press-and-screenshot round trips; promoting a discovered path to a com
 a confirm run under `ME_FAKESDL_VTIME=60`. The tier ladder is deliberately untouched until the new
 signals are calibrated against a full sweep.
 
+### What this does to the tracker's screenshots and clips
+
+The published clips were largely title screens, which say nothing about whether a game plays. The
+pilot fixes that on its own, at the clip window the sweep already uses. Measured A/B/C on six GP2X
+titles (distinct frames, mean motion):
+
+| title | script @8-14s | pilot @8-14s | pilot @17-23s |
+|---|---|---|---|
+| para3 | 1, 0.000 | **36, 0.429** | 19, 0.471 |
+| Winter_Jumper | 1, 0.018 | **8, 0.122** | 7, 0.070 |
+| hex-a-hop | 14, 0.089 | **23, 0.089** | 1, 0.001 |
+| Clonk2X | 1, 0.000 | **3, 0.011** | 1, 0.000 |
+| Volleyball | 1, 0.001 | 1, 0.001 | 1, 0.001 |
+| sudoku | 1, 0.000 | 1, 0.000 | 1, 0.000 |
+
+para3's script clip is a static wall of intro story text; under the pilot it is the shooting gallery
+with a crosshair and a live score counter. Winter_Jumper goes from an empty level-select to an
+actual level (which is how its black right-quarter rendering defect surfaced at all).
+
+**Do not move the clip window later.** It is the obvious idea and it is wrong: hex-a-hop collapses
+from 23 distinct frames to 1 and lands back on its title menu. The motion comes from the pilot
+pressing buttons and the game answering, and by 17s it has usually exhausted the screen, with
+`DWELL_SECS` stopping input entirely for the last 4s. Deepest and liveliest are different moments.
+
+Volleyball and sudoku are static in every arm, correctly: a sudoku board does not move until it is
+played. For that class the screenshot is the artifact and no clip window helps.
+
+### Operational: the pilot makes a full sweep ~4x longer
+
+Sweep 6 (fixed rotation) ran 1031 titles in ~50 min. The pilot's first full sweep did 699 GP2X in
+42 min, and once the response detector was corrected the rate fell to ~4 titles/min, putting a full
+sweep near 4.5 hours. This is the pilot working, not a bug: titles that used to be killed early by
+a stray press now survive their whole 25s window, so the sweep pays for runs that used to abort.
+Budget for it, and note that the platform result dirs are reused per title, so an interrupted sweep
+leaves a MIXTURE of old and new verdicts that `compat_report.py` would silently report as one sweep.
+Clear `results/{gp2x,wiz,caanoo}` before a re-run.
+
 
 Ranked by how many titles one fix would move. Updated from the SIXTH full sweep
 (2026-08-25 midday, after the wave-6 black-screen arc, the visual/scaler fixes, the

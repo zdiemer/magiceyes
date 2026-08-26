@@ -132,6 +132,13 @@ byte copy per frame with the row stride cropped (`shmlib.read_frame_raw`) precis
 disturb the run: encoding a PNG inline costs ~200ms a frame and would change the frame rate being
 measured. A control run with and without recording confirmed the fps is unchanged.
 
+**Leave the window where it is.** Under `--pilot` these clips become genuinely mid-game (para3 goes
+from a static wall of intro text to its shooting gallery, 1 distinct frame to 36), and moving the
+window later to catch the "deepest" screen makes them worse, not better: hex-a-hop drops from 23
+distinct frames to 1 and lands back on its title menu. The motion comes from the pilot pressing
+buttons and the game answering, and the last `DWELL_SECS` of a run are deliberately input-free. See
+NEXT_STEPS.md for the measured A/B/C.
+
 `CORPUS_SWEEP.md` is the generated whole-corpus report (every title, homebrew included). The
 top-level `COMPATIBILITY.md` is a different, hand-curated document covering commercial titles only;
 these tools never write to it.
