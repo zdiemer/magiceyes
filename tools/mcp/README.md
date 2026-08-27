@@ -28,6 +28,7 @@ Then restart Claude Code so it picks up `.mcp.json`, and call `engine_health` fi
 | Screen | `screenshot` `filmstrip` `wait_for_change` |
 | Input | `press` `touch` `save_recording` |
 | Audio | `audio_analyze` |
+| Savestates | `state_save` `state_load` `state_list` `state_thumb` |
 | Diagnostics | `run_report` `log_tail` `threads` |
 | Probes | `list_probes` `probe_results` `perf` `decode_mmio` |
 | Live inspection | `memory_read` `memory_map` `cpu_state` `device_state` |
@@ -36,6 +37,13 @@ Then restart Claude Code so it picks up `.mcp.json`, and call `engine_health` fi
 
 `screenshot`, `filmstrip` and `audio_analyze` return real image blocks, so the agent sees the frame
 and the spectrogram rather than a description of them.
+
+Savestates make an experiment repeatable: save, try something, load, try something else, instead
+of relaunching and replaying inputs to get back to the same place. `state_load` is queued to the
+engine's main loop (a restore needs the same teardown a hot reload does), so it waits for
+`status.state_epoch` to move rather than returning while the old machine is still running --
+otherwise the next `screenshot` catches the wrong one. `state_thumb` returns the saved screen as
+an image, so slots can be told apart by sight.
 
 A typical loop:
 

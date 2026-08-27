@@ -1,6 +1,6 @@
 """magiceyes MCP server -- drive and inspect the emulator without rebuilding it.
 
-Tool groups: session / screen / input / audio / diagnostics / corpus / harness.
+Tool groups: session / screen / input / audio / savestates / diagnostics / corpus / harness.
 
 Every tool returns a dict (rendered as JSON) except the visual ones, which return an MCP image
 block so the frame is actually visible rather than described. Errors are raised as exceptions with
@@ -21,6 +21,7 @@ from mcp.server.mcpserver import Image
 from . import audio as audio_mod
 from . import ctl as ctl_mod
 from . import env, probes, screen  # env must precede shmlib (package __init__ sets sys.path)
+from . import state as state_mod
 from .session import SessionManager
 
 import shmlib  # noqa: E402  -- tools/test/shmlib.py
@@ -566,6 +567,42 @@ def baseline_check(games: list[str] | None = None) -> dict:
                        capture_output=True, text=True, cwd=str(env.REPO))
     return {"regressed": r.returncode != 0, "output": r.stdout.strip(),
             "stderr": r.stderr.strip()[-2000:], "engine": str(staged)}
+
+
+
+# --------------------------------------------------------------------------- savestates
+@mcp.tool(description="Save the whole emulated machine to a slot (0 = the quick slot, 1-9 "
+                      "numbered). Pair with state_load to make an experiment repeatable: save, "
+                      "try something, reload -- instead of relaunching and replaying inputs to "
+                      "get back to the same place. The engine stops the world itself, so there is "
+                      "no need to pause first.")
+def state_save(session: str | None = None, slot: int = 0) -> dict:
+    return state_mod.save(MGR.get(session).ctl(), slot)
+
+
+@mcp.tool(description="Restore a previously saved state. The load is applied on the engine's main "
+                      "loop, so it is queued rather than instant; this waits for it to take "
+                      "effect and reports the frame the machine came back at. A state from a "
+                      "different build or a different title is refused, not restored as garbage.")
+def state_load(session: str | None = None, slot: int = 0, wait_secs: float = 5.0) -> dict:
+    s = MGR.get(session)
+    out = state_mod.load(s.ctl(), slot, wait_secs)
+    out["frame_seq"] = _frames(s)
+    return out
+
+
+@mcp.tool(description="List the saved states for this session's title: which slots are filled, "
+                      "when each was saved, and at which frame.")
+def state_list(session: str | None = None) -> dict:
+    return state_mod.listing(MGR.get(session).ctl())
+
+
+@mcp.tool(description="Show a slot's saved screen as an image, so a state can be identified by "
+                      "sight rather than by timestamp.")
+def state_thumb(session: str | None = None, slot: int = 0, scale: int = 2) -> list:
+    meta, blob, w, h = state_mod.thumb(MGR.get(session).ctl(), slot, scale)
+    return [json.dumps(meta),
+            Image(data=screen.rgb565_png(blob, w, h, scale=meta["scale"]), format="png")]
 
 
 def _frames(s) -> int:

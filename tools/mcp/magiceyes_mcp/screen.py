@@ -64,12 +64,19 @@ def _png(rgb: bytearray, w: int, h: int) -> bytes:
             + chunk(b"IEND", b""))
 
 
-def _to_rgb(data: bytes, w: int, h: int, scale: int) -> tuple[bytearray, int, int]:
-    """RGB565 (1024-px row stride) -> packed RGB888, nearest-neighbour upscaled by `scale`."""
+def _to_rgb(data: bytes, w: int, h: int, scale: int,
+            stride_px: int | None = None) -> tuple[bytearray, int, int]:
+    """RGB565 -> packed RGB888, nearest-neighbour upscaled by `scale`.
+
+    stride_px is the source row pitch in PIXELS, defaulting to the shm framebuffer's fixed 1024.
+    A savestate thumbnail is tightly packed instead (stride == width), which is the contract the
+    Win32 and SDL pickers blit against, so it has to be able to say so."""
+    if stride_px is None:
+        stride_px = shmlib.MAXW
     ow, oh = w * scale, h * scale
     out = bytearray(ow * oh * 3)
     for y in range(h):
-        base = y * shmlib.MAXW * 2
+        base = y * stride_px * 2
         row = bytearray(ow * 3)
         for x in range(w):
             o = base + x * 2
@@ -178,3 +185,11 @@ def filmstrip(shm_path: str, n: int = 4, over_secs: float = 2.0, scale: int = 1,
         save_to.write_bytes(png)
     return {"ok": True, "png": png, "frames": len(shots), "grid": f"{cols}x{rows}",
             "seqs": [s[3] for s in shots], "path": str(save_to) if save_to else None}
+
+
+def rgb565_png(data: bytes, w: int, h: int, scale: int = 1) -> bytes:
+    """Encode a TIGHTLY PACKED RGB565 buffer as a PNG. Used for savestate thumbnails, which are
+    stored raw (no PNG decoder exists anywhere in host/) precisely so both pickers can blit them
+    directly; this is the one place that has to turn one back into an image."""
+    rgb, ow, oh = _to_rgb(data, w, h, max(1, scale), stride_px=w)
+    return _png(rgb, ow, oh)

@@ -99,6 +99,37 @@ presses that did something measurable), `family`, `lethal_inputs`, `pilot_hands_
 `tools/test/pilot/selftest.py` gates the control loop against a fake title with no engine and no
 game, and runs as part of `smoke.sh`.
 
+
+## Savestates
+
+`state_selftest.py <game> [--other GAME]` drives save and restore end to end against a real title
+and exits non-zero on failure. It needs a game, unlike `ctl_selftest.py`: a freestanding guest has
+no threads, no open files and no interesting memory, which is exactly where savestates go wrong,
+so it is not part of `smoke.sh`.
+
+What it pins, in the order these caught real bugs:
+
+- **Every thread's register file comes back identical**, FPA included. Checked with the machine
+  frozen (`ME_STATE_PAUSE_AFTER_RESTORE`), because a running one has already moved on by the time
+  anything can look at it.
+- **Two saves taken with the world stopped produce byte-identical memory chunks**, so the capture
+  invents nothing: no timestamp, no host pointer, no uninitialised padding. That is the classic
+  savestate bug and every other check here is blind to it.
+- **The picture comes back**, by perceptual dHash within `baseline.py`'s own frame distance -- and
+  only claimed when the picture demonstrably moved in between. On a static attract screen it says
+  the run was inconclusive rather than reporting a pass it did not earn.
+- **The picture is stable afterwards, not tearing.** A restore that leaves the display locked to
+  the buffer the game is drawing into produces a frame that is individually plausible and wrong
+  every time.
+- **The refusals refuse, for the stated reason**: an empty slot, an out-of-range slot, a corrupted
+  file, an incompatible engine ABI, and a state from a different game.
+
+For a stress run with no ctl and no viewer at all -- which is how this gets exercised on Windows,
+where the fd and path handling differ, and under ASan -- the engine has `ME_TEST_STATE=<warm_secs>
+[:<cycles>]`, in the shape of the existing `ME_TEST_RELOAD` harness.
+
+The container itself (framing, CRCs, the picker's probe) is covered by `tests/c/test_state.c`,
+which links no engine and needs no game.
 ## Whole-corpus compatibility sweep
 
 `run_corpus.py` scores a directory. The `compat_*` tools turn several of those runs into the

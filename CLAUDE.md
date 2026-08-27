@@ -68,16 +68,17 @@ Shim gotchas (each was a real bug):
 
 ```
 guest/   src/{fakesdl.c, fakegles.c, drmstub.c, gp2xshm.h}  build_guest.sh  (ARM)
-host/    viewer.c  build_viewer.sh                            (native SDL2 viewer)
-host/    engine/{loader,elf,mem,devices,syscalls,gpecomp,guard,...}.c  (the engine)
+host/    viewer.c  state_file.c  state_win.c  build_viewer.sh       (native SDL2 viewer)
+host/    engine/{loader,elf,mem,devices,syscalls,state,gpecomp,guard,...}.c  (the engine)
 host/    win/{stage_rootfs*.sh, build_*_win.sh, compat/, posix_compat.c, README.md}
 tools/   extract_dat.py  un-gpecomp  dev/  test/  mcp/
 tests/   c/  python/     (unit tests: pure logic, no engine/assets. See tests/README.md)
 README.md  TODOS.md  CLAUDE.md  .gitattributes  .gitignore
 bin/     (build outputs, gitignored)
 ```
-`gp2xshm.h` is the shm contract (RGB565 framebuffer + button bitmap + audio ring + touch),
-shared by the shims, viewer, and engine.
+`gp2xshm.h` is the shm contract (RGB565 framebuffer + button bitmap + audio ring + touch, plus
+the two savestate request bytes), shared by the shims, viewer, and engine. `state_file.c` is the
+savestate container and deliberately has no engine dependency, so it links into the viewer too.
 
 ## Build & run
 
@@ -250,6 +251,36 @@ benchmark from a Windows drive**) are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMEN
   `__try`/`__except`) to survive guest faults without killing the window. See
   `windows-native-build`, `windows-bundle-next`.
 
+
+## Savestates
+
+`host/state_file.{c,h}` is the `.mst` CONTAINER (fixed header, chunk framing, CRCs, miniz) and
+includes no engine header, so it links into the standalone viewer and into a unit test with no
+Unicorn. `host/engine/state.{c,h}` is the capture/restore; each module serialises its own state
+(`devices_state_save`, `syscalls_state_save`, ...) and state.c only orchestrates.
+
+- **Save** = quiesce with `dbg_quiesce` (which, unlike `dbg_pause`, waits for every thread to reach
+  the park point), read everything out, resume. A save never mutates the running machine.
+- **Load** = reuse `engine_reset_and_load`'s teardown verbatim, rebuild the address space from the
+  file **before any uc exists**, then respawn one host thread per saved guest thread. That is what
+  makes stale TCG blocks, the per-thread private kuser pages and blocked host threads non-problems
+  rather than problems: there is no translation cache, `uc_map_all` recreates the pages, and every
+  host thread is already joined. `load_elf` is never called (it cannot reproduce a dynamic title's
+  layout, which is a function of the guest ld.so's mmap history).
+- The CPU travels as a `uc_context` blob **and** an explicit register file. On ARM the blob is a
+  memcpy of `CPUARMState` truncated at `offsetof(cpu_watchpoint)`, so it is pointer-free and
+  transplants into a fresh uc; the explicit list is the audit, and a disagreement is reported.
+- A thread in an indefinite wait (sigsuspend) marks itself `DTH_WAIT` and is counted as quiesced;
+  the SVC restart it needs is written into the FILE (PC backed up one instruction, pre-suspend
+  mask). Rewinding the LIVE guest instead corrupted it ~1 pause in 8. See `savestates`.
+- States live in `<exe_dir>/states/<gamekey>/`, a **sibling** of `saves/` and never inside it: the
+  save overlay is union-mounted into the guest's own `readdir`.
+- `ME_STATE_ABI` is bumped by hand on any layout change; there is no migration code. Identity also
+  hard-refuses on the build fingerprint, because the CPU blob is build-coupled.
+- Diagnostics: `ME_STATE_PAUSE_AFTER_RESTORE` comes back frozen (the only way to observe a restore
+  exactly), `ME_STATE_SKIP=<chunk>` drops chunks on the way in, `ME_TEST_STATE=<secs>[:<cycles>]`
+  stress-cycles save/restore with no viewer. Tests: `tests/c/test_state.c` (container, asset-free),
+  `tools/test/state_selftest.py` (end to end, needs a game).
 ## GPEComp format (offline decompressor)
 GPEComp `.gpe` = a small *dynamically-linked* ARM ELF stub with a `uclpack` container
 appended **after the section-header table** (the stub embeds a copy of the magic in its
