@@ -121,9 +121,27 @@ static void queue_scaled(SDL_AudioDeviceID dev, const uint8_t *src, uint32_t n) 
 static int audio_thread(void *arg) {
     (void)arg;
     SDL_AudioDeviceID adev = 0; int audio_open = 0;
+    /* what the OPEN device is actually playing at, which is not what the shm currently
+       advertises the moment a hot reload swaps the game underneath us. */
+    uint32_t open_freq = 0, open_fmt = 0, open_ch = 0;
     unsigned long long wd_played = 0; Uint32 wd_t = 0, stat_t = 0;
     if (getenv("ME_AUDIODUMP")) g_adump = fopen(getenv("ME_AUDIODUMP"), "wb");
     while (!shm->quit) {
+        /* Reopen when the game changes its mind about the format. Loading another title
+           (File > Open) leaves this device open at the PREVIOUS title's rate, and
+           SDL_QueueAudio does not resample: 22050Hz PCM fed to a 44100Hz device plays at
+           double speed, an octave up, and drains twice as fast as it fills. */
+        if (audio_open && shm->audio_active && shm->audio_freq &&
+            (shm->audio_freq != open_freq || shm->audio_format != open_fmt ||
+             shm->audio_channels != open_ch)) {
+            fprintf(stderr, "viewer: audio format changed %uHz fmt=%04x ch=%u ->"
+                            " %uHz fmt=%04x ch=%u -- reopening\n",
+                    open_freq, open_fmt, open_ch,
+                    shm->audio_freq, shm->audio_format, shm->audio_channels);
+            SDL_CloseAudioDevice(adev); audio_open = 0;
+            /* the watchdog compares fed against the device queue; both restart at zero */
+            g_fed = 0; wd_played = 0; wd_t = 0;
+        }
         if (!audio_open && shm->audio_active && shm->audio_freq) {
             SDL_AudioSpec want, have;
             memset(&want, 0, sizeof(want));
@@ -134,6 +152,8 @@ static int audio_thread(void *arg) {
             want.callback = NULL;                 /* queue (push) mode */
             adev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
             if (adev) { audio_open = 1; SDL_PauseAudioDevice(adev, 0);
+                open_freq = (uint32_t)want.freq; open_fmt = want.format;
+                open_ch = want.channels;
                 fprintf(stderr, "viewer: audio %dHz fmt=%04x ch=%d (queue mode)\n",
                         want.freq, want.format, want.channels); }
             else { fprintf(stderr, "viewer: SDL_OpenAudioDevice failed: %s\n",
@@ -421,7 +441,8 @@ static void prefs_path(char *out, size_t cap) {
 static void prefs_save(void) {
     char p[MAX_PATH]; prefs_path(p, sizeof p);
     FILE *f = fopen(p, "w"); if (!f) return;
-    fprintf(f, "volume=%d\nmute=%d\nconfirm_exit=%d\n", g_view_volume, g_view_mute, g_confirm_exit);
+    fprintf(f, "volume=%d\nmute=%d\nconfirm_exit=%d\nstate_slot=%d\n",
+            g_view_volume, g_view_mute, g_confirm_exit, g_cur_slot);
     fclose(f);
 }
 static void prefs_load(void) {
