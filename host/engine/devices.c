@@ -161,6 +161,8 @@ extern int g_stl_bpp;
    (320 B/row, LUT'd to RGB565). No palette => native RGB565 (640 B/row). See gp2x_mmio_palette. */
 void present_guest(uint32_t g) {
     if (!g_shm || !g) return;
+    if (getenv("ME_GP2X_FLIPLOG")) { static uint32_t last = 0; if (g != last) { last = g;
+        fprintf(stderr, "PRESENT base=%08x (fb0=%08x fb1=%08x)\n", g, g_fb_guest, g_fb_guest2); } }
     int nz = 0; long nzc = 0;   /* nzc: # of non-zero indices this frame (accumulation diag) */
     if (g_device == 2 && g_caanoo_bpp >= 3) {  /* Caanoo 24/32bpp (firmware menu) -> RGB565.
             Pixels are B,G,R[,X] (SDL Rmask=0xff0000). The firmware menu draws 24bpp pixels into the
@@ -358,7 +360,7 @@ void present_active(void) {
        did the last frame look like" is "we do not know", and zeroing makes the first present
        unconditional, which is what a just-restored machine wants. */
     double now = host_now();
-    if (now - g_present_last < 0.008) return;  /* dedupe the OADRL+OADRH pair; allow up to ~100fps */
+    if (now - g_present_last < 0.008) return;  /* rate cap: allow up to ~100fps */
     g_present_last = now;
     if (g_flip_active) {              /* double-buffered: show the flipped-to front buffer only */
         /* Staleness rescue: with no flip signal for >250ms (g_present_stale), check whether the
@@ -394,10 +396,12 @@ void present_active(void) {
 }
 
 /* Payback (a double-buffered title) renders to fb0/fb1 alternately and "flips" by issuing
-   __ARM_NR_cacheflush on the buffer it just finished, with that buffer's base in r3 -- it leaves
-   the MLC OADR register at 0 the whole time, so the OADR write-hook can't tell which buffer is
-   live. The cacheflushed base IS the just-rendered front buffer, so it's the correct present
-   signal: lock the display to it and let the helper thread do the copy (frame-synced). */
+   __ARM_NR_cacheflush on the buffer it just finished, with that buffer's base in r3. The
+   cacheflushed base IS the just-rendered front buffer, so it is a valid present signal in its
+   own right: lock the display to it and let the helper thread do the copy (frame-synced).
+   It agrees with the MLC pair Payback writes alongside it (measured via ME_GP2X_FLIPLOG) --
+   but only because the equality test below rejects anything that is not a real fb base, which
+   is what a half-written OADR/EADR used to look like before mlc_latch_pending existed. */
 void gp2x_cacheflush(uint32_t guest) {
     if (guest != g_fb_guest && guest != g_fb_guest2) return;   /* only an fb flush is a flip */
     g_oadr_driven = 1;                /* stop the async fallback present; we drive it per frame */
@@ -1131,6 +1135,56 @@ static uint32_t mmsp2_off(uint32_t addr) {
             return g_mem[i].phys - 0xC0000000u + (addr - g_mem[i].guest);
     return addr - g_mmsp2_guest;
 }
+/* The MLC scanout bases -- EADR (even field / primary) and OADR (odd field, the page-flip
+   target) -- are 32-bit addresses split across two 16-bit registers, and drivers write them one
+   half at a time. Acting on the first half composes the NEW half with the STALE other one, which
+   lands nowhere near either buffer: Payback double-buffers 0x03101000 / 0x03126800, so a
+   half-written pair reads as 0x03106800 or 0x03121000 -- 35 rows and 64 pixels off, presented as
+   the whole picture rotated horizontally with wraparound on alternate frames. Real MLC address
+   registers latch at vsync rather than per write, so latch here too: track which halves have
+   moved and commit only once the pair is whole. */
+static int    g_mlc_e_half = 0, g_mlc_o_half = 0;   /* bit0 = low half written, bit1 = high */
+static double g_mlc_e_t = 0, g_mlc_o_t = 0;         /* when the first half of the pair arrived */
+
+static void mlc_commit_eadr(uint32_t phys) {
+    uint32_t g;
+    if (getenv("ME_GP2X_FLIPLOG")) fprintf(stderr, "EADR commit phys=%08x\n", phys);
+    /* Route through the async present path (helper + present_active): the game draws in place
+       and never re-writes EADR, so don't gate present on a per-frame flip (g_oadr_driven). */
+    if (phys && phys_to_guest(phys, &g)) g_fb_guest = g;
+    g_mlc_e_half = 0;
+}
+static void mlc_commit_oadr(uint32_t phys) {
+    /* Don't present here: this runs in the guest render thread's write hook; doing the heavy
+       fb copy on it raced (crash entering a level, masked by ME_THREADDUMP's timing). Just
+       record the frame boundary + flip target and let the helper thread present, frame-synced. */
+    g_oadr_driven = 1;
+    uint32_t g; if (phys_to_guest(phys, &g)) { g_flip_active = 1; g_flip_guest = g; }
+    g_frame_ready = 1;
+    g_mlc_o_half = 0;
+}
+/* A driver that writes only ONE half of a pair (because the other never changes) would leave it
+   pending forever. Called from the present path: commit a half still waiting for its partner
+   one frame later, composed from GUEST RAM rather than from the write hook's patched value.
+   That distinction is what makes the deadline safe to fire early: a partner that merely
+   arrived late (Payback's first flip, mid-init) has landed in RAM by now, so the composed
+   address is the real one. Deliberately NOT sticky -- an earlier version latched 'this pair
+   is written solo' on the first timeout, and that one slow init pair then made every later
+   half-write commit immediately, which is the bug this whole latch exists to prevent. */
+void mlc_latch_pending(void) {
+    if (!g_mmsp2_guest || (!g_mlc_e_half && !g_mlc_o_half)) return;
+    double now = host_now();
+    if (g_mlc_e_half && now - g_mlc_e_t > 0.016) {
+        uint16_t *lo = guest_to_host(g_mmsp2_guest + MMSP2_EADRL);
+        uint16_t *hi = guest_to_host(g_mmsp2_guest + MMSP2_EADRH);
+        if (lo && hi) mlc_commit_eadr(((uint32_t)*hi << 16) | *lo); else g_mlc_e_half = 0;
+    }
+    if (g_mlc_o_half && now - g_mlc_o_t > 0.016) {
+        uint16_t *lo = guest_to_host(g_mmsp2_guest + MMSP2_OADRL);
+        uint16_t *hi = guest_to_host(g_mmsp2_guest + MMSP2_OADRH);
+        if (lo && hi) mlc_commit_oadr(((uint32_t)*hi << 16) | *lo); else g_mlc_o_half = 0;
+    }
+}
 void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
                            int size, int64_t value, void *user) {
     (void)type; (void)user;
@@ -1204,10 +1258,10 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
         uc_mem_read(uc, g_mmsp2_guest + MMSP2_EADRH, &hi, 2);
         if (off == MMSP2_EADRL) { lo = value & 0xffff; if (size == 4) hi = (value >> 16) & 0xffff; }
         else hi = value & 0xffff;
-        uint32_t phys = ((uint32_t)hi << 16) | lo, g;
-        /* Route through the async present path (helper + present_active): the game draws in place
-           and never re-writes EADR, so don't gate present on a per-frame flip (g_oadr_driven). */
-        if (phys && phys_to_guest(phys, &g)) g_fb_guest = g;
+        if (!g_mlc_e_half) g_mlc_e_t = host_now();
+        g_mlc_e_half |= (off == MMSP2_EADRL) ? 1 : 2;
+        if (size == 4) g_mlc_e_half = 3;               /* one 32-bit store covers the whole pair */
+        if (g_mlc_e_half == 3) mlc_commit_eadr(((uint32_t)hi << 16) | lo);
         return;
     }
     if (off != MMSP2_OADRL && off != MMSP2_OADRH) {
@@ -1225,17 +1279,17 @@ void mmsp2_write_cb(uc_engine *uc, uc_mem_type type, uint64_t addr,
     if (off == MMSP2_OADRL) { lo = value & 0xffff; if (size == 4) hi = (value >> 16) & 0xffff; }
     else hi = value & 0xffff;
     uint32_t phys = ((uint32_t)hi << 16) | lo;
+    if (!g_mlc_o_half) g_mlc_o_t = host_now();
+    g_mlc_o_half |= (off == MMSP2_OADRL) ? 1 : 2;
+    if (size == 4) g_mlc_o_half = 3;                   /* one 32-bit store covers the whole pair */
     if (getenv("ME_GP2X_FLIPLOG")) {
         uint32_t g = 0; int ok = phys_to_guest(phys, &g);
-        fprintf(stderr, "FLIP off=%04x phys=%08x -> guest=%08x(%s)  fb0=%08x fb1=%08x flipactive=%d\n",
-                off, phys, g, ok ? "ok" : "UNRESOLVED", g_fb_guest, g_fb_guest2, g_flip_active);
+        fprintf(stderr, "FLIP off=%04x phys=%08x -> guest=%08x(%s) %s fb0=%08x fb1=%08x flipactive=%d\n",
+                off, phys, g, ok ? "ok" : "UNRESOLVED",
+                g_mlc_o_half == 3 ? "COMMIT" : "half ",
+                g_fb_guest, g_fb_guest2, g_flip_active);
     } else { static int n = 0; if (n++ < 8) fprintf(stderr, "  MMSP2 flip -> phys=%08x\n", phys); }
-    /* Don't present here: this runs in the guest render thread's write hook; doing the heavy
-       fb copy on it raced (crash entering a level, masked by ME_THREADDUMP's timing). Just
-       record the frame boundary + flip target and let the helper thread present, frame-synced. */
-    g_oadr_driven = 1;
-    uint32_t g; if (phys_to_guest(phys, &g)) { g_flip_active = 1; g_flip_guest = g; }
-    g_frame_ready = 1;
+    if (g_mlc_o_half == 3) mlc_commit_oadr(phys);
 }
 /* Pacing-register spin throttle. Fenix/BennuGD (and some minlib) titles frame-limit by
    busy-polling a timer or the vsync line millions of times a second (EpicFreeFall measured
@@ -1389,6 +1443,7 @@ void devices_reset(void) {
     g_fb_stride = 640; g_fb_bpp = 16; g_fb_xoff = 0;
     g_mlc_rot = 0; g_mlc_rot_w = 240; g_mlc_rot_h = 320; g_mlc_rot_pitch = 0; g_mlc_rot_bypp = 2;
     g_flip_active = 0; g_flip_guest = 0;
+    g_mlc_e_half = 0; g_mlc_o_half = 0; g_mlc_e_t = 0; g_mlc_o_t = 0;
     g_oadr_driven = 0; g_frame_ready = 0;
     g_aud_freq = 44100; g_aud_ch = 2; g_aud_bits = 16;
     g_aud_t0 = 0; g_aud_on = 0;

@@ -203,7 +203,12 @@ benchmark from a Windows drive**) are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMEN
   st_mode@16, st_size@44, st_blksize@52, st_ino@88, sizeof 96. Writing 104 overflows
   `_IO_file_doallocate`'s frame onto saved r5 → null FILE\* → crash. Truncate st_ino to 32
   bits (drvfs huge inodes → EOVERFLOW). See `payback-load-crash-handoff`.
-- `/dev/fb0` + `/dev/fb1` (mmap, 320×240×16): double-buffered. Present whichever buffer
+- `/dev/fb0` + `/dev/fb1` (mmap, 320×240×16): double-buffered. **fb1's synthesized
+  `smem_start` must be PAGE-ALIGNED** (`GP2X_FB1_PHYS`), not simply fb0+0x25800: fbdev mmap
+  hands back the page holding `smem_start`, and every client treats that pointer as pixel 0,
+  which is only right when `smem_start` has no sub-page offset. A 0x800 offset made the guest
+  draw at the mapping base while present read 0x800 in, so fb1 frames came out 3 rows up and
+  64 px left, wrapped (half of Payback's frames). Present whichever buffer
   most recently changed. fbdev ioctls (`FBIOGET_V/FSCREENINFO`, `PAN_DISPLAY`) must report
   a real 320×240 RGB565 geometry or games quit to gp2xmenu.
 - `/dev/mem` mmap @ phys **0xC0000000** = MMSP2 regs:
@@ -214,7 +219,11 @@ benchmark from a Windows drive**) are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMEN
     all active-low. Button bits match `gp2xshm.h` (A=12,B=13,X=14,Y=15,START=8,…).
   - **MLC scanout**: OADR @0x290e/0x2910 (odd, double-buffered flip), EADR @0x2912/0x2914
     (even/primary, single-buffered paeryn-SDL titles draw in place). Watch both. Payback
-    flips via `__ARM_NR_cacheflush` (r3 = drawn buffer), leaving OADR at 0.
+    also flips via `__ARM_NR_cacheflush` (r3 = drawn buffer).
+    Both are 32-bit addresses in **two 16-bit registers, and drivers write one half at a
+    time**: acting on the first half pairs the new half with the stale one, giving a base far
+    from either buffer (Payback: 0x03106800 / 0x03121000 between 0x03101000 and 0x03126800).
+    Latch the pair (`mlc_latch_pending`), like the real vsync-latched registers.
   - **MLC 8-bit palette**: PALLT_A @0x2958 (index) + PALLT_D @0x295a (data, write-only,
     2 halfwords/entry: `(G<<8)|B` then `R`). Value never survives in RAM → capture writes
     to reconstruct the 256-entry palette → 8-bit indexed present (Odonata/Knight Lore).

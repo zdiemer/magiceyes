@@ -258,6 +258,8 @@ static void *helper_thread(void *arg) {
         if (stopped_now) { last_ready = now; g_present_stale = 0; }
 
         pthread_mutex_lock(&g_present_lock);
+        /* commit an MLC address half whose partner never arrived (see mlc_latch_pending) */
+        if (!g_reloading) mlc_latch_pending();
         if (!g_reloading && g_fb_guest) {
             int fresh = (!g_oadr_driven || g_frame_ready);
             if (fresh) { g_frame_ready = 0; last_ready = now; }

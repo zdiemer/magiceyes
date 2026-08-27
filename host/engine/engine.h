@@ -41,10 +41,16 @@
 #define PRAM_BASE   0x02000000u           /* GP2X upper physical RAM (shared 920/940 area) */
 #define PRAM_SIZE   0x02000000u           /* 32MB: phys 0x02000000 .. 0x04000000 */
 /* The GP2X kernel's fbdev memory lives in upper RAM: fb0 at 0x03101000 (also the boot-time MLC
-   scanout address), fb1 the page after (0x25800 = 320*240*2). minlib-style titles hard-code these
+   scanout address), fb1 the page after (0x25800 = 320*240*2, rounded up). minlib titles hard-code these
    and draw via /dev/mem, so fbdev must be backed by pram at the REAL phys (one physical RAM). */
 #define GP2X_FB0_PHYS 0x03101000u
-#define GP2X_FB1_PHYS (GP2X_FB0_PHYS + 320u * 240u * 2u)
+/* fb1 is PAGE-ALIGNED, not simply fb0+0x25800. A real kernel allocates each framebuffer on a
+   page, and every fbdev client relies on it: mmap hands back the page containing smem_start,
+   so a client that treats the mmap pointer as pixel 0 (all of them do) is only correct when
+   smem_start has no sub-page offset. Synthesizing 0x03126800 broke that -- the guest drew at
+   the mapping base while we presented 0x800 further in, so every fb1 frame came out 3 rows up
+   and 64 pixels left, wrapped. Payback alternates fb0/fb1, so half its frames were skewed. */
+#define GP2X_FB1_PHYS ((GP2X_FB0_PHYS + 320u * 240u * 2u + 0xfffu) & ~0xfffu)
 #define ALIGN_DN(x) ((x) & ~(PAGE - 1))
 #define ALIGN_UP(x) (((x) + PAGE - 1) & ~(PAGE - 1))
 
@@ -211,6 +217,7 @@ void present_fb(uint32_t phys);
 int buf_score(uint32_t g);
 uint32_t buf_hash(uint32_t g);
 void present_active(void);
+void mlc_latch_pending(void);   /* commit a half-written MLC scanout address pair */
 void gp2x_cacheflush(uint32_t guest);   /* cacheflush(r3=fb base) -> present that buffer */
 double host_now(void);
 /* The GUEST's clock: host time plus a constant skew, 0 except after a savestate restore. Every
