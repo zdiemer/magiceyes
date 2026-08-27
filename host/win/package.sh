@@ -27,6 +27,26 @@ for f in libSDL-1.2.so.0 libinkadrm.so.0 libdrmcode.so.0; do
   [ -f "$REPO/bin/guest/$f" ] || { echo "no bin/guest/$f (run guest/build_guest.sh)"; exit 1; }
 done
 
+# The bundled runtime is gitignored and staged by hand (stage_release_assets.sh), so nothing
+# relates it to the source it was built from. That is how v0.5.0 shipped a four-month-old runtime.
+# The stamp closes it: if guest/src has moved since the last restage, the staged stubs in this
+# tarball are stale and the zip would go out missing whatever changed. ME_SKIP_ASSET_STAMP=1
+# overrides for a local throwaway build.
+STAMP="$REPO/host/win/release-assets.stamp"
+if [ -z "${ME_SKIP_ASSET_STAMP:-}" ] && [ -f "$STAMP" ]; then
+  want=$(awk '$1=="guest_src"{print $2}' "$STAMP")
+  have=$( cd "$REPO" && find guest/src -type f -print0 | sort -z | xargs -0 sha256sum \
+            | sha256sum | cut -d" " -f1 )
+  if [ -n "$want" ] && [ "$want" != "$have" ]; then
+    echo "guest/src has changed since the staged runtime was built:" >&2
+    echo "  staged from $want" >&2
+    echo "  working tree $have" >&2
+    echo "Rebuild the stubs (guest/build_guest.sh) and restage" >&2
+    echo "(host/win/stage_release_assets.sh), or set ME_SKIP_ASSET_STAMP=1 for a throwaway." >&2
+    exit 1
+  fi
+fi
+
 NAME="magiceyes-$VERSION-win64"
 DIST="$REPO/dist"; STAGE="$DIST/$NAME"
 rm -rf "$STAGE"; mkdir -p "$STAGE"

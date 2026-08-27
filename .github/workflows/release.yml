@@ -43,6 +43,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download release-assets -R "$GITHUB_REPOSITORY" -p release-assets.tar.gz
+          # The prerelease is refreshed by hand and is the one part of the zip that no commit
+          # pins. v0.5.0 shipped a four-month-old runtime that way, and nothing failed. The
+          # stamp pins it: this tag expects exactly the tarball it was staged against.
+          want=$(awk '$1=="tarball_sha256"{print $2}' host/win/release-assets.stamp)
+          have=$(sha256sum release-assets.tar.gz | cut -d" " -f1)
+          if [ -z "$want" ]; then
+            echo "::error::host/win/release-assets.stamp has no tarball_sha256"
+            exit 1
+          fi
+          if [ "$want" != "$have" ]; then
+            echo "::error::release-assets tarball is not the one this tag was staged against (stamp $want, downloaded $have): run host/win/stage_release_assets.sh and commit the stamp"
+            exit 1
+          fi
+          echo "ok: staged runtime matches host/win/release-assets.stamp"
           tar xzf release-assets.tar.gz
           rm -f release-assets.tar.gz
 

@@ -44,9 +44,19 @@ Emulation correctness
 
 Packaging
 
+- The 0.5.0 download was built from a stale copy of the bundled runtime. The device libraries
+  that ship inside the zip were four months old, so 0.5.0 went out without that period's work
+  on the DRM stubs, the GLES and EGL shims, the EABI SDL shim, and two support libraries,
+  even though its notes described those fixes. Nothing warned anyone: the runtime is staged
+  separately from the source and the release job just used whatever had been staged last. The
+  0.5.0 zip was 51MB where it should have been about 112MB, which is the whole tell.
+  0.6.0 is built from the current runtime, so upgrading from 0.5.0 also brings you those
+  fixes, and the release job now refuses to build when the staged runtime does not match the
+  source it was built from.
 - Release builds now apply the complete set of emulator core patches. Built from a clean
   checkout, which is what the release job does, four of them were being skipped, including the
-  fix for the crash on loading a second game on Windows.
+  fix for the crash on loading a second game on Windows. That one affected released binaries
+  only, not local builds.
 
 Testing
 

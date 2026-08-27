@@ -1,0 +1,4 @@
+# Written by host/win/stage_release_assets.sh; commit it with the restage.
+# guest_src is a content hash of guest/src, the sources the staged stubs are built from.
+tarball_sha256 398ea9ac362a1f9eab9d486aa3c118336efb6beb2c296bd62d67670b01c9cc8a
+guest_src 5cf870edd50a8da4d777e202fdfcd2d7bc238ab3cc096c9b82ed9a660e88c5de
