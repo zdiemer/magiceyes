@@ -1,0 +1,14 @@
+# The ordered fork patch set: one "<script>  <commit subject>" per line, blank lines and
+# comments ignored. ORDER MATTERS -- later patches edit files earlier ones touched.
+#
+# Single-sourced on purpose. apply_and_build.sh (developer machine, keeps the fork's git
+# history) and host/win/build_release.sh (fresh clone, CI) both read this file. They used to
+# carry separate hardcoded lists that drifted: build_release.sh applied only the first two, so
+# a release built from a clean checkout shipped a fork with no mingw_vfree (the Windows
+# multi-reload crash fix), no mmap_lock, no fpa_resume and no kuser_cmpxchg.
+smc_freeze.py      gp2x: SMC-freeze in softmmu notdirty/TLB path
+parallel_cflags.py gp2x: CF_PARALLEL for real host atomics (native-threads swp)
+fpa_resume.py      gp2x: resume in place after a handled invalid insn (FPA emulation perf)
+mingw_vfree.py     mingw: qemu_vfree must __mingw_aligned_free, not VirtualFree
+mmap_lock.py       gp2x: real process-global recursive mmap_lock (was a Unicorn no-op)
+kuser_cmpxchg.py   gp2x: kuser_cmpxchg as in-TB host-atomic CAS (atomic-heavy code perf)

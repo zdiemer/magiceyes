@@ -16,8 +16,14 @@ if [ ! -d "$FORK/.git" ]; then
   echo "== cloning Unicorn $UNICORN_TAG -> $FORK =="
   git clone --depth 1 --branch "$UNICORN_TAG" https://github.com/unicorn-engine/unicorn.git "$FORK"
   echo "== applying magiceyes fork patches =="
-  python3 "$REPO/host/engine/fork-patches/smc_freeze.py" "$FORK"
-  python3 "$REPO/host/engine/fork-patches/parallel_cflags.py" "$FORK"
+  # patches.list is the single source of truth, shared with fork-patches/apply_and_build.sh.
+  # This used to be a hardcoded pair and silently fell four patches behind it, so a release
+  # built from a clean checkout (which is exactly what CI does) had no mingw_vfree and would
+  # crash on a second game load on Windows.
+  while read -r script _subject; do
+    case "$script" in ""|\#*) continue;; esac
+    python3 "$REPO/host/engine/fork-patches/$script" "$FORK"
+  done < "$REPO/host/engine/fork-patches/patches.list"
 fi
 
 # 2. Build the fork as a Windows static lib (skipped when cached).

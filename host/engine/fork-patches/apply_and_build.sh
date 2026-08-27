@@ -24,15 +24,15 @@ git checkout -B magiceyes >/dev/null 2>&1 || true
 BASE=$(git log --format='%H %s' | awk '!/^[0-9a-f]+ (gp2x|mingw):/{print $1; exit}')
 [ -n "$BASE" ] && git reset --hard "$BASE" >/dev/null
 
-# Patch order matters (later patches edit files the earlier ones may have touched). Each .py is
+# The patch set and its order live in patches.list, which host/win/build_release.sh reads too:
+# two hardcoded copies drifted once and shipped a release missing four patches. Each .py is
 # idempotent; commit messages mirror the existing branch so the log stays stable.
-apply() { python3 "$HERE/$1" "$FORK"; git add -A; git commit -q -m "$2" && echo "  committed $1" || true; }
-apply smc_freeze.py     "gp2x: SMC-freeze in softmmu notdirty/TLB path"
-apply parallel_cflags.py "gp2x: CF_PARALLEL for real host atomics (native-threads swp)"
-apply fpa_resume.py     "gp2x: resume in place after a handled invalid insn (FPA emulation perf)"
-apply mingw_vfree.py    "mingw: qemu_vfree must __mingw_aligned_free, not VirtualFree"
-apply mmap_lock.py      "gp2x: real process-global recursive mmap_lock (was a Unicorn no-op)"
-apply kuser_cmpxchg.py  "gp2x: kuser_cmpxchg as in-TB host-atomic CAS (atomic-heavy code perf)"
+while read -r script subject; do
+  case "$script" in ""|\#*) continue;; esac
+  python3 "$HERE/$script" "$FORK"
+  git add -A
+  git commit -q -m "$subject" && echo "  committed $script" || true
+done < "$HERE/patches.list"
 
 echo "== build fork (force re-bundle) =="
 cd "$FORK/build"
