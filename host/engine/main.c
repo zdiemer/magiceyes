@@ -244,6 +244,19 @@ static void *helper_thread(void *arg) {
            point is below this frame, so guarded_present() returns -1 normally and the unlock
            still runs (no leak). */
         double now = host_now();
+        /* The staleness fallback below exists to rescue a title whose GAME stopped flipping. The
+           emulator being deliberately stopped is not that, and letting our own downtime count as
+           staleness is actively harmful: with no flips arriving, present falls to its async path
+           and the auto-pan concludes the flip-locked page is dead, moving the display to the page
+           the game is drawing into. Present then copies a buffer mid-render every frame, which on
+           a title with a scrolling background (Payback) reads as the picture tearing horizontally.
+           Rebase continuously WHILE stopped, so staleness never arms in the first place -- and so
+           a paused emulator simply keeps showing its last frame, which is what it should do.
+           (Pre-existing: a ctl pause on the pre-savestate engine did this too. A savestate merely
+           reaches it more often, because a save has to stop the world.) */
+        int stopped_now = g_reloading || (g_dbg_armed && dbg_stop_pending());
+        if (stopped_now) { last_ready = now; g_present_stale = 0; }
+
         pthread_mutex_lock(&g_present_lock);
         if (!g_reloading && g_fb_guest) {
             int fresh = (!g_oadr_driven || g_frame_ready);
@@ -319,6 +332,44 @@ static void *test_reload_thread(void *arg) {
     return NULL;
 }
 
+
+/* TEMP diagnostic (ME_TEST_STATE=<warm_secs>[:<cycles>]): after warm_secs, save to slot 1 and
+   load it back, `cycles` times, logging each result. Same shape as ME_TEST_RELOAD above, and for
+   the same reason: it drives the real save/restore path with no viewer, no ctl and no keyboard,
+   so it runs on Windows (where the fd and path handling differ) and under ASan on Linux. The
+   restore teardown does up to MAXTH uc_closes, which is exactly the path the fork's mingw_vfree
+   patch exists to make safe, so cycling it is the acceptance test for that too. */
+static void *test_state_thread(void *arg) {
+    (void)arg;
+    const char *spec = getenv("ME_TEST_STATE");
+    double warm = atof(spec);
+    if (warm <= 0) warm = 6.0;
+    int cycles = 1;
+    const char *colon = strchr(spec, ':');
+    if (colon) { cycles = atoi(colon + 1); if (cycles < 1) cycles = 1; }
+    for (int i = 0; i < cycles && !g_shutdown; i++) {
+        for (double t = 0; t < warm && !g_shutdown; t += 0.1) me_usleep(100000);
+        if (g_shutdown) break;
+        char err[192] = {0};
+        double t0 = host_now();
+        if (me_state_save_slot(1, err, sizeof err) != 0) {
+            fprintf(DIAG, "[test-state] cycle %d: SAVE FAILED: %s\n", i + 1, err);
+            continue;
+        }
+        fprintf(DIAG, "[test-state] cycle %d: saved in %.0fms\n", i + 1, (host_now() - t0) * 1000);
+        for (double t = 0; t < 1.5 && !g_shutdown; t += 0.1) me_usleep(100000);
+        uint32_t before = g_state_epoch;
+        if (me_state_load_slot(1, err, sizeof err) != 0) {
+            fprintf(DIAG, "[test-state] cycle %d: LOAD REFUSED: %s\n", i + 1, err);
+            continue;
+        }
+        for (int k = 0; k < 200 && g_state_epoch == before && !g_shutdown; k++) me_usleep(50000);
+        fprintf(DIAG, "[test-state] cycle %d: %s\n", i + 1,
+                g_state_epoch != before ? "restored" : "LOAD NEVER APPLIED");
+    }
+    fprintf(DIAG, "[test-state] done\n");
+    return NULL;
+}
 /* TEMP diagnostic (ME_TEST_FWBOOT=<device>): after a few seconds, drive me_firmware_boot_request
    to reproduce the GUI "Firmware -> Boot" reload path on the console engine (with stderr trace). */
 static void *test_fwboot_thread(void *arg) {
@@ -656,6 +707,7 @@ int main(int argc, char **argv) {
     pthread_t treload; int test_reload = getenv("ME_TEST_RELOAD") != NULL;
     if (test_reload) pthread_create(&treload, NULL, test_reload_thread, NULL);
     pthread_t tfw; if (getenv("ME_TEST_FWBOOT")) pthread_create(&tfw, NULL, test_fwboot_thread, NULL);
+    pthread_t tst; if (getenv("ME_TEST_STATE")) pthread_create(&tst, NULL, test_state_thread, NULL);
 #ifdef ME_BUNDLED
     pthread_t vth; pthread_create(&vth, NULL, viewer_thread, NULL);
 #endif

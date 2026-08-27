@@ -235,9 +235,34 @@ static void cmd_dev_state(struct jw *w) {
     jw_kv_u32(w, "flip_guest", g_flip_guest);
     jw_kv_bool(w, "flip_active", g_flip_active != 0);
     jw_kv_bool(w, "oadr_driven", g_oadr_driven != 0);
+    jw_kv_bool(w, "frame_ready", g_frame_ready != 0);
+    jw_kv_bool(w, "stale", g_present_stale != 0);   /* present fell back to async (unsynced) */
+    /* Present GEOMETRY. Without these a "the picture is in the wrong place" report has nothing to
+       go on: the buffer address can be identical while the stride, the x offset or the mode says
+       something different. */
+    jw_kv_u32(w, "stride", g_fb_stride);
+    jw_kv_i64(w, "bpp", g_fb_bpp);
+    jw_kv_u32(w, "xoff", g_fb_xoff);
+    jw_kv_i64(w, "view_w", g_fbv_w);
+    jw_kv_i64(w, "view_h", g_fbv_h);
+    jw_kv_i64(w, "caanoo_bpp", g_caanoo_bpp);
+    jw_kv_u32(w, "caanoo_pitch", g_caanoo_pitch);
+    jw_kv_i64(w, "mlc_rot", g_mlc_rot);
     jw_raw(w, "}");
     jw_kv_u32(w, "mmsp2_guest", g_mmsp2_guest);
     jw_kv_u32(w, "blit_guest", g_blit_guest);
+    /* The /dev/mem windows, which is how a physical scanout address becomes a guest one. When the
+       picture is in the wrong place this is usually the reason: present resolves the flip target
+       through here, so a phys that lands in the wrong window puts the frame at the wrong base. */
+    jw_key(w, "memmaps"); jw_raw(w, "[");
+    for (int i = 0; i < g_nmem; i++) {
+        jw_comma(w); jw_raw(w, "{");
+        jw_kv_u32(w, "phys", g_mem[i].phys);
+        jw_kv_u32(w, "guest", g_mem[i].guest);
+        jw_kv_u32(w, "len", g_mem[i].len);
+        jw_raw(w, "}");
+    }
+    jw_raw(w, "]");
     jw_key(w, "audio"); jw_raw(w, "{");
     jw_kv_u32(w, "freq", g_aud_freq);
     jw_kv_u32(w, "channels", g_aud_ch);

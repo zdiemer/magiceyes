@@ -186,6 +186,8 @@ extern int g_fb_from_devmem;   /* g_fb_guest is the /dev/mem window over the def
                                   (GP2X_FB0_PHYS), not an fbdev mmap -- an fbdev mmap replaces it */
 extern int g_flip_active; extern uint32_t g_flip_guest;   /* present lock (set by 940 MLC scanout too) */
 extern uint32_t g_fb_stride;   /* present row stride in bytes (gpu940 video buffers are pow2-wide) */
+extern int g_fbv_w, g_fbv_h;   /* fbdev virtual mode (PUT_VSCREENINFO); present publishes at this size */
+extern int g_mlc_rot;          /* Pollux portrait scanout seen -> present un-rotates */
 extern int g_fb_bpp;           /* present source depth: 16 RGB565 (default) or 32 XRGB (gpu940) */
 extern uint32_t g_fb_xoff;     /* x pixel offset into each present row (gpu940 centering) */
 extern uint32_t g_blit_guest;   /* guest base of the 0xe0020000 blitter window */
