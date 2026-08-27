@@ -17,6 +17,19 @@
 #include "gp2xshm.h"
 #include "input_config.h"
 #include "settings_ui.h"
+#include <time.h>       /* the savestate toast reports how old a state is */
+
+/* Savestates. state_file.h is the CONTAINER only (framing, slot paths, the thumbnail probe) and
+   pulls in nothing but stdint, so it is safe on both builds: the standalone viewer's slot picker
+   reads a state's thumbnail through it without linking the engine at all. The me_state_* slot
+   wrappers below are engine entry points and are only called in the single-process bundle, where
+   the viewer runs as an engine thread; elsewhere a request goes through the shm bytes. */
+#include "state_file.h"
+#ifdef ME_BUNDLED
+int  me_state_save_slot(int slot, char *err, size_t ecap);
+int  me_state_load_slot(int slot, char *err, size_t ecap);
+int  me_state_slot_path_for_current(int slot, char *out, size_t cap);
+#endif
 
 #if defined(_WIN32) && defined(ME_BUNDLED)
 /* Native Win32 menu bar (File/View/Audio/Help) on the SDL window. The window proc + SDL's
@@ -41,13 +54,14 @@ void me_log(const char *fmt, ...);
 #define ME_WINMENU 1
 #include "keybind_win.h"   /* native Win32 keybinding editor (replaces the SDL overlay here) */
 #include "paths_win.h"     /* native Win32 storage-folder editor (Settings/Firmware/Cache) */
+#include "state_win.h"     /* native Win32 savestate slot picker */
 #include "paths.h"         /* me_paths_* -- portable storage roots (no engine deps) */
 #endif
 
 /* "an input editor is open" -- pause game input + suppress the SDL overlay's input while either
    the native Win32 keybind window (bundle) or the in-SDL settings overlay (elsewhere) is up. */
 #ifdef ME_WINMENU
-#define EDIT_OPEN() (kbwin_is_open() || paths_win_is_open() || su_is_open(&g_su))
+#define EDIT_OPEN() (kbwin_is_open() || paths_win_is_open() || state_win_is_open() || su_is_open(&g_su))
 #else
 #define EDIT_OPEN() (su_is_open(&g_su))
 #endif
@@ -193,6 +207,146 @@ static void apply_fullscreen(SDL_Window *win, int on) {
 }
 static void toggle_fullscreen(SDL_Window *win) { apply_fullscreen(win, !g_cur_fs); }
 
+/* Forward declarations: these live in the Win32 menu section below, which in turn needs
+   state_request() to be defined first. g_hwnd is the SDL window's HWND, kept at file scope so
+   the slot picker can be opened from the hotkey chain as well as from the menu. */
+#ifdef ME_WINMENU
+static HWND g_hwnd;
+static void prefs_save(void);
+static void state_menu_refresh(void);
+#endif
+
+
+/* ---- on-screen toast -------------------------------------------------------------
+ * The window title already carries PERSISTENT status ([REC]/[REPLAY]); this is for the other
+ * kind: something the user must see once and then forget. A savestate confirmation has to be
+ * transient and unmissable, and the title bar is neither, besides being invisible in fullscreen.
+ * font8x8 and filled rects, which is exactly what settings_ui.c draws with, so no new dependency.
+ */
+static char   g_toast[128];
+static Uint32 g_toast_t0 = 0;         /* SDL_GetTicks() when posted; 0 = nothing showing */
+static Uint32 g_toast_ms = 0;
+static int    g_toast_err = 0;
+#define TOAST_MS      1900
+#define TOAST_ERR_MS  3600
+
+static void toast(int err, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(g_toast, sizeof g_toast, fmt, ap);
+    va_end(ap);
+    g_toast_err = err;
+    g_toast_ms = err ? TOAST_ERR_MS : TOAST_MS;
+    g_toast_t0 = SDL_GetTicks();
+    if (!g_toast_t0) g_toast_t0 = 1;   /* 0 means "none", so never land on it */
+}
+
+static int toast_live(void) {
+    if (!g_toast_t0) return 0;
+    if (SDL_GetTicks() - g_toast_t0 >= g_toast_ms) { g_toast_t0 = 0; return 0; }
+    return 1;
+}
+
+/* Draw over the frame, in GUEST pixel coordinates: the renderer's logical size is the guest
+   screen, so a fixed pixel size here scales with the window like everything else. */
+static void toast_render(SDL_Renderer *ren, int vw, int vh) {
+    if (!toast_live()) return;
+    Uint32 age = SDL_GetTicks() - g_toast_t0;
+    int fade = (g_toast_ms - age) < 400 ? (int)((g_toast_ms - age) * 255 / 400) : 255;
+    int px = vw >= 480 ? 2 : 1;                       /* one font pixel -> px guest pixels */
+    int tw = (int)strlen(g_toast) * 8 * px, th = 8 * px;
+    int pad = 4 * px;
+    int x = (vw - tw) / 2, y = vh - th - pad * 3;
+    if (x < pad) x = pad;
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, (Uint8)(fade * 3 / 4));
+    SDL_Rect bg = { x - pad, y - pad, tw + pad * 2, th + pad * 2 };
+    SDL_RenderFillRect(ren, &bg);
+    SDL_Color c = g_toast_err ? (SDL_Color){ 235, 90, 80, (Uint8)fade }
+                             : (SDL_Color){ 235, 235, 235, (Uint8)fade };
+    su_draw_text(ren, x, y, px, c, g_toast);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+}
+
+/* ---- savestate requests ----------------------------------------------------------
+ * In the bundle the viewer IS an engine thread, so it calls straight through. In the
+ * two-process build it posts the request in the shm bytes reserved for it and the engine's
+ * helper thread picks it up (see me_state_poll_request). The asymmetry is honest: the bundle
+ * gets the engine's own reason string back, the two-process build gets a generic message,
+ * because there is nowhere in the shm ABI to put a sentence and inventing somewhere would move
+ * pixels[] and break every un-rebuilt guest shim.
+ */
+#define ME_STATE_REQ_SAVE 1
+#define ME_STATE_REQ_LOAD 2
+
+static int g_cur_slot = 1;            /* the slot F6/F7 cycle and Shift+F5 writes to */
+
+static void state_request(int op, int slot) {
+    char err[192] = {0};
+#ifdef ME_BUNDLED
+    const char *name = me_state_slot_name(slot);
+    int rc = (op == ME_STATE_REQ_SAVE) ? me_state_save_slot(slot, err, sizeof err)
+                                       : me_state_load_slot(slot, err, sizeof err);
+    if (rc != 0) {
+        toast(1, "%s failed: %s", op == ME_STATE_REQ_SAVE ? "Save" : "Load", err);
+        return;
+    }
+    if (op == ME_STATE_REQ_SAVE) {
+        toast(0, slot == ME_STATE_SLOT_QUICK ? "Quicksaved" : "Saved to slot %s", name);
+#ifdef ME_WINMENU
+        state_menu_refresh();       /* a filled slot stops being greyed out */
+#endif
+    } else {
+        /* The load is queued to the engine main loop, so say so rather than claiming it is
+           already done. How OLD the state is matters more than anything else here: loading the
+           wrong one is the commonest savestate mistake. */
+        char path[1024], age[64] = {0};
+        if (me_state_slot_path_for_current(slot, path, sizeof path) == 0) {
+            struct mst_info info;
+            if (mst_probe(path, &info, NULL, NULL, NULL, NULL) == MST_OK) {
+                long long secs = (long long)time(NULL) - (long long)info.save_time;
+                if (secs < 0) secs = 0;
+                if (secs < 90)          snprintf(age, sizeof age, "  (%llds ago)", secs);
+                else if (secs < 5400)   snprintf(age, sizeof age, "  (%lldm ago)", secs / 60);
+                else                    snprintf(age, sizeof age, "  (%lldh ago)", secs / 3600);
+            }
+        }
+        toast(0, slot == ME_STATE_SLOT_QUICK ? "Loading quicksave%s" : "Loading slot %s%s",
+              slot == ME_STATE_SLOT_QUICK ? age : name, slot == ME_STATE_SLOT_QUICK ? "" : age);
+    }
+#else
+    if (!shm) return;
+    if (shm->state_req) { toast(1, "Busy"); return; }
+    shm->state_slot = (uint8_t)slot;      /* slot FIRST: state_req is the publish point */
+    shm->state_req  = (uint8_t)op;
+    toast(0, op == ME_STATE_REQ_SAVE ? "Saving slot %s..." : "Loading slot %s...",
+          me_state_slot_name(slot));
+    (void)err;
+#endif
+}
+
+static void state_cycle_slot(int d) {
+    g_cur_slot += d;
+    if (g_cur_slot < 1) g_cur_slot = ME_STATE_NSLOTS;
+    if (g_cur_slot > ME_STATE_NSLOTS) g_cur_slot = 1;
+#ifdef ME_WINMENU
+    prefs_save();               /* the chosen slot survives a restart */
+    state_menu_refresh();
+#endif
+    toast(0, "Slot %d selected", g_cur_slot);
+}
+
+/* The picker calls back into state_request so it and the hotkeys take exactly one path. */
+static void state_picker_save(int slot) { state_request(ME_STATE_REQ_SAVE, slot); }
+static void state_picker_load(int slot) { state_request(ME_STATE_REQ_LOAD, slot); }
+
+static void state_picker_open(void) {
+#ifdef ME_WINMENU
+    state_win_open(g_hwnd, g_cur_slot, state_picker_save, state_picker_load);
+#else
+    /* No native toolkit here, so the picker is a page of the in-SDL overlay. */
+    su_open_page(&g_su, (int)(shm ? shm->device : 0), SU_PAGE_STATES);
+#endif
+}
 #ifdef ME_WINMENU
 /* ---- Win32 menu bar (bundle only: File->Open hot-reloads via the in-process engine) ---- */
 enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
@@ -201,6 +355,8 @@ enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
        IDM_RECORD = 1035,
        IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200,
        IDM_PATHS = 1050,
+       IDM_STATE_SAVE = 1060, IDM_STATE_LOAD, IDM_STATE_SAVESLOT, IDM_STATE_PICKER,
+       IDM_STATE_SLOT0 = 1070,   /* .. IDM_STATE_SLOT0 + ME_STATE_NSLOTS */
        IDM_RECENT0 = 1100 };
 #define MAX_RECENT 8
 static HMENU g_recentmenu;
@@ -278,6 +434,9 @@ static void prefs_load(void) {
         if (!strcmp(line, "volume"))            { if (v < 0) v = 0; if (v > 100) v = 100; g_view_volume = v; }
         else if (!strcmp(line, "mute"))         g_view_mute = !!v;
         else if (!strcmp(line, "confirm_exit")) g_confirm_exit = !!v;
+        /* The chosen savestate slot is a UI cursor, not save data -- one global setting, so
+           F6/F7 and Shift+F5 behave the same way whichever game is loaded. */
+        else if (!strcmp(line, "state_slot"))   { if (v >= 1 && v <= ME_STATE_NSLOTS) g_cur_slot = v; }
     }
     fclose(f);
 }
@@ -357,6 +516,46 @@ static int request_exit(HWND hwnd) { return g_confirm_exit ? confirm_exit_dialog
 /* a device is "installed" if its staged gp2xmenu exists */
 static int fw_installed(const char *dev) { char r[1024], m[1024]; return me_firmware_paths(dev, r, m, sizeof r); }
 
+/* The State menu's own handles, so a save or a slot change can refresh it in place. A whole
+   rebuild via build_menu() would work too, but it also reloads the recent list and the games
+   folder, which is a lot of work for "slot 3 is no longer empty". */
+static HMENU g_statemenu, g_slotmenu;
+
+static int slot_has_state(int slot) {
+    char path[1024];
+    if (me_state_slot_path_for_current(slot, path, sizeof path) != 0) return 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/* Grey what cannot be done, and name the slot Shift+F5 would write to. Same idea as
+   fw_installed() greying the un-installed firmware entries. */
+static void state_menu_refresh(void) {
+    if (!g_statemenu) return;
+    int have_game = g_last_game[0] != 0;
+    char label[64];
+    snprintf(label, sizeof label, "&Save to Slot %d\tShift+F5", g_cur_slot);
+    ModifyMenuA(g_statemenu, IDM_STATE_SAVESLOT, MF_BYCOMMAND | MF_STRING, IDM_STATE_SAVESLOT, label);
+    EnableMenuItem(g_statemenu, IDM_STATE_SAVE, MF_BYCOMMAND | (have_game ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(g_statemenu, IDM_STATE_SAVESLOT, MF_BYCOMMAND | (have_game ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(g_statemenu, IDM_STATE_LOAD, MF_BYCOMMAND |
+                   ((have_game && slot_has_state(ME_STATE_SLOT_QUICK)) ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(g_statemenu, IDM_STATE_PICKER, MF_BYCOMMAND | (have_game ? MF_ENABLED : MF_GRAYED));
+    if (g_slotmenu) {
+        for (int s = 1; s <= ME_STATE_NSLOTS; s++) {
+            char t[32];
+            snprintf(t, sizeof t, "Slot &%d%s", s, slot_has_state(s) ? "" : "\t(empty)");
+            ModifyMenuA(g_slotmenu, IDM_STATE_SLOT0 + s, MF_BYCOMMAND | MF_STRING,
+                        IDM_STATE_SLOT0 + s, t);
+        }
+        CheckMenuRadioItem(g_slotmenu, IDM_STATE_SLOT0 + 1, IDM_STATE_SLOT0 + ME_STATE_NSLOTS,
+                           IDM_STATE_SLOT0 + g_cur_slot, MF_BYCOMMAND);
+    }
+    DrawMenuBar(g_hwnd);
+}
+
 static void build_menu(HWND hwnd) {
     HMENU bar = CreateMenu(), file = CreatePopupMenu();
     AppendMenuA(file, MF_STRING, IDM_OPEN, "&Open...\tCtrl+O");
@@ -379,6 +578,24 @@ static void build_menu(HWND hwnd) {
     AppendMenuA(video, MF_SEPARATOR, 0, NULL);
     AppendMenuA(video, MF_STRING, IDM_RECORD, "&Record input\tF9");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)video, "&Video");
+    /* State gets its own top-level menu rather than a corner of File. The bar is organised by
+       subsystem (Input is a single item and still earned a popup), and these four verbs plus a
+       ten-entry slot submenu would make File the only oversized menu -- with "Quick Save" sitting
+       next to Open Recent and Exit, which are about the application, not the running game. */
+    g_statemenu = CreatePopupMenu();
+    AppendMenuA(g_statemenu, MF_STRING, IDM_STATE_SAVE, "&Quick Save\tF5");
+    AppendMenuA(g_statemenu, MF_STRING, IDM_STATE_LOAD, "Quick &Load\tF8");
+    AppendMenuA(g_statemenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(g_statemenu, MF_STRING, IDM_STATE_SAVESLOT, "&Save to Slot 1\tShift+F5");
+    g_slotmenu = CreatePopupMenu();
+    for (int s = 1; s <= ME_STATE_NSLOTS; s++) {
+        char t[32]; snprintf(t, sizeof t, "Slot &%d", s);
+        AppendMenuA(g_slotmenu, MF_STRING, IDM_STATE_SLOT0 + s, t);
+    }
+    AppendMenuA(g_statemenu, MF_POPUP, (UINT_PTR)g_slotmenu, "&Current Slot");
+    AppendMenuA(g_statemenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(g_statemenu, MF_STRING, IDM_STATE_PICKER, "&Manage States...\tF4");
+    AppendMenuA(bar, MF_POPUP, (UINT_PTR)g_statemenu, "&State");
     HMENU fw = CreatePopupMenu();
     AppendMenuA(fw, MF_STRING, IDM_FW_INSTALL, "&Install firmware...");
     AppendMenuA(fw, MF_SEPARATOR, 0, NULL);
@@ -396,6 +613,7 @@ static void build_menu(HWND hwnd) {
     recent_load(); recent_rebuild_menu();
     games_load();
     SetMenu(hwnd, bar);
+    state_menu_refresh();   /* grey what is not available yet */
 }
 static void start_game(const char *path) {
     char bin[MAX_PATH * 2];
@@ -495,6 +713,10 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_FW_F100:    boot_firmware(hwnd, "f100"); break;
     case IDM_FW_F200:    boot_firmware(hwnd, "f200"); break;
     case IDM_PATHS:      paths_win_open(hwnd); break;
+    case IDM_STATE_SAVE:     state_request(ME_STATE_REQ_SAVE, ME_STATE_SLOT_QUICK); break;
+    case IDM_STATE_LOAD:     state_request(ME_STATE_REQ_LOAD, ME_STATE_SLOT_QUICK); break;
+    case IDM_STATE_SAVESLOT: state_request(ME_STATE_REQ_SAVE, g_cur_slot); break;
+    case IDM_STATE_PICKER:   state_picker_open(); break;
     case IDM_ABOUT:
         MessageBoxA(hwnd,
                     "magiceyes"
@@ -506,7 +728,12 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
                     "github.com/zdiemer/magiceyes",
                     "About magiceyes", MB_OK); break;
     default:
-        if (id >= IDM_RECENT0 && id < IDM_RECENT0 + MAX_RECENT) {
+        if (id > IDM_STATE_SLOT0 && id <= IDM_STATE_SLOT0 + ME_STATE_NSLOTS) {
+            g_cur_slot = id - IDM_STATE_SLOT0;
+            prefs_save();
+            state_menu_refresh();
+            toast(0, "Slot %d selected", g_cur_slot);
+        } else if (id >= IDM_RECENT0 && id < IDM_RECENT0 + MAX_RECENT) {
             int i = id - IDM_RECENT0; if (i < g_nrecent) start_game(g_recent[i]);
         }
     }
@@ -741,6 +968,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
 #ifdef ME_WINMENU
     SDL_SysWMinfo wmi; SDL_VERSION(&wmi.version); HWND hwnd = NULL;
     if (SDL_GetWindowWMInfo(win, &wmi)) hwnd = wmi.info.win.window;
+    g_hwnd = hwnd;
     if (hwnd) {
         build_menu(hwnd);
         if (!fullscreen) SDL_SetWindowSize(win, w * scale, h * scale);  /* regrow past the menu bar */
@@ -762,6 +990,8 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
 #endif
     ic_load(&g_ic);
     su_init(&g_su, &g_ic);
+    /* the States page posts through the same request path the hotkeys use */
+    su_set_state_hooks(&g_su, state_picker_save, state_picker_load);
     for (int i = 0; i < SDL_NumJoysticks() && g_npads < ME_MAXPADS; i++)
         if (SDL_IsGameController(i)) { SDL_GameController *c = SDL_GameControllerOpen(i);
             if (c) g_pads[g_npads++] = c; }
@@ -834,6 +1064,21 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
                     toggle_fullscreen(win);
                 else if (kc == SDLK_F12) save_screenshot(cur_w, cur_h);
                 else if (kc == SDLK_F9) input_record_toggle();   /* start/stop input recording */
+                /* Savestates. !e.key.repeat matters here in a way it does not for F9/F12: SDL
+                   delivers auto-repeat as further KEYDOWNs, and a held F5 would otherwise fire a
+                   whole-machine save every few milliseconds. EDIT_OPEN() keeps them from firing
+                   while a settings window has the keyboard. */
+                else if (!e.key.repeat && !EDIT_OPEN() && kc == SDLK_F5)
+                    state_request(ME_STATE_REQ_SAVE,
+                                  (mod & KMOD_SHIFT) ? g_cur_slot : ME_STATE_SLOT_QUICK);
+                else if (!e.key.repeat && !EDIT_OPEN() && kc == SDLK_F8)
+                    state_request(ME_STATE_REQ_LOAD,
+                                  (mod & KMOD_SHIFT) ? g_cur_slot : ME_STATE_SLOT_QUICK);
+                else if (!e.key.repeat && !EDIT_OPEN() && kc == SDLK_F6) state_cycle_slot(-1);
+                else if (!e.key.repeat && !EDIT_OPEN() && kc == SDLK_F7) state_cycle_slot(+1);
+                /* F4 opens the slot picker; the ALT guard leaves Alt+F4 alone to close the window. */
+                else if (!e.key.repeat && !EDIT_OPEN() && kc == SDLK_F4 && !(mod & KMOD_ALT))
+                    state_picker_open();
 #ifdef ME_WINMENU
                 else if (kc == SDLK_o && (mod & KMOD_CTRL) && hwnd) do_open_dialog(hwnd);
 #endif
@@ -956,6 +1201,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
                              SDL_RenderClear(ren); SDL_RenderCopy(ren, tex, NULL, NULL); }
             else SDL_RenderClear(ren);
             su_render(&g_su, ren, cur_w > 0 ? cur_w : g_base_w, cur_h > 0 ? cur_h : g_base_h);
+            toast_render(ren, cur_w > 0 ? cur_w : g_base_w, cur_h > 0 ? cur_h : g_base_h);
             SDL_RenderPresent(ren);
             last_seq = shm->frame_seq;
             SDL_Delay(16);
@@ -965,6 +1211,7 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
             int e1 = SDL_UpdateTexture(tex, NULL, shm->pixels, GP2XSHM_MAXW * 2);
             int e2 = SDL_RenderClear(ren);
             int e3 = SDL_RenderCopy(ren, tex, NULL, NULL);
+            toast_render(ren, cur_w, cur_h);
             SDL_RenderPresent(ren);
             /* ME_AUTOSHOT=N: save the actual shm framebuffer to screenshots/ after N seconds, once.
                Captures the engine's real output regardless of window occlusion (a screen-grab of a
@@ -987,6 +1234,17 @@ int viewer_run(gp2x_shm_t *shm_in, int scale, int fullscreen, int mute, int volu
             /* no game has presented yet -> paint black so the window doesn't show its
                uninitialised backbuffer (the white strip); stop once a game renders. */
             SDL_RenderClear(ren);
+            toast_render(ren, g_base_w, g_base_h);
+            SDL_RenderPresent(ren);
+            SDL_Delay(16);
+        } else if (toast_live()) {
+            /* A toast has to keep animating even when the game has stopped producing frames --
+               which is precisely the moment after a load is requested. Re-present the last frame
+               with the message over it rather than sitting in the idle branch. */
+            if (cur_w > 0) { SDL_UpdateTexture(tex, NULL, shm->pixels, GP2XSHM_MAXW * 2);
+                             SDL_RenderClear(ren); SDL_RenderCopy(ren, tex, NULL, NULL); }
+            else SDL_RenderClear(ren);
+            toast_render(ren, cur_w > 0 ? cur_w : g_base_w, cur_h > 0 ? cur_h : g_base_h);
             SDL_RenderPresent(ren);
             SDL_Delay(16);
         } else {
