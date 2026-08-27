@@ -200,13 +200,18 @@ int me_rootfs_select(const char *interp) {
    -> ABI breakage. */
 static int caanoo_font_overlay(const char *guest, char *out, size_t cap) {
     if (strncmp(guest, "/usr/gp2x/", 10)) return 0;
-    if (g_device == 1) {
+    if (g_device != 2) {
         /* Wiz QType4 titles (Propis) open the same GPH fonts, sometimes by the unversioned
            name (HYUni_GPH_B.ttf) the Wiz firmware never shipped. Serve *.ttf only: anything
-           else under /usr/gp2x (gp2xmenu!) must keep resolving from the Wiz rootfs. */
+           else under /usr/gp2x (gp2xmenu!) must keep resolving from the rootfs.
+           Not gated on device 1 any more. The bundle stopped shipping a second copy of these
+           fonts inside rootfs-eabi, so this overlay is now the ONLY thing that resolves them,
+           and a title whose device we guessed wrong (ambiguous headers default to GP2X) would
+           otherwise silently lose its text. Serving a .ttf we have costs nothing when the
+           title never asked for a GPH font. */
         size_t n = strlen(guest);
         if (n < 4 || strcasecmp(guest + n - 4, ".ttf")) return 0;
-    } else if (g_device != 2) return 0;
+    }
     char hp[PATH_MAX], wr[PATH_MAX]; struct stat s;
     /* 1. an installed Caanoo firmware (e.g. the user booted the firmware menu) wins. */
     if (me_writable_root(wr, sizeof wr)) {
@@ -233,10 +238,31 @@ static int caanoo_font_overlay(const char *guest, char *out, size_t cap) {
     }
     return 0;
 }
+/* Runtime data that is byte-identical in both rootfs trees and big enough that shipping it
+   twice dominated the download: the timidity patch set is 32MB, and rootfs-eabi and
+   rootfs-win each carried its own copy, so the release zip paid for it twice. The bundle now
+   ships one copy in shared/ and this resolves it ahead of the rootfs, the same shape as
+   caanoo_font_overlay above. Falls through when shared/ has no such file, so a development
+   tree that still keeps the files inside each rootfs behaves exactly as before. */
+static int shared_asset_overlay(const char *guest, char *out, size_t cap) {
+    if (strncmp(guest, "/usr/share/midi/", 16)) return 0;
+    const char *bases[2]; int nb = 0;
+    if (g_exe_dir[0]) bases[nb++] = g_exe_dir;
+    bases[nb++] = ".";
+    const char *pfx[] = { "shared", "assets/shared", "../assets/shared" };
+    char hp[PATH_MAX]; struct stat s;
+    for (int i = 0; i < nb; i++)
+        for (int p = 0; p < (int)(sizeof pfx / sizeof pfx[0]); p++) {
+            snprintf(hp, sizeof hp, "%s/%s%s", bases[i], pfx[p], guest);
+            if (stat(hp, &s) == 0) { snprintf(out, cap, "%s", hp); return 1; }
+        }
+    return 0;
+}
 int me_rootfs_resolve(const char *guest, char *out, size_t cap) {
     me_rootfs_init();
     if (g_rootfs_ok != 1 || !guest || guest[0] != '/') return 0;
     if (caanoo_font_overlay(guest, out, cap)) return 1;   /* firmware font data, before g_rootfs */
+    if (shared_asset_overlay(guest, out, cap)) return 1;  /* one copy for both rootfs trees */
     /* Skip the loader cache/preload so ld.so falls back to the LD_LIBRARY_PATH (/lib:/usr/lib)
        search -- the cache could pin a host-unreadable symlink name; the default search finds
        our deref'd libs (and the shim shadowing libSDL). */

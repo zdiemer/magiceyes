@@ -66,6 +66,32 @@ mkdir -p "$STAGE/overlay-oabi"
 cp "$REPO/bin/guest/libSDL-1.2.so.0" "$REPO/bin/guest/libinkadrm.so.0" \
    "$REPO/bin/guest/libdrmcode.so.0" "$STAGE/overlay-oabi/"
 
+# Both rootfs trees carry a byte-identical 32MB timidity patch set, and a zip cannot share a
+# file between two paths, so the download paid for it twice. Ship one copy under shared/ and
+# let shared_asset_overlay (syscalls.c) resolve /usr/share/midi for whichever rootfs a title
+# runs under. Refuse rather than guess if the two ever stop matching.
+EABI_MIDI="$STAGE/rootfs-eabi/usr/share/midi"
+WIN_MIDI="$STAGE/rootfs-win/usr/share/midi"
+if [ -d "$EABI_MIDI" ] && [ -d "$WIN_MIDI" ]; then
+  if ! diff -qr "$EABI_MIDI" "$WIN_MIDI" >/dev/null 2>&1; then
+    echo "rootfs-eabi and rootfs-win MIDI trees differ; not safe to share one copy" >&2
+    exit 1
+  fi
+  mkdir -p "$STAGE/shared/usr/share"
+  mv "$WIN_MIDI" "$STAGE/shared/usr/share/midi"
+  rm -rf "$EABI_MIDI"
+  echo "shared MIDI patches ($(du -sh "$STAGE/shared/usr/share/midi" | cut -f1), was in both trees)"
+fi
+
+# The Caanoo system fonts are already served device-scoped from caanoo-fonts/ by
+# caanoo_font_overlay, which runs BEFORE the rootfs lookup, so the copies inside rootfs-eabi
+# are never the ones that resolve. 9MB each, and TTFs barely deflate.
+if [ -d "$STAGE/rootfs-eabi/usr/gp2x" ]; then
+  rm -f "$STAGE/rootfs-eabi/usr/gp2x"/*.ttf
+  rmdir "$STAGE/rootfs-eabi/usr/gp2x" 2>/dev/null || true
+  echo "dropped the duplicate Caanoo fonts from rootfs-eabi (caanoo-fonts/ serves them)"
+fi
+
 cat > "$STAGE/README.txt" <<EOF
 magiceyes $VERSION
 Run Game Park Holdings GP2X / Wiz games on Windows.
