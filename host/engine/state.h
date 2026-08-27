@@ -138,5 +138,6 @@ void me940_state_restore_start(void);   /* bring the core back up on the restore
 /* ---- devices.c helpers the restore path needs -------------------------------- */
 void devices_install_mmio_hooks(uc_engine *u);   /* MMSP2 + blitter windows, per uc */
 void present_reset_heuristics(void);         /* clear present_active's inter-frame guesses */
+void present_uncap(void);                    /* allow one present through the ~60fps rate cap */
 
 #endif /* MAGICEYES_STATE_H */

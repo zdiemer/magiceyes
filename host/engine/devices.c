@@ -1417,6 +1417,13 @@ void devices_reset(void) {
  * restore the honest answer is "we do not know" -- zeroing them makes the first present
  * unconditional, which is exactly what a just-restored machine wants.
  */
+
+/* Drop the ~60fps present rate cap for exactly one frame. A savestate uses this: by capture time
+   every guest thread is parked, so re-presenting produces a frame copied from a buffer nothing is
+   drawing into -- whereas whatever is already sitting in the shm was copied while the game was
+   still running, and can be torn. That matters more for the thumbnail than it does live: a torn
+   frame is one frame in thirty on screen, but it is the still image the slot picker shows. */
+void present_uncap(void) { g_present_last = 0; }
 void present_reset_heuristics(void) {
     g_present_last = 0;
     g_present_hf = g_present_ha = 0;

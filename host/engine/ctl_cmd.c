@@ -718,6 +718,9 @@ static void cmd_state_thumb(const struct jp *req, struct jw *w,
     jw_kv_i64(w, "w", info.thumb_w);
     jw_kv_i64(w, "h", info.thumb_h);
     jw_kv_str(w, "format", "rgb565");
+    /* The transport reads the payload length from the header, so it has to be stated here --
+       setting *bin alone sends nothing (cmd_frame writes it the same way). */
+    jw_kv_i64(w, "bin", (long long)tlen);
     *bin = thumb; *binlen = tlen; *binown = thumb;
 }
 /* ---- dispatch -------------------------------------------------------------- */

@@ -405,8 +405,13 @@ int me_state_save(const char *path, char *err, size_t ecap) {
     input_state_save(&inpt);
     gl_state_save(&glst);
     me940_state_save(&m940);
+    /* Re-present before grabbing the thumbnail. Whatever is in the shm right now was copied while
+       the game was still running, so present may have caught a buffer mid-draw; every guest thread
+       is parked by this point, so one more present is guaranteed to copy a settled frame. The
+       viewer is blocked on g_present_lock, which we hold, so it sees only the finished result. */
+    present_uncap();
+    guarded_present();
     thumb = make_thumb(&tw, &th);
-
     if (mem_state_index(&mmap_idx) != 0) {
         BIGLOCK_UNLOCK();
         serr(err, ecap, "the guest memory map could not be captured");
