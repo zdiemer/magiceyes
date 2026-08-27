@@ -12,6 +12,9 @@
 *.ini  text eol=lf
 *.txt  text eol=lf
 *.lock text eol=lf
+# read line-by-line by build_release.sh / apply_and_build.sh: a CRLF checkout would put a
+# stray  on every patch filename and the loop would fail to find any of them.
+*.list text eol=lf
 LICENSE        text eol=lf
 .gitignore     text eol=lf
 .gitattributes text eol=lf
