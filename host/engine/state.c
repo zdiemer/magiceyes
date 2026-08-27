@@ -513,7 +513,11 @@ int me_state_save(const char *path, char *err, size_t ecap) {
 done:
     if (w) mst_abort(w);
     if (quiesced && !was_paused) dbg_resume();
-    if (paused_940) me940_resume();
+    /* The 940 follows the 920: a save taken on an ALREADY-paused emulator must leave the
+       whole machine paused, not restart the second core against a frozen 920. Resuming it
+       unconditionally meant a stopped world kept mutating g_pram, so two saves taken back to
+       back with nothing running captured different memory. dbg_resume picks it back up. */
+    if (paused_940 && !was_paused) me940_resume();
     if (held_present) pthread_mutex_unlock(&g_present_lock);
     free(thumb);
     sb_free(&sess); sb_free(&misc); sb_free(&devs); sb_free(&sysc);

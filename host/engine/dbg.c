@@ -1,6 +1,7 @@
 /* Debugger core: stop-the-world pause, single-step, breakpoints, watchpoints. See dbg.h. */
 #include "engine.h"
 #include "dbg.h"
+#include "state.h"   /* me940_resume: an ordinary resume also releases a parked 940 */
 
 #define MAXBP 32
 #define MAXWP 8
@@ -251,6 +252,9 @@ int dbg_quiesce(int timeout_ms, int *parked, int *blocked, int *running) {
 }
 
 void dbg_resume(void) {
+    /* Also releases a 940 parked by a savestate taken while the world was already stopped.
+       A no-op when it is not parked, so an ordinary resume pays nothing for it. */
+    me940_resume();
     pthread_mutex_lock(&g_dbg_lock);
     g_dbg_stop = 0;
     g_last.reason = DBG_NONE;

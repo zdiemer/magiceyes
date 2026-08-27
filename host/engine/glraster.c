@@ -349,17 +349,24 @@ int glsw_state_load(struct scur *c) {
     int w = (int)sc_u32(c), h = (int)sc_u32(c), back = (int)sc_u32(c);
     int have = (int)sc_u32(c);
     if (c->failed || w <= 0 || h <= 0 || w > GP2XSHM_MAXW || h > GP2XSHM_MAXH) return -1;
+    size_t n = (size_t)w * h * 4;
+    if (!have) {
+        /* Nothing was allocated when this state was taken, so do not invent it. Allocating
+           here anyway gave every title that never touches GL -- most of the corpus -- a pair
+           of blank 300KB colour buffers on its first restore, which the NEXT save then wrote
+           out in full. ensure_cbuf() allocates lazily on the first GL call, which is exactly
+           when a title that does use GL gets them. */
+        g_glw = w; g_glh = h; g_back = back & 1; g_glcbuf = g_buf[g_back];
+        return c->failed ? -1 : 0;
+    }
     glsw_resize(w, h);          /* (re)allocates at the saved geometry */
     ensure_cbuf();
-    size_t n = (size_t)w * h * 4;
-    if (have) {
-        if (!g_buf[0] || !g_buf[1]) return -1;
-        if (!sc_bytes(c, g_buf[0], n)) return -1;
-        /* In single-buffer mode both pointers alias one allocation, so the second read would
-           overwrite the first. Consume the bytes either way to keep the cursor aligned. */
-        if (g_buf[1] != g_buf[0]) { if (!sc_bytes(c, g_buf[1], n)) return -1; }
-        else if (!sc_skip(c, n)) return -1;
-    }
+    if (!g_buf[0] || !g_buf[1]) return -1;
+    if (!sc_bytes(c, g_buf[0], n)) return -1;
+    /* In single-buffer mode both pointers alias one allocation, so the second read would
+       overwrite the first. Consume the bytes either way to keep the cursor aligned. */
+    if (g_buf[1] != g_buf[0]) { if (!sc_bytes(c, g_buf[1], n)) return -1; }
+    else if (!sc_skip(c, n)) return -1;
     g_back = back & 1;
     g_glcbuf = g_buf[g_back];
     return c->failed ? -1 : 0;
