@@ -386,6 +386,14 @@ static void *test_fwboot_thread(void *arg) {
 #ifndef ME_VERSION
 #define ME_VERSION "0.2.0-dev"   /* release builds inject the tag via -DME_VERSION (build_bundle_win.sh) */
 #endif
+/* The control channel compiles to nothing in a release bundle (see ctl.c), so neither the
+   flag nor its help line should exist there: a --ctl that silently does nothing is worse
+   than one the binary rejects. Same condition as ctl.c, deliberately. */
+#if defined(ME_BUNDLED) && !defined(ME_DEV)
+#define ME_CTL_USAGE ""
+#else
+#define ME_CTL_USAGE "      --ctl PORT     debug control channel on 127.0.0.1:PORT, 0 = ephemeral (ME_CTL)\n"
+#endif
 static void print_usage(const char *p0) {
     fprintf(stderr,
         "magiceyes - run GP2X/Wiz games on a PC\n"
@@ -406,7 +414,7 @@ static void print_usage(const char *p0) {
         "      --debug        heavy logging: structured run report + fps profiling (ME_DEBUG)\n"
         "      --report P     write the structured run report (JSON) to path P (ME_REPORT)\n"
         "      --run-secs N   run for N seconds then exit cleanly (ME_RUN_SECS; for headless tests)\n"
-        "      --ctl PORT     debug control channel on 127.0.0.1:PORT, 0 = ephemeral (ME_CTL)\n"
+        ME_CTL_USAGE
         "  -h, --help         show this help\n"
         "      --version      show version\n", p0);
 }
@@ -594,7 +602,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--install-firmware"))               { if (++i < argc) fw_install = argv[i]; }
         else if (!strcmp(a, "--report"))                         { if (++i < argc) setenv("ME_REPORT", argv[i], 1); }
         else if (!strcmp(a, "--run-secs"))                       { if (++i < argc) setenv("ME_RUN_SECS", argv[i], 1); }
+#if !defined(ME_BUNDLED) || defined(ME_DEV)
         else if (!strcmp(a, "--ctl"))                            { if (++i < argc) setenv("ME_CTL", argv[i], 1); }
+#endif
         else { fprintf(stderr, "magiceyes: unknown option '%s'\n", a); print_usage(argv[0]); return 2; }
     }
     if (g_view_scale < 1) g_view_scale = 1;
