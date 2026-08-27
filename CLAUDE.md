@@ -248,6 +248,9 @@ benchmark from a Windows drive**) are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMEN
   executable scratch is interleaved with `.text`, so hot data stores trigger false
   full-page TB invalidation (~24k SIGSEGV/s, capped at 6.6fps). After 512 SMC faults on a
   page, stop SMC-protecting it. Reaches full 30fps. `ME_GP2X_NOSMCFREEZE`, `ME_GP2X_SMCLOG`.
+  The table is indexed by `ram_addr_t`, which a fresh uc reuses, so `mem_reset` must clear it
+  (`gp2x_smc_reset`) on every teardown: without that a reload inherited 1366 frozen pages,
+  and a frozen page skips TB invalidation, so real self-modifying code runs stale blocks.
 - **LinuxThreads worker-exit**: glibc `_exit()` issues `exit_group` first. We run threads
   in one group, so a worker's exit_group killed the whole game. Convert a non-main thread's
   exit_group to a single-thread exit.

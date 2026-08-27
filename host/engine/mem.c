@@ -147,10 +147,20 @@ int write_guest(const void *src, uint32_t gaddr, uint32_t len) {
     return 0;
 }
 
+/* The fork's SMC-freeze table (fork-patches/smc_freeze.py) is indexed by ram_addr_t, which
+   a fresh uc allocates from zero again, so its bits would carry from one game into the
+   next: measured 1366 pages still frozen right after a hot reload. A frozen page has its
+   TB invalidation skipped, so an inherited bit means a page that genuinely holds
+   self-modifying code runs stale translations. Clear it wherever the machine is torn
+   down, which is here: both engine_reset_and_load and the savestate restore come through
+   mem_reset with every uc already closed. */
+void gp2x_smc_reset(void);   /* exported from the fork's cputlb.c */
+
 /* Free every guest-RAM host backing (the registry owns it; uc_close only drops the uc's
    view of these uc_mem_map_ptr mappings). Called between games by engine_reset_and_load
    AFTER all worker ucs and the main uc are closed -- nothing maps these pointers anymore. */
 void mem_reset(void) {
+    gp2x_smc_reset();
     REGLOCK_LOCK();
     for (int i = 0; i < g_nreg; i++) if (!g_reg[i].external) munmap(g_reg[i].host, g_reg[i].len);
     g_nreg = 0;

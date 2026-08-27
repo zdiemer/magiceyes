@@ -15,6 +15,9 @@ page_protect. Unicorn is softmmu, so the analog is two spots in cputlb.c:
      writes stop trapping entirely.
 GP2X installs IWRAM code once at startup, so freezing co-located code TBs is safe.
 Env: ME_GP2X_NOSMCFREEZE disables it; ME_GP2X_SMCLOG logs the fault rate / freezes.
+Exports gp2x_smc_reset() so the engine can clear the table when it tears the machine
+down: the index is a ram_addr_t, which a fresh uc reuses, so the bits would otherwise
+carry into the next game.
 
 Usage: python3 smc_freeze.py /path/to/me-unicorn-fork
 """
@@ -84,6 +87,21 @@ static bool gp2x_smc_note_fault(ram_addr_t ra)
         return true;
     }
     return false;
+}
+
+/* Clear the table when the machine is torn down (hot reload, savestate restore).
+ * It is indexed by ram_addr_t, and a fresh uc allocates those from zero again, so
+ * without this the next game inherits the previous one's frozen pages: measured 1366
+ * still frozen immediately after a reload, against 35 newly earned. A frozen page has
+ * its TB invalidation SKIPPED, so an inherited bit means a page that really does hold
+ * self-modifying code silently runs stale translations. Called from mem_reset().
+ * Non-static on purpose: arm.h renames per-target symbols, this one is not in that
+ * list and only the ARM target is built, so the plain name is unique in the archive. */
+void gp2x_smc_reset(void)
+{
+    memset(gp2x_smc_faults, 0, sizeof(gp2x_smc_faults));
+    memset(gp2x_smc_frozen, 0, sizeof(gp2x_smc_frozen));
+    gp2x_smc_total = 0;
 }
 /* -------------------------------------------------------------------------- */
 '''
