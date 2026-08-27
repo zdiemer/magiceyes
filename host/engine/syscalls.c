@@ -1787,20 +1787,6 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
            loader + all workers parked in __pthread_wait_for_restart_signal forever. */
         for (;;) {
             if (!(t->sig_pending & ~t->sig_blocked) && !g_exit) sigsuspend_wait();
-            /* Woken by a stop-the-world with nothing to deliver (debugger pause or a savestate
-               quiesce -- see sigsuspend_wait). An indefinite wait is the one thing that can keep
-               a thread off-CPU past the pause deadline, so bail out to the park point instead:
-               undo the only guest-visible mutation this syscall has made (the suspend mask) and
-               rewind PC to the SVC itself, so intr_cb re-enters the exact same sigsuspend once
-               the world resumes. R0 is deliberately left alone -- it is an argument on the
-               re-execution, not a return value -- which is why the EINTR write is below this. */
-            if (dbg_stop_pending() && !(t->sig_pending & ~t->sig_blocked) && !g_exit) {
-                t->sig_blocked = t->susp_oldmask; t->susp_active = 0;
-                uint32_t cpsr = gread(UC_ARM_REG_CPSR);
-                gwrite(UC_ARM_REG_PC, t->sc_pc - (((cpsr >> 5) & 1) ? 2u : 4u));
-                g_setpc = 1;
-                return 0;
-            }
             gwrite(UC_ARM_REG_R0, (uint32_t)-4 /*EINTR*/);
             deliver_signals();
             if (t->has_sigsave && !entered_in_handler) break;  /* handler frame pushed;

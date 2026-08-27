@@ -208,20 +208,32 @@ static int misc_load(struct scur *c) {
     return c->failed ? -1 : 0;
 }
 
-/* ---- one guest thread --------------------------------------------------------
- * Both the opaque uc_context blob AND an explicit register file travel. The blob is the primary
- * carrier: on ARM it is a memcpy of CPUARMState truncated at cpu_watchpoint (QEMU puts the
- * host-instance fields after that offset, so it is pointer-free by construction) followed by the
- * pmsav7/pmsav8/sau MPU arrays -- which is the only way the ARM946 second core's MPU programming
- * survives at all. The explicit list is the audit: after applying the blob we read the registers
- * back and compare, so a blob that did not transplant cleanly is caught here rather than as a
- * title that mysteriously diverges. */
+/* One guest thread. Both the opaque uc_context blob AND an explicit register file travel. The
+ * blob is the primary carrier: on ARM it is a memcpy of CPUARMState truncated at cpu_watchpoint
+ * (QEMU puts the host-instance fields after that offset, so it is pointer-free by construction)
+ * followed by the pmsav7/pmsav8/sau MPU arrays, which is the only way the ARM946 second core's
+ * MPU programming survives at all. The explicit list is the audit: after applying the blob we
+ * read the registers back and compare, so a blob that did not transplant cleanly is caught here
+ * rather than as a title that mysteriously diverges later.
+ *
+ * `restart` is the other half of the indefinite-wait story (see dbg.h). A thread parked in
+ * sigsuspend is mid-syscall: its PC is past the SVC and R0 still holds the syscall's argument,
+ * not a return value, so resuming it there would drop straight into the guest with a bogus R0
+ * and the SUSPEND mask latched as its resting mask. Rather than mutate the live guest to fix
+ * that (an earlier attempt did, and racing signal delivery corrupted it about one pause in
+ * eight), the FILE records what a restart needs: re-execute the SVC, with the pre-suspend mask.
+ * The running machine is never touched by a save. */
 static void cpu_save(struct sbuf *b, int idx, struct thread *t) {
+    int restart = dbg_thread_waiting(idx);
     sb_u32(b, (uint32_t)idx);
     sb_u32(b, (uint32_t)t->tid); sb_u32(b, (uint32_t)t->ppid); sb_u32(b, (uint32_t)t->state);
     sb_u32(b, t->entry_pc); sb_u32(b, t->sp); sb_u32(b, t->tls); sb_u32(b, t->ctid);
-    sb_u64(b, t->sig_pending); sb_u64(b, t->sig_blocked); sb_u64(b, t->susp_oldmask);
-    sb_u32(b, (uint32_t)t->susp_active); sb_u32(b, (uint32_t)t->has_sigsave);
+    sb_u64(b, t->sig_pending);
+    /* the mask the thread will be resting under once the restarted SVC re-applies the suspend */
+    sb_u64(b, restart ? t->susp_oldmask : t->sig_blocked);
+    sb_u64(b, t->susp_oldmask);
+    sb_u32(b, (uint32_t)(restart ? 0 : t->susp_active));
+    sb_u32(b, (uint32_t)t->has_sigsave);
     for (int i = 0; i < 17; i++) sb_u32(b, t->sigsave[i]);
     sb_u32(b, (uint32_t)t->enoent_streak);
     sb_u32(b, t->last_pc);
@@ -229,6 +241,7 @@ static void cpu_save(struct sbuf *b, int idx, struct thread *t) {
     sb_u32(b, t->fpsr);
     sb_u32(b, t->sc_nr); sb_u32(b, t->sc_pc); sb_u32(b, (uint32_t)t->sc_active);
     for (int i = 0; i < 6; i++) sb_u32(b, t->sc_arg[i]);
+    sb_u32(b, (uint32_t)restart);
     /* explicit register file (the audit copy) */
     for (int i = 0; i < 17; i++) {
         uint32_t v = 0;
@@ -258,6 +271,7 @@ struct cpu_rec {
     double fpa[8];
     uint32_t fpsr, sc_nr, sc_pc, sc_arg[6];
     int sc_active;
+    int restart;            /* re-execute the SVC at regs[15]-width (see cpu_save) */
     uint32_t regs[17];
     uint8_t *ctx; size_t ctxlen;
 };
@@ -276,6 +290,7 @@ static int cpu_load(struct scur *c, struct cpu_rec *r) {
     r->fpsr = sc_u32(c);
     r->sc_nr = sc_u32(c); r->sc_pc = sc_u32(c); r->sc_active = (int)sc_u32(c);
     for (int i = 0; i < 6; i++) r->sc_arg[i] = sc_u32(c);
+    r->restart = (int)sc_u32(c);
     for (int i = 0; i < 17; i++) r->regs[i] = sc_u32(c);
     uint32_t n = sc_u32(c);
     if (c->failed || r->idx < 0 || r->idx >= MAXTH) return -1;
@@ -321,7 +336,12 @@ static void cpu_apply(uc_engine *u, const struct cpu_rec *r) {
    not be, and a silently-dropped T bit is a very confusing crash. */
 static uint32_t entry_pc_for(const struct cpu_rec *r) {
     uint32_t pc = r->regs[15], cpsr = r->regs[16];
-    return (cpsr & (1u << 5)) ? (pc | 1u) : pc;
+    int thumb = (cpsr & (1u << 5)) != 0;
+    /* A thread captured inside an indefinite wait re-executes its SVC: its PC is past the
+       instruction and R0 still holds the argument, so backing up one instruction is exactly a
+       Linux ERESTARTSYS. Width from CPSR.T, not from the ARM-only assumption in intr_cb. */
+    if (r->restart) pc -= thumb ? 2u : 4u;
+    return thumb ? (pc | 1u) : pc;
 }
 
 /* ---- save -------------------------------------------------------------------- */
@@ -573,23 +593,49 @@ static int state_skipping(const char *what) {
     fprintf(DIAG, "state: SKIPPING %s (ME_STATE_SKIP)\n", what);
     return 1;
 }
+/* One chunk, held in memory. Restore reads the WHOLE file before applying any of it, which is
+   not an optimisation but a correctness requirement: syscalls_state_load puts the guest's file
+   descriptors back on their original NUMBERS, and the state file's own descriptor is one of the
+   low numbers the guest owns. Streaming meant the fd restore could relocate the descriptor this
+   very FILE* was reading through, after which every remaining chunk was read out of whichever
+   game asset had just been dup2'd onto that number. That produced exactly the observed symptoms:
+   sometimes a "truncated savestate", sometimes a restore that completed with garbage device and
+   input state and a guest that fell over shortly afterwards. */
+struct chunk { char ty[5]; void *d; size_t n; };
+
 uint32_t engine_restore_state_apply(const char *path) {
     struct mst_info info;
     int e = MST_OK;
     struct mst_r *r = mst_open(path, &info, &e);
     if (!r) { fprintf(DIAG, "state: %s\n", mst_strerror(e)); return 0; }
 
-    struct cpu_rec cpus[MAXTH];
-    int ncpu = 0;
-    memset(cpus, 0, sizeof cpus);
-    uint32_t entry = 0;
-    int failed = 0;
-
+    struct chunk *ch = NULL;
+    int nch = 0, cap = 0, failed = 0;
     for (;;) {
         char ty[5]; void *d = NULL; size_t n = 0;
         int k = mst_next(r, ty, &d, &n);
         if (k < 0) { fprintf(DIAG, "state: %s\n", mst_strerror(k)); failed = 1; break; }
         if (k == 0) break;
+        if (nch == cap) {
+            int ncap = cap ? cap * 2 : 64;
+            struct chunk *nc = realloc(ch, (size_t)ncap * sizeof *nc);
+            if (!nc) { free(d); failed = 1; break; }
+            ch = nc; cap = ncap;
+        }
+        memcpy(ch[nch].ty, ty, 5);
+        ch[nch].d = d; ch[nch].n = n;
+        nch++;
+    }
+    mst_close(r);              /* the file is closed BEFORE anything touches the fd table */
+
+    struct cpu_rec cpus[MAXTH];
+    int ncpu = 0;
+    memset(cpus, 0, sizeof cpus);
+    uint32_t entry = 0;
+
+    for (int i = 0; i < nch && !failed; i++) {
+        const char *ty = ch[i].ty;
+        void *d = ch[i].d; size_t n = ch[i].n;
         struct scur c; sc_init(&c, d, n);
         if      (!strcmp(ty, MST_T_SESS)) failed |= (sess_apply(&c) != 0);
         else if (!strcmp(ty, MST_T_PRAM)) failed |= (mem_state_pram_load(d, n) != 0);
@@ -613,10 +659,9 @@ uint32_t engine_restore_state_apply(const char *path) {
         else if (!strcmp(ty, MST_T_GLST)) { if (!state_skipping("glst")) failed |= (gl_state_load(&c) != 0); }
         else if (!strcmp(ty, MST_T_M940)) { if (!state_skipping("m940")) failed |= (me940_state_load(&c) != 0); }
         /* anything else: an unknown chunk from a future build, skipped by design */
-        free(d);
-        if (failed) break;
     }
-    mst_close(r);
+    for (int i = 0; i < nch; i++) free(ch[i].d);
+    free(ch);
     if (failed) { for (int i = 0; i < ncpu; i++) free(cpus[i].ctx); return 0; }
 
     /* The guest clock, before anything reads it. Every absolute time the guest can see -- TCOUNT,
@@ -681,8 +726,15 @@ uint32_t engine_restore_state_apply(const char *path) {
        file, which would overwrite the restored shared command queue. */
     me940_state_restore_start();
 
-    /* Workers last, and each one fully configured BEFORE its host thread starts: uc_emu_start
-       only overrides PC, so everything else has to be in place first. */
+    /* Workers, in TWO passes, deliberately: build every uc first, then start every thread.
+       Interleaving them (open uc N+1 while thread N is already running) is the same race
+       engine_stop_all_threads documents on the teardown side. uc_open and uc_map_all mutate
+       process-global qemu state, so doing that while another uc is executing TCG corrupts it --
+       and the wider the fan-out the likelier it is, which is why a 3-thread title looked fine
+       and a 7-thread one failed intermittently with corrupted guest data.
+
+       Within pass 1 each thread is also fully configured before it could possibly run:
+       uc_emu_start only overrides PC, so the rest of the register file has to be in place. */
     for (int i = 0; i < ncpu; i++) {
         struct cpu_rec *rc = &cpus[i];
         if (rc->idx == 0) continue;
@@ -691,6 +743,12 @@ uint32_t engine_restore_state_apply(const char *path) {
         t->uc = uc_new_thread();            /* uc_open + uc_map_all (private kuser) + hooks */
         devices_install_mmio_hooks(t->uc);
         cpu_apply(t->uc, rc);
+    }
+    for (int i = 0; i < ncpu; i++) {
+        struct cpu_rec *rc = &cpus[i];
+        if (rc->idx == 0 || rc->state == TH_DEAD) continue;
+        struct thread *t = &g_th[rc->idx];
+        if (!t->uc) continue;
         if (pthread_create(&t->th, NULL, thread_entry, t) != 0) {
             fprintf(DIAG, "state: could not restart guest thread %d\n", t->tid);
             t->state = TH_DEAD; t->th = 0;

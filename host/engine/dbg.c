@@ -5,7 +5,8 @@
 #define MAXBP 32
 #define MAXWP 8
 
-enum { DTH_TCG = 0, DTH_SYSCALL, DTH_PARKED };
+enum { DTH_TCG = 0, DTH_SYSCALL, DTH_PARKED,
+       DTH_WAIT };   /* off-CPU in an indefinite syscall wait: quiesced, but not park-pointed */
 
 volatile int g_dbg_armed = 0;
 
@@ -56,6 +57,9 @@ int dbg_is_paused(void)    { return g_dbg_stop; }
 
 void dbg_enter_tcg(void) { int i = self_idx(); if (i >= 0) g_state[i] = DTH_TCG; }
 void dbg_leave_tcg(void) { int i = self_idx(); if (i >= 0) g_state[i] = DTH_SYSCALL; }
+void dbg_wait_enter(void) { int i = self_idx(); if (i >= 0) g_state[i] = DTH_WAIT; }
+void dbg_wait_exit(void)  { int i = self_idx(); if (i >= 0) g_state[i] = DTH_SYSCALL; }
+int  dbg_thread_waiting(int idx) { return idx >= 0 && idx < MAXTH && g_state[idx] == DTH_WAIT; }
 
 static void note_stop(int reason, int id, uint32_t addr, uint32_t value, uint32_t pc) {
     g_last.reason = reason;
@@ -218,7 +222,9 @@ static int dbg_stop_world(int timeout_ms, int all_parked,
         pthread_mutex_lock(&g_dbg_lock);
         for (int i = 0; i < g_nth; i++) {
             if (!g_th[i].uc || g_th[i].state == TH_DEAD) continue;
-            if      (g_state[i] == DTH_PARKED)  p++;
+            /* DTH_WAIT counts with the parked: the thread is off-CPU in an indefinite wait and
+               its registers are stable, which is all a stop-the-world needs. */
+            if      (g_state[i] == DTH_PARKED || g_state[i] == DTH_WAIT) p++;
             else if (g_state[i] == DTH_SYSCALL) b++;
             else                                r++;
         }

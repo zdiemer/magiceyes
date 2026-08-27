@@ -291,16 +291,21 @@ void sigsuspend_wait(void) {
         (unsigned long long)g_self->sig_blocked);
     pthread_mutex_lock(&g_sigm);
     BIGLOCK_UNLOCK();
-    /* dbg_stop_pending(): a stop-the-world (debugger pause, or a savestate quiesce) must be able
-       to free this thread. engine_wake_sigwaiters() broadcasts, but a broadcast alone does not
-       satisfy this predicate, so the caller loop re-entered the wait and the thread could NEVER
-       reach the park point -- and LinuxThreads parks its workers in exactly this syscall
-       (__pthread_wait_for_restart_signal), so that was most titles. The caller (syscalls.c nr
-       29/72/179) sees the wakeup with nothing deliverable, undoes its entry bookkeeping and
-       rewinds PC to the SVC, so the suspend re-executes on resume -- what Linux does to
-       sigsuspend on a stop signal. */
-    while (!(g_self->sig_pending & ~g_self->sig_blocked) && !g_exit && !dbg_stop_pending())
+    /* Mark the wait rather than interrupt it. sigsuspend is the one blocker here that a
+       broadcast cannot release (waking it does not satisfy its predicate, so the caller loop
+       re-enters), which used to mean a stop-the-world could never converge on a title with a
+       LinuxThreads worker parked in __pthread_wait_for_restart_signal -- i.e. most of them.
+
+       The thread is genuinely off-CPU here and its registers are stable, so a stop-the-world can
+       simply COUNT it as quiesced. An earlier attempt made it rewind PC and restore its mask so
+       it would re-execute the SVC, and that was wrong: mutating live guest CPU state and signal
+       masks from inside a syscall handler races signal delivery, and corrupted the guest about
+       one pause in eight. A savestate gets the restart it needs by writing the rewound PC into
+       the FILE instead (state.c), leaving the running machine untouched. */
+    dbg_wait_enter();
+    while (!(g_self->sig_pending & ~g_self->sig_blocked) && !g_exit)
         pthread_cond_wait(&g_sigc, &g_sigm);   /* g_exit: a teardown woke us to bail out */
+    dbg_wait_exit();
     pthread_mutex_unlock(&g_sigm);
     BIGLOCK_LOCK();
     if (g_siglog) fprintf(stderr, "SIG t%d sigsuspend_wait WAKE pend=%llx\n",

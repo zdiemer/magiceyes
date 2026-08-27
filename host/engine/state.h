@@ -42,7 +42,7 @@
    at an older layout produces a machine that looks restored and is not. Mismatches are refused
    with both numbers named, which is the same line the repo already takes with the content-keyed
    GPEComp cache. */
-#define ME_STATE_ABI 1
+#define ME_STATE_ABI 2
 
 /* Chunk types, in the order they are written. Order matters twice: META and THMB come first so
    mst_probe can stop early for the slot picker, and PRAM precedes MMAP because the aliasing

@@ -45,6 +45,18 @@ struct dbg_stop {
 int  dbg_stop_pending(void);              /* cheap: is a stop requested? */
 void dbg_enter_tcg(void);                 /* intr_cb: returning to guest code */
 void dbg_leave_tcg(void);                 /* intr_cb: entered a syscall */
+/* A guest thread sitting in an INDEFINITE wait inside a syscall marks itself around the wait.
+   In practice that means sigsuspend and only sigsuspend: every other blocker in this engine is
+   either bounded (nanosleep, select, poll, the dsp pacing) or released by a broadcast (futex).
+   sigsuspend is neither, so without this a stop-the-world could never converge on any title with
+   a LinuxThreads worker parked in __pthread_wait_for_restart_signal.
+
+   Such a thread is off-CPU and its registers are stable, so dbg_quiesce counts it as quiesced.
+   It is NOT parked at a park point, so it cannot be single-stepped, and a savestate has to treat
+   it as mid-syscall: see the restart handling in state.c. */
+void dbg_wait_enter(void);
+void dbg_wait_exit(void);
+int  dbg_thread_waiting(int idx);   /* 1 if g_th[idx] is in such a wait */
 /* The park point, called from emu_run (guard.c) when a stop is pending. Blocks until resumed or
    stepped; updates *pc to where execution should re-enter. Returns 1 to continue running, 0 if
    the run should end (exit/shutdown). */
