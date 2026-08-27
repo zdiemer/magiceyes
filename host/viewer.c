@@ -375,7 +375,8 @@ enum { IDM_OPEN = 1001, IDM_RELOAD, IDM_EXIT,
        IDM_RECORD = 1035,
        IDM_FW_INSTALL = 1040, IDM_FW_WIZ, IDM_FW_CAANOO, IDM_FW_F100, IDM_FW_F200,
        IDM_PATHS = 1050,
-       IDM_STATE_SAVE = 1060, IDM_STATE_LOAD, IDM_STATE_SAVESLOT, IDM_STATE_PICKER,
+       IDM_STATE_SAVE = 1060, IDM_STATE_LOAD, IDM_STATE_SAVESLOT, IDM_STATE_LOADSLOT,
+       IDM_STATE_PICKER,
        IDM_STATE_SLOT0 = 1070,   /* .. IDM_STATE_SLOT0 + ME_STATE_NSLOTS */
        IDM_RECENT0 = 1100 };
 #define MAX_RECENT 8
@@ -559,10 +560,14 @@ static void state_menu_refresh(void) {
     char label[64];
     snprintf(label, sizeof label, "&Save to Slot %d\tShift+F5", g_cur_slot);
     ModifyMenuA(g_statemenu, IDM_STATE_SAVESLOT, MF_BYCOMMAND | MF_STRING, IDM_STATE_SAVESLOT, label);
+    snprintf(label, sizeof label, "Load &from Slot %d\tShift+F8", g_cur_slot);
+    ModifyMenuA(g_statemenu, IDM_STATE_LOADSLOT, MF_BYCOMMAND | MF_STRING, IDM_STATE_LOADSLOT, label);
     EnableMenuItem(g_statemenu, IDM_STATE_SAVE, MF_BYCOMMAND | (have_game ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(g_statemenu, IDM_STATE_SAVESLOT, MF_BYCOMMAND | (have_game ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(g_statemenu, IDM_STATE_LOAD, MF_BYCOMMAND |
                    ((have_game && slot_has_state(ME_STATE_SLOT_QUICK)) ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(g_statemenu, IDM_STATE_LOADSLOT, MF_BYCOMMAND |
+                   ((have_game && slot_has_state(g_cur_slot)) ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(g_statemenu, IDM_STATE_PICKER, MF_BYCOMMAND | (have_game ? MF_ENABLED : MF_GRAYED));
     if (g_slotmenu) {
         for (int s = 1; s <= ME_STATE_NSLOTS; s++) {
@@ -608,6 +613,7 @@ static void build_menu(HWND hwnd) {
     AppendMenuA(g_statemenu, MF_STRING, IDM_STATE_LOAD, "Quick &Load\tF8");
     AppendMenuA(g_statemenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(g_statemenu, MF_STRING, IDM_STATE_SAVESLOT, "&Save to Slot 1\tShift+F5");
+    AppendMenuA(g_statemenu, MF_STRING, IDM_STATE_LOADSLOT, "Load &from Slot 1\tShift+F8");
     g_slotmenu = CreatePopupMenu();
     for (int s = 1; s <= ME_STATE_NSLOTS; s++) {
         char t[32]; snprintf(t, sizeof t, "Slot &%d", s);
@@ -737,6 +743,7 @@ static void handle_menu_command(SDL_Window *win, HWND hwnd, int id) {
     case IDM_STATE_SAVE:     state_request(ME_STATE_REQ_SAVE, ME_STATE_SLOT_QUICK); break;
     case IDM_STATE_LOAD:     state_request(ME_STATE_REQ_LOAD, ME_STATE_SLOT_QUICK); break;
     case IDM_STATE_SAVESLOT: state_request(ME_STATE_REQ_SAVE, g_cur_slot); break;
+    case IDM_STATE_LOADSLOT: state_request(ME_STATE_REQ_LOAD, g_cur_slot); break;
     case IDM_STATE_PICKER:   state_picker_open(); break;
     case IDM_ABOUT:
         MessageBoxA(hwnd,

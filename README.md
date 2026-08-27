@@ -83,6 +83,7 @@ magiceyes.exe [options] [game]
 | **Quicksave**  | **F5**                    |
 | **Quickload**  | **F8**                    |
 | Save to slot | Shift+F5 (F6 / F7 pick the slot) |
+| Load from slot | Shift+F8 |
 | Manage saves | F4                        |
 | Quit         | Esc                       |
 
@@ -90,9 +91,9 @@ magiceyes.exe [options] [game]
 ### Savestates
 
 **F5** saves the whole machine where it stands; **F8** puts it back. That is the quick slot; there
-are nine numbered ones as well (**F6**/**F7** pick one, **Shift+F5** saves to it), and **F4** opens
-a picker showing when each was saved and what was on screen at the time. They are also on the
-**State** menu.
+are nine numbered ones as well (**F6**/**F7** pick one, **Shift+F5** saves to it, **Shift+F8**
+loads it back), and **F4** opens a picker showing when each was saved and what was on screen
+at the time. They are also on the **State** menu.
 
 Saves are per game, in `states/<game>/` beside the executable, and they are whole-machine: the
 CPUs, memory, the display and audio hardware state, and the files the game had open. That means
